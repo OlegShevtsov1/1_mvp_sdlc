@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0",
+  "name": "rails-data-model-no-sql",
+  "description": "Skill rails-data-model: a new table is designed as staged ActiveRecord migrations, never SQL, never under db/.",
+  "tags": [
+    "golden"
+  ],
+  "context": {
+    "scaffold_script": "scaffold.sh"
+  },
+  "execution": {
+    "prompt": "/mvp-sdlc:rails-data-model comments Users write comments on posts. A comment belongs to a post and to its author (a user) and has a text body. Comments are soft-deleted with discarded_at like posts; there is no uniqueness rule. All decisions are made: do not ask questions.",
+    "max_turns": 30,
+    "timeout_seconds": 600,
+    "allowed_tools": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Write",
+      "Edit",
+      "Bash",
+      "Skill"
+    ]
+  },
+  "runs": 3,
+  "graders": [
+    {
+      "name": "data-model-written",
+      "type": "file_exists",
+      "path": "docs/features/comments/data-model.md",
+      "exists": true
+    },
+    {
+      "name": "migration-staged",
+      "type": "file_exists",
+      "path": "docs/features/comments/migrations/01_*.rb",
+      "exists": true
+    },
+    {
+      "name": "no-sql-files",
+      "type": "regex",
+      "target": "files",
+      "pattern": "\\.sql$",
+      "flags": "m",
+      "match": "not_contains"
+    },
+    {
+      "name": "nothing-under-db",
+      "type": "regex",
+      "target": "files",
+      "pattern": "^db/",
+      "flags": "m",
+      "match": "not_contains"
+    },
+    {
+      "name": "schema-untouched",
+      "type": "regex",
+      "target": {
+        "source": "file",
+        "path": "db/schema.rb"
+      },
+      "pattern": "comments",
+      "match": "not_contains"
+    }
+  ]
+}

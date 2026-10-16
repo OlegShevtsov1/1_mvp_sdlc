@@ -1,0 +1,7 @@
+node_modules/
+*.log
+
+# A real monitoring MCP config must never be committed here; only the empty
+# placeholder that keeps `archon validate` able to resolve the `monitor` node.
+/.archon/mcp/*
+!/.archon/mcp/monitoring.json

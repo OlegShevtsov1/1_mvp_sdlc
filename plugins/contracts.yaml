@@ -1,0 +1,22 @@
+# Agent tool contract — evals layer 0, enforced by scripts/lint_plugins.py.
+# For every agent of every marketplace plugin, `tools` must equal the agent's frontmatter `tools:` as a set.
+# Agents listed in `read_only` may not have Write, Edit or NotebookEdit (neither here nor in the frontmatter).
+# Only this YAML subset is accepted: `<plugin>:` at column 0; `  tools:`; `    <agent>: [A, B]`;
+# `  read_only: [a, b]`; comments and blank lines.
+sdlc:
+  tools:
+    analyst: [Read, Grep, Glob]
+    critic: [Read, Grep, Glob]
+    devils-advocate: [Read, Grep, Glob]
+    doc-flow: [Read, Grep, Glob, Bash, Write, Edit]
+    explorer: [Read, Grep, Glob, Bash]
+    implementer: [Read, Grep, Glob, Write, Edit, Bash]
+    refactor: [Read, Grep, Glob, Write, Edit, Bash]
+    researcher: [Read, Grep, Glob, WebSearch, WebFetch]
+    reviewer: [Read, Grep, Glob, Bash]
+    strategist: [Read, Grep, Glob]
+    test-author: [Read, Grep, Glob, Write, Edit, Bash]
+  read_only: [analyst, critic, devils-advocate, explorer, reviewer, strategist]
+# mvp-sdlc has no agents; adding one needs a tools entry here.
+mvp-sdlc:
+  tools:

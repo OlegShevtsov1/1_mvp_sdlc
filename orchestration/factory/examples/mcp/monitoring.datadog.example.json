@@ -1,0 +1,7 @@
+{
+  "datadog": {
+    "command": "npx",
+    "args": ["-y", "@winor30/mcp-server-datadog"],
+    "env": { "DATADOG_API_KEY": "$DATADOG_API_KEY", "DATADOG_APP_KEY": "$DATADOG_APP_KEY", "DATADOG_SITE": "datadoghq.com" }
+  }
+}

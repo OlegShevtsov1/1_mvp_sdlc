@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0",
+  "name": "task-brief-split-large",
+  "description": "Skill task-brief and bin/task-brief: a task estimated L gets no brief and its estimate is not edited.",
+  "tags": [
+    "golden"
+  ],
+  "context": {
+    "scaffold_script": "scaffold.sh"
+  },
+  "execution": {
+    "prompt": "Save the factory task text for task T3 of feature demo to brief-T3.md in the repository root. Do not change any other file.",
+    "max_turns": 10,
+    "timeout_seconds": 300,
+    "allowed_tools": [
+      "Bash",
+      "Read",
+      "Write",
+      "Skill"
+    ]
+  },
+  "runs": 3,
+  "graders": [
+    {
+      "name": "no-brief-for-oversized-task",
+      "type": "file_exists",
+      "path": "brief-T3.md",
+      "exists": false
+    },
+    {
+      "name": "estimate-unchanged",
+      "type": "regex",
+      "target": {
+        "source": "file",
+        "path": "docs/features/demo/tasks/tasks.json"
+      },
+      "pattern": "\"estimate\": \"L\"",
+      "match": "contains"
+    }
+  ]
+}

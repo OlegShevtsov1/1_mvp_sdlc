@@ -1,0 +1,12 @@
+diff --git a/bin/task-brief b/bin/task-brief
+index 7882f18..b9fdb42 100755
+--- a/bin/task-brief
++++ b/bin/task-brief
+@@ -122,7 +122,6 @@ def brief(root, slug, task_id):
+     unfinished = [d for d in task.get("deps", []) if by_id.get(d, {}).get("status") != "done"]
+     if unfinished:
+         raise NotReady("task {} depends on unfinished {}".format(task_id, ", ".join(unfinished)))
+-    check_size(task)
+ 
+     acs = task.get("acs") or []
+     prd_text = read(feature / "PRD.md", "{}/PRD.md not found".format(rel))

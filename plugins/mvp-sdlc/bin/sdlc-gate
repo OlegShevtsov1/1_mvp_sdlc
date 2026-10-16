@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""Phase gate: may the feature enter <phase>? Usage: sdlc-gate <phase> [<slug>]
+
+An artifact counts as merged when it is on origin/<base>, the working tree matches it there, and the last commit
+touching it on origin/<base> belongs to a merged pull request (gh api). The gate never fetches; a stale origin ref
+blocks with a hint to run git fetch. On pass it advances state.json forward only (evidence sdlc-gate:<phase>:<sha>).
+Exit 0 pass, 2 blocked or unusable input (every failure is listed on stderr).
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import sdlc_common  # noqa: E402
+
+feature_state = sdlc_common.load_script("scripts/feature-state.py")
+lint_prd = sdlc_common.load_script("scripts/lint-prd.py")
+
+PHASE_STAGE = {
+    "prd": "prd",
+    "architecture": "architecture",
+    "adr": "architecture",
+    "contracts": "contracts",
+    "tasks": "tasks",
+    "ship": "review",
+}
+LARGE_SIZES = {"M", "L", "XL"}
+
+
+class Unusable(Exception):
+    pass
+
+
+def resolve_slug(root, slug, environ):
+    """Explicit slug, else SDLC_FEATURE, else the only feature whose stage is before `shipped`."""
+    if slug is None and environ.get("SDLC_FEATURE"):
+        slug = environ["SDLC_FEATURE"]
+    if slug is not None:
+        if not sdlc_common.valid_slug(slug):
+            raise Unusable("invalid slug {!r}: must match {}".format(slug, sdlc_common.SLUG_RE.pattern))
+        if not sdlc_common.feature_dir(root, slug).is_dir():
+            raise Unusable("no feature {}: {} does not exist".format(slug, sdlc_common.feature_dir(root, slug)))
+        return slug
+    active = []
+    for path in sorted((Path(root) / sdlc_common.FEATURES_DIR).glob("*/state.json")):
+        stage = feature_state.read(root, path.parent.name)["stage"]
+        if sdlc_common.STAGE_RANK[stage] < sdlc_common.STAGE_RANK["shipped"]:
+            active.append(path.parent.name)
+    if len(active) != 1:
+        raise Unusable("cannot tell which feature ({} active) - pass the slug".format(len(active) or "none"))
+    return active[0]
+
+
+def is_merged(root, rel, base):
+    """(True, "") when `rel` is merged to origin/<base> unchanged, else (False, reason). Raises Unusable when gh fails."""
+    ref = "origin/" + base
+    if sdlc_common.git(root, "cat-file", "-e", "{}:{}".format(ref, rel)) is None:
+        return False, "{} is not on {}: merge its pull request first (run git fetch if it is already merged)".format(
+            rel, ref
+        )
+    if sdlc_common.run(["git", "-C", str(root), "diff", "--quiet", ref, "--", rel]).returncode != 0:
+        return False, "{} has unmerged edits (working tree differs from {})".format(rel, ref)
+    sha = sdlc_common.git(root, "log", "-1", "--format=%H", ref, "--", rel)
+    try:
+        result = sdlc_common.run(["gh", "api", "repos/{owner}/{repo}/commits/" + sha + "/pulls"], cwd=root)
+    except OSError as exc:
+        raise Unusable("cannot verify the merge of {}: gh is not available ({})".format(rel, exc))
+    if result.returncode != 0:
+        raise Unusable("cannot verify the merge of {}: gh api failed: {}".format(rel, result.stderr.strip()))
+    try:
+        pulls = json.loads(result.stdout)
+    except ValueError:
+        raise Unusable("cannot verify the merge of {}: gh api returned no JSON".format(rel))
+    if any(isinstance(p, dict) and p.get("merged_at") for p in pulls):
+        return True, ""
+    return False, "{}: commit {} on {} is not from a merged pull request".format(rel, sha[:7], ref)
+
+
+class Gate:
+    def __init__(self, root, slug, base):
+        self.root = Path(root)
+        self.slug = slug
+        self.base = base
+        self.feature = sdlc_common.FEATURES_DIR / slug
+        self.failures = []
+
+    def rel(self, name):
+        return (self.feature / name).as_posix()
+
+    def status(self, name):
+        path = self.root / self.rel(name)
+        return sdlc_common.frontmatter(path.read_text(encoding="utf-8")).get("status") if path.is_file() else None
+
+    def require_merged(self, name):
+        merged, reason = is_merged(self.root, self.rel(name), self.base)
+        if not merged:
+            self.failures.append(reason)
+        return merged
+
+    def require_status(self, name, allowed):
+        if not (self.root / self.rel(name)).is_file():
+            self.failures.append("{} does not exist".format(self.rel(name)))
+            return False
+        status = self.status(name)
+        if status not in allowed:
+            self.failures.append(
+                "{} has status {!r}; it must be {}".format(self.rel(name), status, " or ".join(sorted(allowed)))
+            )
+        self.require_merged(name)
+        return True
+
+    def require_prd(self):
+        if self.require_status("PRD.md", {"Approved"}):
+            for number, reason in lint_prd.lint(str(self.root / self.rel("PRD.md"))):
+                self.failures.append("{}:{}: {} (lint-prd)".format(self.rel("PRD.md"), number, reason))
+
+    def require_design(self):
+        self.require_prd()
+        size_path = self.root / self.rel(".size")
+        if not size_path.is_file():
+            self.failures.append("{} does not exist: run classify-size first".format(self.rel(".size")))
+            return
+        size = size_path.read_text(encoding="utf-8").strip()
+        if size not in LARGE_SIZES:
+            return
+        if not (self.root / self.rel("sad.md")).is_file():
+            self.failures.append("size {} needs {}".format(size, self.rel("sad.md")))
+        else:
+            self.require_merged("sad.md")
+        accepted = [
+            "adr/" + p.name
+            for p in sorted((self.root / self.rel("adr")).glob("*.md"))
+            if self.status("adr/" + p.name) == "Accepted"
+        ]
+        if not accepted:
+            self.failures.append("size {} needs at least one Accepted ADR in {}/".format(size, self.rel("adr")))
+        elif not any(is_merged(self.root, self.rel(name), self.base)[0] for name in accepted):
+            self.failures.append("no Accepted ADR in {}/ is merged to origin/{}".format(self.rel("adr"), self.base))
+
+    def require_tasks_done(self):
+        name = "tasks/tasks.json"
+        path = self.root / self.rel(name)
+        if not path.is_file():
+            self.failures.append("{} does not exist".format(self.rel(name)))
+            return
+        self.require_merged(name)
+        try:
+            tasks = json.loads(path.read_text(encoding="utf-8"))["tasks"]
+            open_tasks = ["{} ({})".format(t["id"], t.get("status")) for t in tasks if t.get("status") != "done"]
+        except (ValueError, KeyError, TypeError):
+            self.failures.append("{} does not follow the tasks.json contract".format(self.rel(name)))
+            return
+        if open_tasks:
+            self.failures.append("tasks not done: {}".format(", ".join(open_tasks)))
+
+    def check(self, phase):
+        if phase == "prd":
+            self.require_status("idea-brief.md", {"Confirmed", "Approved"})
+        elif phase in ("architecture", "adr"):
+            self.require_prd()
+        elif phase in ("contracts", "tasks"):
+            self.require_design()
+        else:
+            self.require_tasks_done()
+        return self.failures
+
+
+def main(argv, environ):
+    if len(argv) not in (1, 2) or argv[0] not in PHASE_STAGE:
+        unknown = "unknown phase {!r}; ".format(argv[0]) if argv else ""
+        print("sdlc-gate: {}usage: sdlc-gate <{}> [<slug>]".format(unknown, "|".join(PHASE_STAGE)), file=sys.stderr)
+        return 2
+    phase = argv[0]
+    try:
+        root = sdlc_common.repo_root()
+        if root is None:
+            raise Unusable("not inside a git repository")
+        slug = resolve_slug(root, argv[1] if len(argv) == 2 else None, environ)
+        base = sdlc_common.base_branch(root, environ)
+        failures = Gate(root, slug, base).check(phase)
+        if not failures:
+            evidence = "sdlc-gate:{}:{}".format(phase, sdlc_common.git(root, "rev-parse", "origin/" + base)[:7])
+            feature_state.advance(root, slug, PHASE_STAGE[phase], evidence)
+    except (Unusable, feature_state.StateError) as exc:
+        print("sdlc-gate: {}".format(exc), file=sys.stderr)
+        return 2
+    if failures:
+        print("sdlc-gate: phase {} for {} is blocked:".format(phase, slug), file=sys.stderr)
+        for failure in failures:
+            print("- " + failure, file=sys.stderr)
+        return 2
+    print("sdlc-gate: phase {} for {}: OK".format(phase, slug))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:], os.environ))

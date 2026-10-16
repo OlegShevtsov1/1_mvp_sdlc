@@ -1,0 +1,21 @@
+version: 1
+stack:
+  language: "Ruby"
+  framework: "Rails"
+  test_command: "bundle exec rspec"
+  lint_command: "bundle exec rubocop"
+  build_command: ""
+repo:
+  remote: "origin"
+  base_branch: "main"
+  merge_strategy: "squash"
+deploy:
+  command: "bin/deploy production"
+  health_url: "https://demo.example.com/up"
+  wait_seconds: 90
+  rollback_command: "bin/deploy rollback"
+monitoring:
+  provider: "none"
+  mcp_config: ""
+  window_minutes: 10
+secrets: []

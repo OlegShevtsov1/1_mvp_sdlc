@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0",
+  "name": "rails-data-model-expand-contract",
+  "description": "Skill rails-data-model: a required column on an existing table is staged as expand, backfill, contract.",
+  "tags": [
+    "golden"
+  ],
+  "context": {
+    "scaffold_script": "scaffold.sh"
+  },
+  "execution": {
+    "prompt": "/mvp-sdlc:rails-data-model postslug Every post needs a required slug column (null: false) with a unique index; existing posts get their slug from the title. All decisions are made: do not ask questions.",
+    "max_turns": 30,
+    "timeout_seconds": 600,
+    "allowed_tools": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Write",
+      "Edit",
+      "Bash",
+      "Skill"
+    ]
+  },
+  "runs": 3,
+  "graders": [
+    {
+      "name": "expand",
+      "type": "file_exists",
+      "path": "docs/features/postslug/migrations/01_*.rb",
+      "exists": true
+    },
+    {
+      "name": "backfill",
+      "type": "file_exists",
+      "path": "docs/features/postslug/migrations/02_*.rb",
+      "exists": true
+    },
+    {
+      "name": "contract",
+      "type": "file_exists",
+      "path": "docs/features/postslug/migrations/03_*.rb",
+      "exists": true
+    },
+    {
+      "name": "no-sql-files",
+      "type": "regex",
+      "target": "files",
+      "pattern": "\\.sql$",
+      "flags": "m",
+      "match": "not_contains"
+    },
+    {
+      "name": "schema-untouched",
+      "type": "regex",
+      "target": {
+        "source": "file",
+        "path": "db/schema.rb"
+      },
+      "pattern": "slug",
+      "match": "not_contains"
+    }
+  ]
+}

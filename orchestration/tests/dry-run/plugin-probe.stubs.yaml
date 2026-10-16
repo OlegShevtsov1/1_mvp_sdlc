@@ -1,0 +1,2 @@
+# Dry-run stubs for scripts/ci/archon-check.sh; never installed.
+probe: "sdlc:write-prd"

@@ -1,0 +1,116 @@
+# Red path: validation of the PR is red for a cause the change introduced, so
+# the merge must not run. On Archon v0.10.1 this reproduces the merge-despite-red
+# path: the review asked for corrections, so sync-pr-body ran, and a failed
+# gate-validated only skips await-checks — flip-ready still runs and the deliver
+# block resolves. merge-gate executes for real and refuses because the
+# profile's test command (`exit 1`, the test the change broke) fails on the PR
+# head; merge is skipped, the report says why and the not-delivered cancel node
+# ends the run. On v0.11.1 the clean-review path is taken (upstream already
+# blocks the flip on a failed gate, so pr-state and merge-gate are skipped) and
+# the outcome is the same.
+# Covers Archon v0.10.1 and v0.11.1: the stubs are the union of both versions'
+# archon-deliver inner nodes. deliver__gate-validated has no stub on purpose:
+# the bundled gate executes for real and fails on the red verdict.
+profile-check: '{"exists":true}'
+load-profile:
+  language: python
+  framework: fastapi
+  test_command: "exit 1"
+  lint_command: ""
+  build_command: ""
+  remote: origin
+  base_branch: main
+  merge_strategy: squash
+  deploy_command: "echo deploy"
+  health_url: "https://app.example.com/health"
+  wait_seconds: 120
+  rollback_command: "echo rollback"
+  monitoring_provider: none
+  window_minutes: 10
+  secret_names: []
+
+plan__plan:
+  ready: true
+  summary: "stub: approach chosen and plan ready"
+  report: { type: archon_artifact, run_id: "fixture-run", path: "plan.md" }
+plan__assert-intact: "ok"
+deliver__impl__record-start: '{"start":"recorded"}'
+deliver__impl__implement:
+  done: true
+  green: true
+  red_cause: ""
+  summary: "stub: implemented and green"
+deliver__impl__assert-changed: "2 files changed"
+deliver__gate-green: '{"gate":"green","red_cause":"","stage":"The implementation","summary":""}'
+deliver__pr__pr: { intent: "stub", repo: { host: "github.com", path: "example/repo" }, number: 3, url: "https://github.com/example/repo/pull/3", head: "fixture-branch", base: "main", is_draft: true }
+deliver__classify:
+  errors: false
+  docs: false
+  reasons: { errors: "stub", docs: "stub" }
+deliver__resolve-scope: '{"errors":"false"}'
+deliver__review__mode: '{"continuation":false}'
+deliver__review__scope: { docs: false, pr: { number: 3 } }
+deliver__review__code: "0 findings"
+deliver__review__seams: "0 findings"
+deliver__review__simplify: "0 findings"
+deliver__review__tests: "0 findings"
+deliver__review__review-complete: "settled"
+deliver__review__synthesize:
+  ready: false
+  action: correct
+  findings_summary: "stub: one finding to correct"
+  report: { type: archon_artifact, run_id: "fixture-run", path: "review/report.md" }
+
+# The correction loop v0.10.1 enters after that review. ci-note calls gh when it
+# executes, so it is stubbed like every other node that talks to GitHub.
+ci-note: "No concluded failures."
+fix__record-start: '{"start":"recorded"}'
+fix__implement: { done: true, green: true, red_cause: "", summary: "stub: findings fixed" }
+fix__assert-changed: "1 file changed"
+gate-correction-green: '{"gate":"green","red_cause":"","stage":"The correction","summary":""}'
+recheck__mode: '{"continuation":true}'
+recheck__scope: { docs: false, pr: { number: 3 } }
+recheck__review-complete: "settled"
+recheck__synthesize: { ready: true, action: none, findings_summary: "stub: all findings closed", report: { type: archon_artifact, run_id: "fixture-run", path: "review/report.md" } }
+recheck__publish: { ready: true, action: none, findings_summary: "stub: all findings closed", report: { type: archon_artifact, run_id: "fixture-run", path: "review/report.md" } }
+recheck-action: '{"ready":true,"action":"none"}'
+deliver__sync-pr-body: "stub: body resynced"
+deliver__gate-ready: '{"gate":"ready"}'
+deliver__validate__validate:
+  green: false
+  red_cause: introduced
+  summary: "stub: a test the change broke"
+ci-probe: '{"state":"concluded","detail":"all checks green"}'
+deliver__flip-ready: { pr_url: "https://github.com/example/repo/pull/3" }
+deliver__outcome: { pr_url: "https://github.com/example/repo/pull/3", summary: "https://github.com/example/repo/pull/3" }
+
+# Inner nodes that only Archon v0.11.1's archon-deliver reaches; v0.10.1 reports
+# them as unused stubs.
+deliver__pr__publish: { schemaVersion: 1, repo: { host: "github.com", path: "example/repo" }, number: 3, url: "https://github.com/example/repo/pull/3", head: "fixture-branch", base: "main", is_draft: true, state: open, head_repo: null, head_revision: null, base_revision: null, maintainer_can_modify: null }
+deliver__review__publish:
+  ready: true
+  action: none
+  findings_summary: "stub: no open findings"
+  report: { type: archon_artifact, run_id: "fixture-run", path: "review/report.md" }
+deliver__validate__mode: '{"comparison":false}'
+deliver__validate__discover: { checks: [{ name: "tests", argv: ["true"] }], quarantine: [], notes: "stub" }
+deliver__validate__run: { status: red, summary: "stub: a test the change broke" }
+deliver__validate__classify: { red_cause: introduced, summary: "stub: a test the change broke" }
+deliver__validate__result: { green: false, red_cause: introduced, summary: "stub: a test the change broke", evidence: null }
+deliver__ci-verdict: { state: concluded, detail: "all checks green" }
+deliver__ci-attention-route: { attention: false, red_cause: "" }
+
+# pr-state talks to GitHub, so it is stubbed and reports a clean, ready PR:
+# the refusal must come from merge-gate's own test run. merge, deploy and
+# health are stubbed green so that a factory without the refusal visibly merges
+# and completes: the run must end cancelled with merge skipped instead.
+pr-state: { pr_url: "https://github.com/example/repo/pull/3", read: true, head: "fixture-branch", state: "OPEN", is_draft: false, checkout_is_head: true, checkout_clean: true, checks: [{ name: "Tests", bucket: "pass" }], checks_read: true }
+merge: { merged: true, merge_sha: "abc1234", head: "fixture-branch" }
+deploy: { deployed: true, exit_code: 0, deployed_at: "2026-09-20T10:00:00Z", log: "deploy.log" }
+health: { healthy: true, last_status: "200", elapsed_seconds: 4 }
+
+exec-code: true
+fixture:
+  expect: cancelled
+  inputs:
+    task: "add a /health endpoint"

@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "name": "bootstrap-project-idempotent",
+  "description": "Skill bootstrap-project and bin/bootstrap-project: a re-run keeps the team's CLAUDE.md and adds the .gitignore line once.",
+  "tags": [
+    "golden"
+  ],
+  "context": {
+    "scaffold_script": "scaffold.sh"
+  },
+  "execution": {
+    "prompt": "/mvp-sdlc:bootstrap-project Set up the Claude Code files for this repository.",
+    "max_turns": 12,
+    "timeout_seconds": 300,
+    "allowed_tools": [
+      "Bash",
+      "Read",
+      "Glob",
+      "Grep",
+      "Skill"
+    ]
+  },
+  "runs": 3,
+  "graders": [
+    {
+      "name": "claude-md-kept",
+      "type": "regex",
+      "target": {
+        "source": "file",
+        "path": "CLAUDE.md"
+      },
+      "pattern": "KEEP-THIS-LINE",
+      "match": "contains"
+    },
+    {
+      "name": "gitignore-line-once",
+      "type": "regex",
+      "target": {
+        "source": "file",
+        "path": ".gitignore"
+      },
+      "pattern": "^\\.claude/\\*\\.local\\.md$",
+      "flags": "m",
+      "match": "count:1"
+    }
+  ]
+}

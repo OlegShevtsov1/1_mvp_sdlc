@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""Print the factory task text (factory guide form A-D) for one task of a feature.
+
+Usage: task-brief <slug> <task-id>   (run in the repository that owns the task)
+Reads docs/features/<slug>/{PRD.md, test-plan.md, tasks/tasks.json, tasks/tracker.md, state.json},
+.claude/sdlc.local.md and .archon/factory-profile.yaml at run time. Refuses (exit 1) when the task is not ready:
+unknown task, unfinished dependency, larger than one day, an AC missing from PRD section 5 or without a test level,
+no Trello card number (state.json, or .spec-source in the frontend), a task "type" outside PR_TYPES, or no
+.claude/sdlc.local.md. The text carries the pull request title `PILOT-<card number>: <card title>` and the description
+lines Type:, SDLC-Task:, SDLC-AC: that pr-conventions-check and the squash commit need. The text never names a
+branch: the factory opens the PR from its own branch.
+"""
+import json
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import sdlc_common  # noqa: E402
+
+feature_state = sdlc_common.load_script("scripts/feature-state.py")
+lint_prd = sdlc_common.load_script("scripts/lint-prd.py")
+
+LOCAL_SETTINGS = Path(".claude") / "sdlc.local.md"
+FACTORY_PROFILE = Path(".archon") / "factory-profile.yaml"
+COMMAND_KEYS = (
+    ("cmd_test_unit", "unit tests"),
+    ("cmd_test_integration", "integration tests"),
+    ("cmd_lint", "lint"),
+    ("cmd_vet", "vet"),
+)
+PR_TYPES = ("feat", "fix", "chore", "docs", "refactor", "test", "ci")
+TOO_LARGE = {"L", "XL"}
+MAX_HOURS = 8
+
+
+class NotReady(Exception):
+    pass
+
+
+def read(path, missing):
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        raise NotReady(missing)
+
+
+def acceptance_criteria(prd_path):
+    """{AC id: verbatim block from the §5 heading to the next heading} of PRD §5."""
+    section = lint_prd.acceptance_section(read(prd_path, "{} not found".format(prd_path)).splitlines())
+    if section is None:
+        raise NotReady("{} has no §5 Acceptance criteria".format(prd_path))
+    blocks, current = {}, None
+    for line in section[1][1:]:
+        heading = re.match(r"^###\s+(AC-\d+[a-z]?)\b", line)
+        if heading:
+            current = heading.group(1)
+            blocks[current] = [line]
+        elif line.startswith("#"):
+            current = None
+        elif current:
+            blocks[current].append(line)
+    return {ac: "\n".join(lines).strip() for ac, lines in blocks.items()}
+
+
+def test_levels(*texts):
+    """{AC id: (level, test name)} from markdown tables that have a `Level` column and an AC id in the first cell."""
+    levels = {}
+    for text in texts:
+        header = None
+        for line in text.splitlines():
+            if not line.lstrip().startswith("|"):
+                header = None
+                continue
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if header is None:
+                header = [c.lower() for c in cells]
+                continue
+            ac = re.match(r"(AC-\d+[a-z]?)\b", cells[0])
+            if ac and "level" in header and len(cells) == len(header) and ac.group(1) not in levels:
+                name = cells[1] if len(cells) > 1 and header.index("level") != 1 else ""
+                levels[ac.group(1)] = (cells[header.index("level")], name)
+    return levels
+
+
+def yaml_sections(text):
+    """{section: {key: scalar}} for the two-level YAML of the factory profile."""
+    sections, section = {}, None
+    for line in text.splitlines():
+        top = re.match(r"^([\w-]+):\s*(.*)$", line)
+        nested = re.match(r"^  ([\w-]+):\s*(.*)$", line)
+        if top:
+            section = top.group(1)
+            sections[section] = {}
+        elif nested and section:
+            value = nested.group(2).strip()
+            if value.startswith('"'):
+                value = json.loads(value)
+            elif value.startswith("'"):
+                value = value[1:-1].replace("''", "'")
+            sections[section][nested.group(1)] = value
+    return sections
+
+
+def check_size(task):
+    estimate = str(task.get("estimate", "")).strip()
+    hours = re.fullmatch(r"(\d+(?:\.\d+)?)\s*h", estimate)
+    if estimate.upper() in TOO_LARGE or (hours and float(hours.group(1)) > MAX_HOURS):
+        raise NotReady(
+            "task {} is estimated {}: split the task in break-tasks (limit: 1 day of work)".format(task["id"], estimate)
+        )
+
+
+def card_fields(feature):
+    """(file name, fields) of the feature's Trello card: state.json (backend) or .spec-source (frontend)."""
+    for name in ("state.json", ".spec-source"):
+        try:
+            fields = json.loads((feature / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(fields, dict):
+            continue
+        number, title = fields.get("trello_card_id_short"), fields.get("trello_card_title")
+        if feature_state.valid_card_number(number) and isinstance(title, str) and title:
+            return name, fields
+    return None, {}
+
+
+def brief(root, slug, task_id):
+    feature = sdlc_common.feature_dir(root, slug)
+    rel = (sdlc_common.FEATURES_DIR / slug).as_posix()
+    if not feature.is_dir():
+        raise NotReady("no feature {}: {} does not exist".format(slug, rel))
+    try:
+        tasks = json.loads(read(feature / "tasks" / "tasks.json", "{}/tasks/tasks.json not found".format(rel)))["tasks"]
+        by_id = {t["id"]: t for t in tasks}
+    except (ValueError, KeyError, TypeError):
+        raise NotReady("{}/tasks/tasks.json does not follow the tasks.json contract".format(rel))
+    task = by_id.get(task_id)
+    if task is None:
+        raise NotReady("unknown task {} in {}/tasks/tasks.json".format(task_id, rel))
+    unfinished = [d for d in task.get("deps", []) if by_id.get(d, {}).get("status") != "done"]
+    if unfinished:
+        raise NotReady("task {} depends on unfinished {}".format(task_id, ", ".join(unfinished)))
+    check_size(task)
+
+    acs = task.get("acs") or []
+    prd_text = read(feature / "PRD.md", "{}/PRD.md not found".format(rel))
+    criteria = acceptance_criteria(feature / "PRD.md")
+    missing = [ac for ac in acs if ac not in criteria]
+    if missing:
+        raise NotReady("{} not in {}/PRD.md §5".format(", ".join(missing), rel))
+    plan_path = feature / "test-plan.md"
+    levels = test_levels(plan_path.read_text(encoding="utf-8") if plan_path.is_file() else "", prd_text)
+    untested = [ac for ac in acs if ac not in levels]
+    if untested:
+        raise NotReady("{} has no test level in {}/test-plan.md or the PRD test plan".format(", ".join(untested), rel))
+    card_source, card = card_fields(feature)
+    if not card:
+        raise NotReady(
+            "{} has no Trello card number and title: the pull request title must be PILOT-<n>: <card title> "
+            "(pr-conventions-check); start the feature from its Trello card with feature-start in the backend, "
+            "or re-run sync-spec in the frontend".format(rel)
+        )
+    pr_type = task.get("type")
+    if pr_type is None:
+        pr_type = "feat"
+    if pr_type not in PR_TYPES:
+        raise NotReady("task {} has type {}; use one of {}".format(task_id, pr_type, ", ".join(PR_TYPES)))
+
+    settings_path = Path(root) / LOCAL_SETTINGS
+    if not settings_path.is_file():
+        raise NotReady("{} is missing: run bootstrap-project first".format(LOCAL_SETTINGS.as_posix()))
+    settings = sdlc_common.frontmatter(settings_path.read_text(encoding="utf-8"))
+    tracker = feature / "tasks" / "tracker.md"
+    tracker_lines = tracker.read_text(encoding="utf-8").splitlines() if tracker.is_file() else []
+    row_start = re.compile(r"^\|\s*{}\s*\|".format(re.escape(task_id)))
+    row = next((line for line in tracker_lines if row_start.match(line)), None)
+
+    out = ["A. What to do and how to tell it works", ""]
+    out.append("Feature {}, task {}: {}".format(slug, task_id, task.get("title", "")))
+    if task.get("layer"):
+        out.append("Layer: {}.".format(task["layer"]))
+    if task.get("files_hint"):
+        out.append("Files likely touched: {}.".format(", ".join(task["files_hint"])))
+    out += ["", "Acceptance criteria (verbatim from {}/PRD.md §5):".format(rel), ""]
+    for ac in acs:
+        out += [criteria[ac], ""]
+    out.append("Test levels (from the test plan):")
+    out += ["- {}: {}{}".format(ac, levels[ac][0], " — " + levels[ac][1] if levels[ac][1] else "") for ac in acs]
+    out += ["", "Definition of Done:"]
+    out += ["- " + item for item in task.get("dod") or []]
+    out += [
+        "",
+        "Rules:",
+        "- Size limit: ≤ 1 day of work, ≤ 500 LOC diff. If it does not fit, stop and report instead of growing the diff.",
+        "- Exactly three commits, in this order:",
+        "  1. `test(<scope>): ...` adds the failing tests for the criteria above (RED);",
+        "  2. `feat(<scope>): ...` or `fix(<scope>): ...` makes them pass (GREEN); do not change tests after RED;",
+        "  3. `refactor(<scope>): ...` cleans up with every test still green.",
+        "- Every commit message ends with these trailers:",
+        "  SDLC-Task: {}".format(task_id),
+        "  SDLC-AC: {}".format(", ".join(acs)),
+        "- Commands (from {}):".format(LOCAL_SETTINGS.as_posix()),
+    ]
+    out += ["  - {}: {}".format(label, settings[key]) for key, label in COMMAND_KEYS if settings.get(key)]
+    if row:
+        out += [
+            "- In {}/tasks/tracker.md set this row's status to `done` in the same pull request:".format(rel),
+            "  " + row,
+            "  and set \"status\": \"done\" for {} in {}/tasks/tasks.json.".format(task_id, rel),
+        ]
+    if card.get("trello_card_id"):
+        out.append("- Trello card {} (from {}/{}): tick the checklist item {} when the pull request is "
+                   "merged.".format(card["trello_card_id"], rel, card_source, task_id))
+    out += [
+        "- Pull request title, exactly this line:",
+        "  PILOT-{}: {}".format(card["trello_card_id_short"], card["trello_card_title"]),
+        "- Pull request description (it becomes the squash commit body): include these lines exactly, each on its "
+        "own line; no other line may start with `Type:`, or pr-conventions-check fails:",
+        "  Type: {}".format(pr_type),
+        "  SDLC-Task: {}".format(task_id),
+        "  SDLC-AC: {}".format(", ".join(acs)),
+        "",
+    ]
+    out += deploy_sections(Path(root) / FACTORY_PROFILE)
+    return "\n".join(out)
+
+
+def deploy_sections(profile_path):
+    if not profile_path.is_file():
+        gate = "No {} here: the factory's profile gate will ask for {}."
+        return [
+            "B. Deploy", gate.format(FACTORY_PROFILE.as_posix(), "the deploy command"), "",
+            "C. Health check", gate.format(FACTORY_PROFILE.as_posix(), "the health URL and wait time"), "",
+            "D. Rollback", gate.format(FACTORY_PROFILE.as_posix(), "the rollback command"),
+        ]
+    deploy = yaml_sections(profile_path.read_text(encoding="utf-8")).get("deploy", {})
+    source = "(from {})".format(FACTORY_PROFILE.as_posix())
+    return [
+        "B. Deploy {}".format(source), deploy.get("command", ""), "",
+        "C. Health check {}".format(source),
+        "{} must answer within {} seconds.".format(deploy.get("health_url", ""), deploy.get("wait_seconds", "")), "",
+        "D. Rollback {}".format(source), deploy.get("rollback_command", ""),
+    ]
+
+
+def main(argv):
+    if len(argv) != 2:
+        print("usage: task-brief <slug> <task-id>", file=sys.stderr)
+        return 1
+    slug, task_id = argv
+    try:
+        if not sdlc_common.valid_slug(slug):
+            raise NotReady("invalid slug {!r}: must match {}".format(slug, sdlc_common.SLUG_RE.pattern))
+        root = sdlc_common.repo_root()
+        if root is None:
+            raise NotReady("not inside a git repository")
+        print(brief(root, slug, task_id))
+    except NotReady as exc:
+        print("task-brief: not ready: {}".format(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,30 @@
+diff --git a/hooks/hooks.json b/hooks/hooks.json
+index 7fda336..326b5dd 100644
+--- a/hooks/hooks.json
++++ b/hooks/hooks.json
+@@ -13,25 +13,12 @@
+             "type": "command",
+             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/block-destructive-git.sh\""
+           },
+-          {
+-            "type": "command",
+-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/block-env.sh\""
+-          },
+           {
+             "type": "command",
+             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/block-state-edit.sh\""
+           }
+         ]
+       },
+-      {
+-        "matcher": "Read|Edit|MultiEdit|Write|Grep",
+-        "hooks": [
+-          {
+-            "type": "command",
+-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/block-env.sh\""
+-          }
+-        ]
+-      },
+       {
+         "matcher": "Edit|MultiEdit|Write|NotebookEdit",
+         "hooks": [

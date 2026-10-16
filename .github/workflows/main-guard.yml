@@ -1,0 +1,34 @@
+name: main-guard
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "commit to check; default = the pushed commit"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  guard:
+    name: Commit on main came from a merged PR
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the commit's pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ inputs.sha || github.sha }}
+          TELEGRAM_MVP_VPN_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_MVP_VPN_ALERTS_BOT_TOKEN }}
+          TELEGRAM_MVP_VPN_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_MVP_VPN_ALERTS_CHAT_ID }}
+          TELEGRAM_MVP_VPN_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_MVP_VPN_ALERTS_THREAD_ID }}
+        run: bash scripts/ci/main-guard.sh

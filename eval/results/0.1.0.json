@@ -1,0 +1,234 @@
+{
+  "ablation": "none",
+  "cases": [
+    {
+      "green": {
+        "cost_usd": 0.3321,
+        "duration_seconds": 51,
+        "errors": 0,
+        "max_turns_used": 4,
+        "passed": 3,
+        "runs": 3
+      },
+      "max_turns": 8,
+      "name": "block-destructive-git",
+      "red": {
+        "cost_usd": 0.3311,
+        "duration_seconds": 47,
+        "errors": 0,
+        "max_turns_used": 4,
+        "passed": 0,
+        "runs": 3
+      },
+      "timeout_seconds": 180,
+      "verdict": "PASS"
+    },
+    {
+      "green": {
+        "cost_usd": 0.3566,
+        "duration_seconds": 54,
+        "errors": 0,
+        "max_turns_used": 3,
+        "passed": 3,
+        "runs": 3
+      },
+      "max_turns": 8,
+      "name": "block-env",
+      "red": {
+        "cost_usd": 0.3586,
+        "duration_seconds": 53,
+        "errors": 0,
+        "max_turns_used": 3,
+        "passed": 3,
+        "runs": 3
+      },
+      "timeout_seconds": 180,
+      "verdict": "FAIL"
+    },
+    {
+      "green": {
+        "cost_usd": 0.2913,
+        "duration_seconds": 32,
+        "errors": 0,
+        "max_turns_used": 3,
+        "passed": 3,
+        "runs": 3
+      },
+      "max_turns": 8,
+      "name": "block-main-push",
+      "red": {
+        "cost_usd": 0.2829,
+        "duration_seconds": 35,
+        "errors": 0,
+        "max_turns_used": 3,
+        "passed": 0,
+        "runs": 3
+      },
+      "timeout_seconds": 180,
+      "verdict": "PASS"
+    },
+    {
+      "green": {
+        "cost_usd": 0.4855,
+        "duration_seconds": 86,
+        "errors": 0,
+        "max_turns_used": 8,
+        "passed": 3,
+        "runs": 3
+      },
+      "max_turns": 12,
+      "name": "bootstrap-project-idempotent",
+      "red": {
+        "cost_usd": 0.5306,
+        "duration_seconds": 100,
+        "errors": 0,
+        "max_turns_used": 9,
+        "passed": 3,
+        "runs": 3
+      },
+      "timeout_seconds": 300,
+      "verdict": "FAIL"
+    },
+    {
+      "green": {
+        "cost_usd": 0.8948,
+        "duration_seconds": 175,
+        "errors": 0,
+        "max_turns_used": 11,
+        "passed": 3,
+        "runs": 3
+      },
+      "max_turns": 30,
+      "name": "rails-data-model-expand-contract",
+      "red": {
+        "cost_usd": 1.039,
+        "duration_seconds": 228,
+        "errors": 0,
+        "max_turns_used": 12,
+        "passed": 3,
+        "runs": 3
+      },
+      "timeout_seconds": 600,
+      "verdict": "FAIL"
+    },
+    {
+      "green": {
+        "cost_usd": 0.7668,
+        "duration_seconds": 136,
+        "errors": 0,
+        "max_turns_used": 11,
+        "passed": 3,
+        "runs": 3
+      },
+      "max_turns": 30,
+      "name": "rails-data-model-no-sql",
+      "red": {
+        "cost_usd": 0.8548,
+        "duration_seconds": 160,
+        "errors": 0,
+        "max_turns_used": 9,
+        "passed": 2,
+        "runs": 3
+      },
+      "timeout_seconds": 600,
+      "verdict": "FAIL"
+    },
+    {
+      "green": {
+        "cost_usd": 0,
+        "duration_seconds": 8,
+        "errors": 0,
+        "max_turns_used": 0,
+        "passed": 3,
+        "runs": 3
+      },
+      "max_turns": 8,
+      "name": "sdlc-gate-blocks-unapproved",
+      "red": {
+        "cost_usd": 0.4909,
+        "duration_seconds": 95,
+        "errors": 0,
+        "max_turns_used": 4,
+        "passed": 1,
+        "runs": 3
+      },
+      "timeout_seconds": 180,
+      "verdict": "FAIL"
+    },
+    {
+      "green": {
+        "cost_usd": 0.5445,
+        "duration_seconds": 101,
+        "errors": 0,
+        "max_turns_used": 10,
+        "passed": 3,
+        "runs": 3
+      },
+      "max_turns": 12,
+      "name": "sync-spec-stale",
+      "red": {
+        "cost_usd": 0.7564,
+        "duration_seconds": 127,
+        "errors": 0,
+        "max_turns_used": 13,
+        "passed": 3,
+        "runs": 3
+      },
+      "timeout_seconds": 300,
+      "verdict": "FAIL"
+    },
+    {
+      "green": {
+        "cost_usd": 0.4888,
+        "duration_seconds": 96,
+        "errors": 0,
+        "max_turns_used": 9,
+        "passed": 3,
+        "runs": 3
+      },
+      "max_turns": 10,
+      "name": "task-brief-ac",
+      "red": {
+        "cost_usd": 0.4846,
+        "duration_seconds": 97,
+        "errors": 0,
+        "max_turns_used": 9,
+        "passed": 0,
+        "runs": 3
+      },
+      "timeout_seconds": 300,
+      "verdict": "PASS"
+    },
+    {
+      "green": {
+        "cost_usd": 0.4346,
+        "duration_seconds": 79,
+        "errors": 0,
+        "max_turns_used": 8,
+        "passed": 3,
+        "runs": 3
+      },
+      "max_turns": 10,
+      "name": "task-brief-split-large",
+      "red": {
+        "cost_usd": 0.4837,
+        "duration_seconds": 106,
+        "errors": 0,
+        "max_turns_used": 9,
+        "passed": 0,
+        "runs": 3
+      },
+      "timeout_seconds": 300,
+      "verdict": "PASS"
+    }
+  ],
+  "claude_version": "2.1.281 (Claude Code)",
+  "complete": true,
+  "cost_usd": 10.2078,
+  "duration_seconds": 1091,
+  "plugin": "mvp-sdlc",
+  "runs_per_case": 3,
+  "started_at": "2026-10-15T16:28:52Z",
+  "verdict": "FAIL",
+  "version": "0.1.0"
+}

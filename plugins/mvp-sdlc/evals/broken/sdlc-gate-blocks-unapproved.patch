@@ -1,0 +1,30 @@
+diff --git a/hooks/hooks.json b/hooks/hooks.json
+index 7fda336..91d8ac4 100644
+--- a/hooks/hooks.json
++++ b/hooks/hooks.json
+@@ -40,25 +40,6 @@
+             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/block-state-edit.sh\""
+           }
+         ]
+-      },
+-      {
+-        "matcher": "Skill",
+-        "hooks": [
+-          {
+-            "type": "command",
+-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/sdlc-gate-hook.sh\""
+-          }
+-        ]
+-      }
+-    ],
+-    "UserPromptSubmit": [
+-      {
+-        "hooks": [
+-          {
+-            "type": "command",
+-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/sdlc-gate-hook.sh\""
+-          }
+-        ]
+       }
+     ]
+   }

@@ -1,0 +1,25 @@
+# .archon/factory-profile.yaml — written by the factory workflow. Edit freely; the
+# workflow never asks these questions again while this file exists.
+version: 1
+stack:
+  language: python
+  framework: fastapi
+  test_command: "pytest -q"
+  lint_command: "ruff check ."
+  build_command: ""                    # empty = no build step
+repo:
+  remote: origin
+  base_branch: main
+  merge_strategy: squash               # squash | merge | rebase
+deploy:
+  command: "ssh deploy@vps 'cd /srv/app && git pull && docker compose up -d --build'"
+  health_url: "https://app.example.com/health"
+  wait_seconds: 120                    # how long health may take to turn 200
+  rollback_command: "ssh deploy@vps 'cd /srv/app && git checkout HEAD~1 && docker compose up -d --build'"
+monitoring:
+  provider: sentry                     # sentry | datadog | grafana | none
+  mcp_config: .archon/mcp/monitoring.json   # informational; the workflow uses this fixed path
+  window_minutes: 10                   # how long after deploy to look for new errors
+secrets:                               # NAMES only. Values come from the environment of the
+  - DEPLOY_SSH_KEY_PATH                # machine that runs Archon. Never values.
+  - SENTRY_AUTH_TOKEN

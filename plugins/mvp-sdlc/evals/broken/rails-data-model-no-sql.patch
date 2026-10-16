@@ -1,0 +1,75 @@
+diff --git a/skills/rails-data-model/SKILL.md b/skills/rails-data-model/SKILL.md
+index 731e17d..c8408da 100644
+--- a/skills/rails-data-model/SKILL.md
++++ b/skills/rails-data-model/SKILL.md
+@@ -3,18 +3,18 @@ name: rails-data-model
+ description: >-
+   Use when a feature of a Rails/ActiveRecord application needs a data model and migrations: designs the model from
+   the repository's own conventions (db/schema.rb, db/migrate/, app/models/) and writes
+-  docs/features/<slug>/data-model.md plus staged ActiveRecord migrations under docs/features/<slug>/migrations/.
+-  Replaces the course generate-data-model skill (SQL-first) for Rails projects. Triggers: "/mvp-sdlc:rails-data-model
++  docs/features/<slug>/data-model.md plus the schema as docs/features/<slug>/schema.sql.
++  Replaces the course generate-data-model skill for Rails projects. Triggers: "/mvp-sdlc:rails-data-model
+   <slug> <what the feature stores>", "rails data model for <slug>", "ActiveRecord migrations for <slug>".
+-  Never touches db/schema.rb, db/structure.sql or db/migrate/, never writes SQL files, and asks instead of guessing
++  Never touches db/schema.rb, db/structure.sql or db/migrate/, and asks instead of guessing
+   when the conventions or the request are ambiguous.
+ ---
+ 
+ # rails-data-model
+ 
+-Design the data model of one feature for a Rails/ActiveRecord application and stage its migrations. The output is
+-a design plus migration files that an implementing task later promotes into `db/migrate/`; this skill never changes
+-the live schema.
++Design the data model of one feature for a Rails/ActiveRecord application and write its schema as SQL. The output
++is a design plus `schema.sql`, from which an implementing task later writes the migrations in `db/migrate/`; this
++skill never changes the live schema.
+ 
+ ## Inputs
+ 
+@@ -33,8 +33,7 @@ the live schema.
+ ## Hard rules
+ 
+ - Never create, edit or delete `db/schema.rb`, `db/structure.sql` or anything under `db/migrate/`.
+-- Never write `.sql` files. Migrations are Ruby ActiveRecord migrations only.
+-- Write only under `docs/features/<slug>/` and, once, `.claude/rules/migrations.md` (step 6).
++- Write only under `docs/features/<slug>/`.
+ - **Ambiguity means a question, never a guess.** If the conventions conflict (for example two tables use different
+   soft-delete columns and the new table relates to both), or the request leaves a decision open that changes the
+   schema (which tables a record belongs to, whether it is soft-deleted, a uniqueness rule), ask with
+@@ -61,12 +60,8 @@ the live schema.
+ 5. **Write the files.**
+    - `docs/features/<slug>/data-model.md` from this skill's `templates/data-model.md` (in the skill's base
+      directory), every section filled.
+-   - One staged migration per step: `docs/features/<slug>/migrations/<NN>_<name>.rb`, `NN` = `01`, `02`, ... in
+-     the order they must run, `<name>` in snake_case. Each file holds one migration class named after `<name>` in
+-     CamelCase, inheriting from `ActiveRecord::Migration[x.y]` with the version found in step 2.
+-6. **Install the migrations rule once.** If `.claude/rules/migrations.md` does not exist, copy the plugin's
+-   `templates/claude/rules/migrations.md` (two directories above this skill's base directory) to it unchanged.
+-   Never overwrite an existing one.
+-7. **Verify.** When Ruby is available, run `ruby -c` on every staged migration and fix any syntax error. List
+-   the files you wrote, the result of each `ruby -c`, and the next step: the implementing task in `break-tasks`
+-   promotes the staged migrations into `db/migrate/` with fresh timestamps.
++   - The schema as `docs/features/<slug>/schema.sql`: one `CREATE TABLE` statement per new table with its indexes
++     and foreign keys, SQL first. Write no Ruby migration files; the implementing task writes them from
++     `schema.sql`.
++6. **Verify.** List the files you wrote and the next step: the implementing task in `break-tasks` writes the
++   migrations from `schema.sql` into `db/migrate/`.
+diff --git a/skills/rails-data-model/templates/data-model.md b/skills/rails-data-model/templates/data-model.md
+index cc48d79..047690d 100644
+--- a/skills/rails-data-model/templates/data-model.md
++++ b/skills/rails-data-model/templates/data-model.md
+@@ -40,11 +40,11 @@ migration_version: "<x.y>"
+ | Step | Migration | What it does | Safe while old code runs because |
+ |---|---|---|---|
+ 
+-## Staged migrations
++## Schema
+ 
+ | File | Purpose |
+ |---|---|
+-| `migrations/01_<name>.rb` | <purpose> |
++| `schema.sql` | `CREATE TABLE` statements of the new tables |
+ 
+ ## Decisions and answers
+ 

@@ -1,0 +1,24 @@
+# .archon/factory-profile.yaml — written by the Archon `factory` workflow.
+# Edit freely. While this file exists the workflow never asks these questions again.
+# `secrets` lists environment-variable NAMES only; values stay on the machine that runs Archon.
+version: 1
+stack:
+  language: "Shell"
+  framework: ""
+  test_command: "bash scripts/ci/check.sh"
+  lint_command: "bash scripts/ci/check.sh actionlint"
+  build_command: ""
+repo:
+  remote: "origin"
+  base_branch: "main"
+  merge_strategy: "squash"
+deploy:
+  command: "echo \"1_mvp_sdlc: no deploy target (toolkit repository; workflows are installed with install.sh)\""
+  health_url: "http://mvp.up.km.ua/health"
+  wait_seconds: 120
+  rollback_command: "echo \"1_mvp_sdlc: no rollback target (no deploy configured)\""
+monitoring:
+  provider: "none"
+  mcp_config: ""
+  window_minutes: 10
+secrets: []

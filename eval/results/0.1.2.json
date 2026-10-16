@@ -1,0 +1,58 @@
+{
+  "ablation": "none",
+  "cases": [
+    {
+      "green": {
+        "cost_usd": 0.5054,
+        "duration_seconds": 132,
+        "errors": 0,
+        "max_turns_used": 10,
+        "passed": 3,
+        "runs": 3
+      },
+      "max_turns": 10,
+      "name": "task-brief-ac",
+      "red": {
+        "cost_usd": 0.5152,
+        "duration_seconds": 165,
+        "errors": 0,
+        "max_turns_used": 9,
+        "passed": 0,
+        "runs": 3
+      },
+      "timeout_seconds": 300,
+      "verdict": "PASS"
+    },
+    {
+      "green": {
+        "cost_usd": 0.4384,
+        "duration_seconds": 126,
+        "errors": 0,
+        "max_turns_used": 8,
+        "passed": 3,
+        "runs": 3
+      },
+      "max_turns": 10,
+      "name": "task-brief-split-large",
+      "red": {
+        "cost_usd": 0.4939,
+        "duration_seconds": 178,
+        "errors": 0,
+        "max_turns_used": 9,
+        "passed": 0,
+        "runs": 3
+      },
+      "timeout_seconds": 300,
+      "verdict": "PASS"
+    }
+  ],
+  "claude_version": "2.1.281 (Claude Code)",
+  "complete": false,
+  "cost_usd": 1.9529,
+  "duration_seconds": 382,
+  "plugin": "mvp-sdlc",
+  "runs_per_case": 3,
+  "started_at": "2026-10-15T22:28:33Z",
+  "verdict": "PASS",
+  "version": "0.1.2"
+}

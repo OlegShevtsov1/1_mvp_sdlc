@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "name": "task-brief-ac",
+  "description": "Skill task-brief and bin/task-brief: the saved brief carries the three-commit rule and the task trailer.",
+  "tags": [
+    "golden"
+  ],
+  "context": {
+    "scaffold_script": "scaffold.sh"
+  },
+  "execution": {
+    "prompt": "Save the factory task text for task T1 of feature demo to brief-T1.md in the repository root.",
+    "max_turns": 10,
+    "timeout_seconds": 300,
+    "allowed_tools": [
+      "Bash",
+      "Read",
+      "Write",
+      "Skill"
+    ]
+  },
+  "runs": 3,
+  "graders": [
+    {
+      "name": "brief-written",
+      "type": "file_exists",
+      "path": "brief-T1.md",
+      "exists": true
+    },
+    {
+      "name": "three-commit-rule",
+      "type": "regex",
+      "target": {
+        "source": "file",
+        "path": "brief-T1.md"
+      },
+      "pattern": "Exactly three commits",
+      "match": "contains"
+    },
+    {
+      "name": "task-trailer",
+      "type": "regex",
+      "target": {
+        "source": "file",
+        "path": "brief-T1.md"
+      },
+      "pattern": "SDLC-Task: T1",
+      "match": "contains"
+    }
+  ]
+}

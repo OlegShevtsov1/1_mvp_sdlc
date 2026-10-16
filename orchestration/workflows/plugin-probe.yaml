@@ -1,0 +1,21 @@
+name: plugin-probe
+description: |
+  Use when: checking whether an unattended Archon run sees the plugins that the target
+  repository enables through its committed .claude/settings.json (marketplace mvp, plugin sdlc).
+  NOT for: running any SDLC skill, changing files, or installing plugins.
+
+  Runs one small, non-interactive node that lists the sdlc skills visible to the session.
+  Input: none (any text is ignored).
+  Output: every visible skill name starting with "sdlc:", one per line, or NONE.
+  Side effects: none.
+
+provider: claude
+
+nodes:
+  - id: probe
+    model: small
+    prompt: |
+      List every skill available in this session whose name starts with "sdlc:".
+      Print each exact skill name on its own line and nothing else.
+      If there is no such skill, print exactly NONE.
+      Do not invoke any skill. Do not read, create or change any file.

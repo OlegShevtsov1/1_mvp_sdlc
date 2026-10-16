@@ -1,0 +1,15 @@
+diff --git a/hooks/hooks.json b/hooks/hooks.json
+index 7fda336..365561e 100644
+--- a/hooks/hooks.json
++++ b/hooks/hooks.json
+@@ -9,10 +9,6 @@
+             "type": "command",
+             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/block-main-push.sh\""
+           },
+-          {
+-            "type": "command",
+-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/block-destructive-git.sh\""
+-          },
+           {
+             "type": "command",
+             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/block-env.sh\""

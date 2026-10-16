@@ -1,0 +1,71 @@
+name: plan-review
+description: |
+  Use when: an implementation plan document already exists and the operator wants to
+  review and refine it together, round by round, before anything is implemented.
+  Triggers: "plan review", "переглянути план", "review this plan".
+  NOT for: writing code, creating PRs, deploying, or generating a plan from scratch
+  (use archon-plan / archon-interactive-prd for that).
+
+  Interactive plan review loop (no implementation phase):
+  - each round presents ONE topic (an open decision, a run, checks, repos/paths)
+  - the operator answers; the plan file is edited in place
+  - repeats until the operator explicitly says "approved"
+  Input: absolute path to the plan markdown file, optionally followed by extra context.
+  Side effects: edits ONLY the plan file (and its decisions log, if named in the input).
+
+provider: claude
+interactive: true
+
+# The Ukrainian phrases below are identifiers of the Ukrainian plan this workflow edits
+# (section title, approval words, trigger phrase); keep them verbatim.
+nodes:
+  - id: review
+    model: large
+    loop:
+      prompt: |
+        # Plan review — interactive, no implementation
+
+        Language: talk to the operator and write the plan in **Ukrainian**.
+
+        **Input (plan path + context)**: $ARGUMENTS
+        **Operator's latest answer**: $LOOP_USER_INPUT
+
+        ## Hard rules
+        - You may edit ONLY the plan file named in the input (and a decisions log if the
+          input names one). Do not change any repository, AWS, GitHub, server or VPN.
+          Read-only commands (reading files, `git log`, `gh ... list/view`, read-only AWS
+          describe/list, read-only ssh) are allowed to verify facts.
+        - Never present a decision as agreed unless the operator agreed it in this loop
+          or it is already marked agreed in the plan/decisions log.
+        - One topic per round. Short, plain words. Give options and a recommendation.
+        - Always call a server by its full host name as the plan writes it, never by a
+          short alias such as "srv" (the VPN profile identifier `srv` is allowed only
+          when that exact identifier is meant).
+
+        ## Every round
+        1. Read the plan file (and decisions log) fresh.
+        2. If $LOOP_USER_INPUT is empty (first round): give a short overview — list of runs
+           in order (ID, repo, one line each) and the number of open items in the
+           «Рішення на погодження» section — then present the FIRST open item.
+           Do NOT emit the completion signal on the first round.
+        3. Otherwise apply the operator's answer:
+           - edit the plan: move the item from «Рішення на погодження» into the agreed
+             decisions (with the operator's wording), update every affected run (files,
+             steps, Expected, Deploy/Health/Rollback, access list, order);
+           - if the answer adds checks, repos, paths or new requirements — add them where
+             they belong;
+           - if the answer raises a conflict with something already agreed — say so and
+             ask, do not silently pick.
+        4. Show what changed (3–6 bullets), how many open items remain, then present the
+           NEXT open item. When no open items remain, walk the runs one by one (one run
+           per round) asking whether its checks (Expected) are sufficient.
+        5. Only when the operator's latest message EXPLICITLY says "approved" / "погоджено" /
+           "план готовий" (a question or a change request is NOT approval):
+           make no changes, output a final summary (runs, agreed decisions count, plan path)
+           and emit <promise>PLAN_APPROVED</promise>.
+      until: PLAN_APPROVED
+      max_iterations: 60
+      interactive: true
+      gate_message: |
+        Answer the current question or give edits to the plan.
+        To finish, write "approved".

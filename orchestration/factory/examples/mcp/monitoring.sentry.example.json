@@ -1,0 +1,7 @@
+{
+  "sentry": {
+    "type": "http",
+    "url": "https://mcp.sentry.dev/mcp",
+    "headers": { "Authorization": "Bearer $SENTRY_AUTH_TOKEN" }
+  }
+}

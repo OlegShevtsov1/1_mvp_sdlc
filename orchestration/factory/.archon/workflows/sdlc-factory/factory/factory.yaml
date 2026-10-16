@@ -1,0 +1,547 @@
+name: factory
+description: |
+  Interview once, plan, deliver a reviewed PR, merge, deploy, verify health and
+  monitoring, roll back on red, report honestly. Two human gates: the project
+  profile (first run only) and the plan.
+
+  Use when: "build X and put it live", "factory: <task>", a task that should end
+  deployed on the operator's own infrastructure.
+  NOT for: reviewing an existing PR, work that must not be merged or deployed,
+  or repositories without a GitHub remote.
+
+interactive: true
+requires: [github]
+
+inputs:
+  task:
+    default: ""
+    description: What to build. Empty means the run's trigger message is the task.
+
+returns: report
+
+nodes:
+  # ── Profile ────────────────────────────────────────────────────────────────
+  - id: profile-check
+    bash: |
+      if test -f .archon/factory-profile.yaml; then printf '{"exists":true}'; else printf '{"exists":false}'; fi
+    output_format:
+      type: object
+      properties:
+        exists: { type: boolean }
+      required: [exists]
+
+  # First run only. The gate is the body's last node so the loop pauses on it;
+  # `needs-revision` repeats the interview with the operator's words as feedback.
+  - id: intake-cycle
+    depends_on: [profile-check]
+    when: "$profile-check.output.exists == false"
+    loop_group:
+      until_bash: test $profile-gate.output.decision != "needs-revision"
+      max_iterations: 5
+      fresh_context: true
+      nodes:
+        - id: intake
+          command: intake
+          model: medium
+          # Operator feedback from the previous round. $LOOP_PREV is spliced only
+          # into YAML slots (prompt/with/message), never into a command FILE's
+          # text, so it travels through this binding and intake.md reads
+          # $INPUTS.feedback. Empty on the first round.
+          with:
+            feedback: "$LOOP_PREV.profile-gate.output.text"
+          output_type: factory-profile-draft
+          output_format:
+            type: object
+            properties:
+              summary: { type: string }
+              assumed:
+                type: array
+                items: { type: string }
+              report:
+                type: object
+                properties:
+                  type: { type: string, enum: [archon_artifact] }
+                  run_id: { type: string }
+                  path: { type: string, enum: [factory-profile.json] }
+                required: [type, run_id, path]
+            required: [summary, assumed, report]
+        - id: profile-gate
+          approval:
+            message: |
+              GATE 1 — project profile. Read the draft at
+              $ARTIFACTS_DIR/factory-profile.json and this summary:
+
+              $intake.output.summary
+
+              approve        → save it as .archon/factory-profile.yaml and continue
+              needs-revision → say what to change (free text); the interview repeats
+              abort          → stop the run
+            decisions:
+              - { id: approve, label: Approve }
+              - { id: needs-revision, label: Needs revision }
+              - { id: abort, label: Abort }
+          depends_on: [intake]
+
+  # The loop's output is the gate's output. Whole-output binding on purpose:
+  # the dry-run simulator emits the string "approved", a real run emits
+  # {decision, text}; scripts/_lib/gate.ts reads both.
+  - id: profile-round
+    script: gate-round
+    runtime: bun
+    depends_on: [intake-cycle]
+    with:
+      gate: "$intake-cycle.output"
+    output_format:
+      type: object
+      properties:
+        proceed: { type: boolean }
+        decision: { type: string }
+        stop_reason: { type: string }
+      required: [proceed, decision, stop_reason]
+
+  - id: abort-profile
+    cancel: "Stopped at the profile gate: $profile-round.output.stop_reason"
+    depends_on: [profile-round]
+    when: "$profile-round.output.proceed == false"
+
+  - id: profile-write
+    script: write-profile
+    runtime: bun
+    depends_on: [profile-round]
+    when: "$profile-round.output.proceed == true"
+    output_format:
+      type: object
+      properties:
+        written: { type: boolean }
+        path: { type: string }
+        commit: { type: string }
+      required: [written, path, commit]
+
+  # Joins both paths: profile already existed (write skipped) or was just written.
+  # `abort-profile` is a dependency only for ordering: on the proceed path it is
+  # skipped (so none_failed_min_one_success still admits this node), and on the
+  # abort path it runs first and cancels the run, instead of racing this node
+  # into a failure on the profile it was never allowed to write.
+  - id: load-profile
+    script: load-profile
+    runtime: bun
+    depends_on: [profile-check, profile-write, abort-profile]
+    trigger_rule: none_failed_min_one_success
+    output_format:
+      type: object
+      properties:
+        language: { type: string }
+        framework: { type: string }
+        test_command: { type: string }
+        lint_command: { type: string }
+        build_command: { type: string }
+        remote: { type: string }
+        base_branch: { type: string }
+        merge_strategy: { type: string }
+        deploy_command: { type: string }
+        health_url: { type: string }
+        wait_seconds: { type: number }
+        rollback_command: { type: string }
+        monitoring_provider: { type: string }
+        window_minutes: { type: number }
+        secret_names:
+          type: array
+          items: { type: string }
+      required: [language, test_command, remote, base_branch, merge_strategy, deploy_command, health_url, wait_seconds, rollback_command, monitoring_provider, window_minutes, secret_names]
+
+  # ── Plan ───────────────────────────────────────────────────────────────────
+  # archon-plan writes $ARTIFACTS_DIR/plan.md and returns {ready, summary, report}.
+  # `ready` is not reachable outside the loop (only the last node's output is),
+  # so the gate message states it in words.
+  - id: plan-cycle
+    depends_on: [load-profile]
+    loop_group:
+      until_bash: test $plan-gate.output.decision != "needs-revision"
+      max_iterations: 3
+      fresh_context: true
+      nodes:
+        - id: plan
+          include: archon-plan
+          with:
+            work: >-
+              Plan this task for the project described by the profile below.
+              Task: $INPUTS.task
+              Original request: $ARGUMENTS
+              Operator feedback on the previous plan (empty or a literal
+              placeholder on the first round; when present, revise the previous
+              plan at $ARTIFACTS_DIR/plan.md accordingly instead of starting
+              over): $LOOP_PREV.plan-gate.output.text
+              Project profile: language $load-profile.output.language,
+              framework $load-profile.output.framework, tests run with
+              `$load-profile.output.test_command`, lint with
+              `$load-profile.output.lint_command`, build with
+              `$load-profile.output.build_command`, base branch
+              $load-profile.output.base_branch. The result will be merged and
+              deployed automatically, so the plan must include the checks that
+              prove the change is safe to ship.
+        - id: plan-gate
+          approval:
+            message: |
+              GATE 2 — the plan. Ready to build: $plan.output.ready
+              Summary: $plan.output.summary
+              Full plan: $ARTIFACTS_DIR/plan.md
+
+              approve        → build, review, merge, deploy and verify WITHOUT further questions
+              needs-revision → say what to change; the plan is redone
+              abort          → stop the run
+              (If "Ready to build" is false, the plan names what is missing —
+              answer it with needs-revision or abort; approving a blocked plan
+              makes the build fail honestly.)
+            decisions:
+              - { id: approve, label: Approve }
+              - { id: needs-revision, label: Needs revision }
+              - { id: abort, label: Abort }
+          depends_on: [plan]
+
+  - id: plan-round
+    script: gate-round
+    runtime: bun
+    depends_on: [plan-cycle]
+    with:
+      gate: "$plan-cycle.output"
+    output_format:
+      type: object
+      properties:
+        proceed: { type: boolean }
+        decision: { type: string }
+        stop_reason: { type: string }
+      required: [proceed, decision, stop_reason]
+
+  - id: abort-plan
+    cancel: "Stopped at the plan gate: $plan-round.output.stop_reason"
+    depends_on: [plan-round]
+    when: "$plan-round.output.proceed == false"
+
+  # ── Deliver (bundled block): implement → green gate → draft PR → review →
+  # corrections → validate → CI → ready flip. Its output differs by Archon
+  # version (the PR record on v0.10.1, {pr_url} on v0.11.1), so only pr-state
+  # reads it; everything after reads merge-gate. ──────────────────────────────
+  # While the PR's CI is still running, the bundled deliver's await-checks
+  # suspends the run on a durable `wait:`. Archon v0.10.1's CLI exits there and
+  # only `archon serve` would resume it, so this node starts a detached keeper
+  # that resumes the run once the wait falls due. It reports itself off on
+  # v0.11.1 (whose CLI resumes the wait itself) and in dry runs.
+  - id: wait-keeper
+    script: wait-keeper
+    runtime: bun
+    depends_on: [plan-round]
+    when: "$plan-round.output.proceed == true"
+    with:
+      poll_seconds: "60"
+    output_format:
+      type: object
+      properties:
+        keeper: { type: string }
+        reason: { type: string }
+        run_id: { type: string }
+      required: [keeper, reason, run_id]
+
+  - id: deliver
+    include: archon-deliver
+    depends_on: [plan-round, abort-plan, wait-keeper]
+    trigger_rule: none_failed_min_one_success
+    when: "$plan-round.output.proceed == true"
+    with:
+      work: >-
+        Deliver the plan at $ARTIFACTS_DIR/plan.md — read it in full first. The
+        project's own checks: tests `$load-profile.output.test_command`, lint
+        `$load-profile.output.lint_command`, build `$load-profile.output.build_command`
+        (an empty command means the project has none). The pull request will be
+        merged and deployed automatically once it is ready, so never leave a
+        known failure behind. Original request: $INPUTS.task $ARGUMENTS
+
+  # ── Merge ──────────────────────────────────────────────────────────────────
+  # Every GitHub read of the merge guard lives here, so fixtures can stub it
+  # like every other node that talks to GitHub while merge-gate executes.
+  - id: pr-state
+    script: pr-state
+    runtime: bun
+    depends_on: [deliver]
+    timeout: 120000
+    with:
+      delivery: "$deliver.output"
+    output_format:
+      type: object
+      properties:
+        pr_url: { type: string }
+        read: { type: boolean }
+        head: { type: string }
+        state: { type: string }
+        is_draft: { type: boolean }
+        checkout_is_head: { type: boolean }
+        checkout_clean: { type: boolean }
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              bucket: { type: string }
+            required: [name, bucket]
+        checks_read: { type: boolean }
+      required: [pr_url, read, head, state, is_draft, checkout_is_head, checkout_clean, checks, checks_read]
+
+  # The factory's own green check before it merges. Archon v0.10.1's deliver
+  # block can flip a PR ready after its validation gate failed, and the inner
+  # deliver nodes cannot be referenced from here, so the profile's test and
+  # build commands run again on the exact PR head. Lint defers to a passing CI
+  # lint check when the PR has one: run locally under the run's .archon/
+  # worktree path, RuboCop's excludes miss and it refused a PR whose CI Lint
+  # was green. It refuses (exit 0, green false) on any red command or concluded
+  # red CI check, and when pr-state found the PR unreadable, not open and
+  # ready, or not what the checkout holds.
+  - id: merge-gate
+    script: merge-gate
+    runtime: bun
+    depends_on: [pr-state]
+    timeout: 3600000
+    with:
+      pr: "$pr-state.output"
+      test_command: "$load-profile.output.test_command"
+      lint_command: "$load-profile.output.lint_command"
+      build_command: "$load-profile.output.build_command"
+      secret_names: "$load-profile.output.secret_names"
+    output_format:
+      type: object
+      properties:
+        green: { type: boolean }
+        pr_url: { type: string }
+        head: { type: string }
+        reason: { type: string }
+      required: [green, pr_url, head, reason]
+
+  - id: merge
+    bash: |
+      set -euo pipefail
+      # merge-gate read both from the pull request itself on GitHub.
+      PR_URL=$merge-gate.output.pr_url
+      HEAD_BRANCH=$merge-gate.output.head
+      STRATEGY=$load-profile.output.merge_strategy
+      case "$STRATEGY" in squash|merge|rebase) ;; *) printf '%s\n' "merge: unknown merge_strategy '$STRATEGY'" >&2; exit 1;; esac
+      # git's own exit code is checked (a pipeline would report sed's, which always
+      # succeeds), then the URL is normalised to owner/repo and the shape is
+      # verified. Only the normalised form is ever passed on, so a token-bearing
+      # remote URL (https://<token>@host/...) never reaches a command line or a
+      # message; the raw URL is never printed.
+      ORIGIN_URL=$(git remote get-url origin 2>/dev/null) || {
+        printf '%s\n' "merge: could not read the origin remote." >&2; exit 1
+      }
+      ORIGIN_REPO=$(printf '%s' "$ORIGIN_URL" | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#; s#\.git$##')
+      case "$ORIGIN_REPO" in
+        *[!A-Za-z0-9_.-]*/* | */*[!A-Za-z0-9_.-]* | */*/* | /* | */ | "")
+          printf '%s\n' "merge: origin remote does not resolve to an owner/repo." >&2; exit 1
+          ;;
+      esac
+      # --repo pins every gh call to the origin remote: gh's default resolution in
+      # a fork clone targets the upstream parent instead. With --repo gh disables
+      # inference and REQUIRES an explicit selector — the PR URL is one.
+      if ! OUT=$(gh pr merge "$PR_URL" --repo "$ORIGIN_REPO" "--$STRATEGY" 2>&1); then
+        printf '%s\n' "merge: gh pr merge failed: $OUT" >&2; exit 1
+      fi
+      STATE=$(gh pr view "$PR_URL" --repo "$ORIGIN_REPO" --json state --jq .state 2>/dev/null || true)
+      if [ "$STATE" != "MERGED" ]; then
+        printf '%s\n' "merge: pull request is not MERGED after the merge (state: $STATE)." >&2; exit 1
+      fi
+      # Best effort; a protected or already-deleted branch must not fail the run.
+      git push origin --delete "$HEAD_BRANCH" >/dev/null 2>&1 || true
+      # GitHub is eventually consistent about mergeCommit: for a few seconds
+      # after a successful merge the field still reads null. `// ""` turns that
+      # null into an empty string so the loop can retry.
+      MERGE_SHA=""
+      ATTEMPT=1
+      while [ "$ATTEMPT" -le 5 ]; do
+        MERGE_SHA=$(gh pr view "$PR_URL" --repo "$ORIGIN_REPO" --json mergeCommit --jq '.mergeCommit.oid // ""' 2>/dev/null || true)
+        if [ -n "$MERGE_SHA" ]; then break; fi
+        ATTEMPT=$((ATTEMPT + 1))
+        if [ "$ATTEMPT" -le 5 ]; then sleep 3; fi
+      done
+      # The merge already happened, so this is reported, not a node failure: a
+      # failed producer never falls back to `if_skipped`, and `report` would
+      # fail with it. An empty merge_sha keeps deploy from running.
+      if [ -z "$MERGE_SHA" ]; then
+        printf '%s\n' "merge: pull request is merged but its merge commit could not be read yet" >&2
+      fi
+      MERGED_HEAD=$(gh pr view "$PR_URL" --repo "$ORIGIN_REPO" --json headRefName --jq .headRefName 2>/dev/null || true)
+      printf '{"merged":true,"merge_sha":"%s","head":"%s"}' "$MERGE_SHA" "${MERGED_HEAD:-$HEAD_BRANCH}"
+    timeout: 300000
+    depends_on: [merge-gate]
+    when: "$merge-gate.output.green == true"
+    output_format:
+      type: object
+      properties:
+        merged: { type: boolean }
+        merge_sha: { type: string }
+        head: { type: string }
+      required: [merged, merge_sha, head]
+
+  # ── Deploy / health / monitoring ───────────────────────────────────────────
+  - id: deploy
+    script: deploy
+    runtime: bun
+    depends_on: [merge]
+    when: "$merge.output.merge_sha != ''"
+    timeout: 1800000
+    with:
+      command: "$load-profile.output.deploy_command"
+      secret_names: "$load-profile.output.secret_names"
+      remote: "$load-profile.output.remote"
+      merge_sha: "$merge.output.merge_sha"
+    output_format:
+      type: object
+      properties:
+        deployed: { type: boolean }
+        exit_code: { type: number }
+        deployed_at: { type: string }
+        log: { type: string }
+      required: [deployed, exit_code, deployed_at, log]
+
+  # Always exits 0: red health is a reported state, decide-rollback owns what it means.
+  - id: health
+    bash: |
+      URL=$load-profile.output.health_url
+      WAIT=$load-profile.output.wait_seconds
+      START=$(date +%s); STATUS=000; ELAPSED=0
+      while :; do
+        # curl itself prints 000 and exits non-zero when it cannot connect, so
+        # no `|| printf '000'` fallback here — it would concatenate to 000000
+        # and that bogus code would reach the report. ${STATUS:-000} only
+        # covers curl printing nothing at all.
+        STATUS=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$URL" 2>/dev/null)
+        STATUS=${STATUS:-000}
+        ELAPSED=$(( $(date +%s) - START ))
+        [ "$STATUS" = "200" ] && break
+        [ "$ELAPSED" -ge "$WAIT" ] && break
+        sleep 5
+      done
+      if [ "$STATUS" = "200" ]; then H=true; else H=false; fi
+      printf '{"healthy":%s,"last_status":"%s","elapsed_seconds":%s}' "$H" "$STATUS" "$ELAPSED"
+    timeout: 1800000
+    depends_on: [deploy]
+    when: "$deploy.output.deployed == true"
+    output_format:
+      type: object
+      properties:
+        healthy: { type: boolean }
+        last_status: { type: string }
+        elapsed_seconds: { type: number }
+      required: [healthy, last_status, elapsed_seconds]
+
+  - id: monitor-check
+    bash: |
+      PROVIDER=$load-profile.output.monitoring_provider
+      if [ "$PROVIDER" != "none" ] && [ -f .archon/mcp/monitoring.json ]; then printf '{"enabled":true}'; else printf '{"enabled":false}'; fi
+    depends_on: [health]
+    when: "$health.output.healthy == true"
+    output_format:
+      type: object
+      properties:
+        enabled: { type: boolean }
+      required: [enabled]
+
+  - id: monitor
+    command: monitor
+    model: medium
+    # Pinned to Claude because `allowed_tools: []` is enforced for Claude nodes
+    # only (Codex ignores tool restrictions) and this node must stay MCP-only.
+    provider: claude
+    mcp: .archon/mcp/monitoring.json
+    allowed_tools: []
+    depends_on: [monitor-check]
+    when: "$monitor-check.output.enabled == true"
+    with:
+      provider: "$load-profile.output.monitoring_provider"
+      window_minutes: "$load-profile.output.window_minutes"
+      deployed_at: "$deploy.output.deployed_at"
+      merge_sha: "$merge.output.merge_sha"
+    output_type: monitoring-verdict
+    output_format:
+      type: object
+      properties:
+        status: { type: string, enum: [healthy, errors, unavailable] }
+        findings: { type: string }
+      required: [status, findings]
+
+  # ── Rollback decision ──────────────────────────────────────────────────────
+  - id: decide-rollback
+    script: decide-rollback
+    runtime: bun
+    depends_on: [deploy, health, monitor]
+    trigger_rule: all_done
+    with:
+      deployed: { from: "$deploy.output.deployed", if_skipped: "skipped" }
+      healthy: { from: "$health.output.healthy", if_skipped: "skipped" }
+      monitor_status: { from: "$monitor.output.status", if_skipped: "skipped" }
+    output_format:
+      type: object
+      properties:
+        rollback: { type: boolean }
+        reason: { type: string }
+      required: [rollback, reason]
+
+  - id: rollback
+    script: rollback
+    runtime: bun
+    depends_on: [decide-rollback]
+    when: "$decide-rollback.output.rollback == true"
+    timeout: 1800000
+    with:
+      command: "$load-profile.output.rollback_command"
+      secret_names: "$load-profile.output.secret_names"
+    output_format:
+      type: object
+      properties:
+        rolled_back: { type: boolean }
+        exit_code: { type: number }
+        log: { type: string }
+      required: [rolled_back, exit_code, log]
+
+  # ── Report ─────────────────────────────────────────────────────────────────
+  - id: report
+    script: report
+    runtime: bun
+    depends_on: [merge, deploy, health, monitor, decide-rollback, rollback]
+    # all_done: on Archon v0.11.1 a failed delivery cascades skips that block
+    # none_failed_min_one_success, and the run would end with no report.
+    trigger_rule: all_done
+    with:
+      # merge-gate/merge can be skipped when delivery fails upstream; without
+      # if_skipped the report node itself failed on the binding (seen live) and
+      # the run ended with no report at all.
+      pr_url: { from: "$merge-gate.output.pr_url", if_skipped: "" }
+      merge_refused: { from: "$merge-gate.output.reason", if_skipped: "" }
+      merged: { from: "$merge.output.merged", if_skipped: "skipped" }
+      merge_sha: { from: "$merge.output.merge_sha", if_skipped: "" }
+      deployed: { from: "$deploy.output.deployed", if_skipped: "skipped" }
+      deploy_exit: { from: "$deploy.output.exit_code", if_skipped: "" }
+      healthy: { from: "$health.output.healthy", if_skipped: "skipped" }
+      last_status: { from: "$health.output.last_status", if_skipped: "" }
+      health_url: "$load-profile.output.health_url"
+      monitor_status: { from: "$monitor.output.status", if_skipped: "skipped" }
+      monitor_findings: { from: "$monitor.output.findings", if_skipped: "" }
+      rollback: "$decide-rollback.output.rollback"
+      rolled_back: { from: "$rollback.output.rolled_back", if_skipped: "skipped" }
+      rollback_reason: "$decide-rollback.output.reason"
+    output_format:
+      type: object
+      properties:
+        delivered: { type: boolean }
+        summary: { type: string }
+        pr_url: { type: string }
+        merge_sha: { type: string }
+        deploy_status: { type: string }
+        health: { type: string }
+        monitoring: { type: string }
+        rollback: { type: string }
+      required: [delivered, summary, pr_url, merge_sha, deploy_status, health, monitoring, rollback]
+
+  # Archon v0.10.1 rejects `outcome_field` on exec nodes, so a red result ends
+  # the run here with the report's summary as the reason.
+  - id: not-delivered
+    cancel: "Run stopped — $report.output.summary"
+    depends_on: [report]
+    when: "$report.output.delivered == false"

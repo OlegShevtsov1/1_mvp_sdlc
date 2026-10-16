@@ -1,0 +1,4 @@
+demo:
+  tools:
+    reviewer: [Read, Grep, Glob]
+  read_only: [reviewer]

@@ -1,0 +1,17 @@
+diff --git a/bin/bootstrap-project b/bin/bootstrap-project
+index 5029b71..ec87442 100755
+--- a/bin/bootstrap-project
++++ b/bin/bootstrap-project
+@@ -44,10 +44,8 @@ def install(target, rel, template, overwrite):
+         return "created"
+     if path.read_bytes() == wanted:
+         return "unchanged"
+-    if rel in overwrite:
+-        path.write_bytes(wanted)
+-        return "overwritten"
+-    return "differs (kept; re-run with --overwrite {}); template: {}".format(rel, template)
++    path.write_bytes(wanted)
++    return "overwritten"
+ 
+ 
+ def ensure_gitignore(target):

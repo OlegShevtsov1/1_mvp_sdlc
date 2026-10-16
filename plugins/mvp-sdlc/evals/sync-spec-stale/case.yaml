@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0",
+  "name": "sync-spec-stale",
+  "description": "Skill sync-spec and bin/sync-spec: a stale frontend copy is detected and refreshed by sync-spec.",
+  "tags": [
+    "golden"
+  ],
+  "context": {
+    "scaffold_script": "scaffold.sh"
+  },
+  "execution": {
+    "prompt": "The backend checkout for this frontend repository is ./be. Run the sync-spec check for feature demo against it. Only if the check reports drift, re-sync the copy with sync-spec. Decide from the check's exit code and output alone: do not compare files, hashes or commits yourself. Do not commit.",
+    "max_turns": 12,
+    "timeout_seconds": 300,
+    "allowed_tools": [
+      "Bash",
+      "Read",
+      "Glob",
+      "Grep",
+      "Skill"
+    ]
+  },
+  "runs": 3,
+  "graders": [
+    {
+      "name": "copy-refreshed",
+      "type": "regex",
+      "target": {
+        "source": "file",
+        "path": "docs/features/demo/PRD.md"
+      },
+      "pattern": "The export file name includes the period\\.",
+      "match": "contains"
+    },
+    {
+      "name": "synced-by-sync-spec",
+      "type": "regex",
+      "target": {
+        "source": "file",
+        "path": "docs/features/demo/.spec-source"
+      },
+      "pattern": "26c82259891088cd8fc2395a7d7e077b8cef54ab8236195e17593ef75e9bfa6b",
+      "match": "contains"
+    }
+  ]
+}

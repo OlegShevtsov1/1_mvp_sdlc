@@ -1,0 +1,13 @@
+diff --git a/bin/sync-spec b/bin/sync-spec
+index 93eb831..c793065 100755
+--- a/bin/sync-spec
++++ b/bin/sync-spec
+@@ -100,8 +100,6 @@ def check(root, be, sha, slug):
+             drift.append("{}: new in be@{}".format(rel, sha[:7]))
+         elif rel not in current:
+             drift.append("{}: removed in be@{}".format(rel, sha[:7]))
+-        elif sha256(current[rel]) != recorded[rel].get("source_sha256"):
+-            drift.append("{}: changed in be@{}".format(rel, sha[:7]))
+         local = target / rel
+         if rel in recorded and (not local.is_file() or sha256(local.read_bytes()) != recorded[rel].get("copy_sha256")):
+             drift.append("{}: the copy here was edited or removed".format(rel))

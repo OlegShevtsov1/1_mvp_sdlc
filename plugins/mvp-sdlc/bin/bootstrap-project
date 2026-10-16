@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Apply the mvp-sdlc .claude/ templates to an app repository. Idempotent; never overwrites without --overwrite.
+
+Usage: bootstrap-project <be|fe> [--target DIR] [--overwrite PATH]...
+Installs CLAUDE.md, .claude/settings.json, .claude/rules/*.md and .claude/sdlc.local.md, and makes sure .gitignore
+has the line `.claude/*.local.md`. Prints one line per file: created, unchanged, overwritten, or
+differs (kept; re-run with --overwrite <path>); template: <template file>. The last line is `No changes` when
+nothing was written.
+Exit 0 done, 2 usage error. Touches no other file.
+"""
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import sdlc_common  # noqa: E402
+
+TEMPLATES = sdlc_common.PLUGIN_DIR / "templates" / "claude"
+RULES = {
+    "be": ("git", "testing", "migrations", "api", "security"),
+    "fe": ("git", "testing", "api", "security", "frontend"),
+}
+GITIGNORE_LINE = ".claude/*.local.md"
+
+
+def plan(kind):
+    """{target path relative to the repo: template path}."""
+    files = {
+        "CLAUDE.md": TEMPLATES / "CLAUDE.{}.md.tmpl".format(kind),
+        ".claude/settings.json": TEMPLATES / "settings.{}.json".format(kind),
+        ".claude/sdlc.local.md": TEMPLATES / "sdlc.local.{}.md.tmpl".format(kind),
+    }
+    for rule in RULES[kind]:
+        files[".claude/rules/{}.md".format(rule)] = TEMPLATES / "rules" / "{}.md".format(rule)
+    return files
+
+
+def install(target, rel, template, overwrite):
+    path = target / rel
+    wanted = template.read_bytes()
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(wanted)
+        return "created"
+    if path.read_bytes() == wanted:
+        return "unchanged"
+    if rel in overwrite:
+        path.write_bytes(wanted)
+        return "overwritten"
+    return "differs (kept; re-run with --overwrite {}); template: {}".format(rel, template)
+
+
+def ensure_gitignore(target):
+    path = target / ".gitignore"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    if GITIGNORE_LINE in (line.strip() for line in text.splitlines()):
+        return "unchanged"
+    separator = "" if not text or text.endswith("\n") else "\n"
+    path.write_text(text + separator + GITIGNORE_LINE + "\n", encoding="utf-8")
+    return "updated" if text else "created"
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("kind", choices=sorted(RULES))
+    parser.add_argument("--target", type=Path, help="repository root (default: git top-level of the cwd)")
+    parser.add_argument("--overwrite", action="append", default=[], metavar="PATH")
+    args = parser.parse_args(argv)
+    files = plan(args.kind)
+    unknown = sorted(set(args.overwrite) - set(files))
+    if unknown:
+        parser.error("--overwrite accepts only {}; got {}".format(", ".join(files), ", ".join(unknown)))
+    target = (args.target or sdlc_common.repo_root() or Path.cwd()).resolve()
+    if not target.is_dir():
+        parser.error("{} is not a directory".format(target))
+    written = 0
+    for rel, template in files.items():
+        status = install(target, rel, template, set(args.overwrite))
+        written += status in ("created", "overwritten")
+        print("{}: {}".format(rel, status))
+    status = ensure_gitignore(target)
+    written += status != "unchanged"
+    print(".gitignore: {}".format(status))
+    print("No changes" if not written else "{} file(s) written".format(written))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,30 @@
+{
+  "name": "mvp",
+  "owner": {
+    "name": "OlegShevtsov1",
+    "url": "https://github.com/OlegShevtsov1"
+  },
+  "description": "The MVP SDLC marketplace: the course sdlc plugin (vendored upstream, unchanged) and the mvp-sdlc adaptations.",
+  "plugins": [
+    {
+      "name": "sdlc",
+      "source": "./plugins/sdlc",
+      "version": "4.5.1",
+      "description": "Full Claude Code SDLC pipeline with 21 skills: a 12-stage map-architecture to ship backbone, interview ideation (feature and greenfield project modes with an easy/medium/hard depth regulator), a scaffold skill that materializes a new project from the base-tpl template with subtractive batteries, and 7 cross-cutting utilities. Includes prepare-design-spec for one repository-aware UI design spec with an embedded Definition of Done, verify-ui for live browser evidence, and user-documentation for end-user docs generated from a live app (playwright-cli walks, per-flow doc-flow subagents, screenshots and optional screencast replays). Per-feature artifacts live under docs/features/<slug>/; skills own their templates and end with explicit stage handoffs.",
+      "author": {
+        "name": "Kyrylo Genkov"
+      },
+      "license": "MIT"
+    },
+    {
+      "name": "mvp-sdlc",
+      "source": "./plugins/mvp-sdlc",
+      "version": "0.1.2",
+      "description": "MVP adaptations of the sdlc plugin: Rails/ActiveRecord data model, be/fe spec sync, Trello-card feature start, factory task briefs, app-repo .claude/ bootstrap, and deterministic hooks (phase gate, PRD lint, script-only state.json, protected main, secrets, published tags).",
+      "author": {
+        "name": "OlegShevtsov1"
+      },
+      "license": "MIT"
+    }
+  ]
+}

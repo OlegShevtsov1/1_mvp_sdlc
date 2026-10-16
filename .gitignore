@@ -1,0 +1,17 @@
+.tools/
+*.tgz
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
+.eval-runs/
+
+# A real monitoring MCP config must never be committed here; only the empty
+# placeholder that keeps `archon validate` able to resolve the factory's `monitor` node.
+/.archon/mcp/*
+!/.archon/mcp/monitoring.json

@@ -1,0 +1,8 @@
+{
+  "name": "archon-sdlc-factory",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "slug": "demo",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Export a shop's orders for a period as a spreadsheet file",
+      "layer": "app",
+      "deps": [],
+      "acs": ["AC-01", "AC-02"],
+      "dod": ["unit tests for the export rule pass", "e2e test for the export flow passes", "lint + vet clean"],
+      "files_hint": ["app/services/order_export.rb", "spec/services/order_export_spec.rb"],
+      "owner": "Backend lead",
+      "estimate": "S",
+      "status": "todo"
+    },
+    {
+      "id": "T2",
+      "title": "Expose the export to shop managers",
+      "layer": "ports",
+      "deps": ["T1"],
+      "acs": ["AC-01"],
+      "dod": ["request spec for the export passes", "lint + vet clean"],
+      "files_hint": ["app/controllers/order_exports_controller.rb"],
+      "owner": "Backend lead",
+      "estimate": "S",
+      "status": "todo"
+    },
+    {
+      "id": "T3",
+      "title": "Refuse exports of other shops",
+      "layer": "app",
+      "deps": [],
+      "acs": ["AC-03"],
+      "dod": ["integration test for the refusal passes", "lint + vet clean"],
+      "files_hint": ["app/policies/order_export_policy.rb"],
+      "owner": "Backend lead",
+      "estimate": "L",
+      "status": "todo"
+    }
+  ]
+}

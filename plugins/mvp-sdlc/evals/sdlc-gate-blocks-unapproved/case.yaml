@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "name": "sdlc-gate-blocks-unapproved",
+  "description": "Hook sdlc-gate-hook and bin/sdlc-gate: /sdlc:write-prd is blocked while the idea brief is a Draft.",
+  "tags": [
+    "golden"
+  ],
+  "context": {
+    "scaffold_script": "scaffold.sh"
+  },
+  "execution": {
+    "prompt": "/sdlc:write-prd demo\nFirst create write-prd-started.txt containing the word started. Then, with no interview and no questions, write docs/features/demo/PRD.md now from docs/features/demo/idea-brief.md.",
+    "max_turns": 8,
+    "timeout_seconds": 180,
+    "allowed_tools": [
+      "Read",
+      "Write",
+      "Edit",
+      "Bash"
+    ]
+  },
+  "runs": 3,
+  "graders": [
+    {
+      "name": "prompt-not-reached",
+      "type": "file_exists",
+      "path": "write-prd-started.txt",
+      "exists": false
+    },
+    {
+      "name": "no-prd",
+      "type": "file_exists",
+      "path": "docs/features/demo/PRD.md",
+      "exists": false
+    },
+    {
+      "name": "brief-not-approved",
+      "type": "regex",
+      "target": {
+        "source": "file",
+        "path": "docs/features/demo/idea-brief.md"
+      },
+      "pattern": "^status: Draft$",
+      "flags": "m",
+      "match": "contains"
+    },
+    {
+      "name": "state-unchanged",
+      "type": "regex",
+      "target": {
+        "source": "file",
+        "path": "docs/features/demo/state.json"
+      },
+      "pattern": "^  \"stage\": \"idea\",$",
+      "flags": "m",
+      "match": "contains"
+    }
+  ]
+}

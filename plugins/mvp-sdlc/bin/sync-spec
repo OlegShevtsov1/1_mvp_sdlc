@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Copy a feature's spec artifacts from the be checkout into this (fe) repository, or check the copy for drift.
+
+Usage: sync-spec <slug> --from <be checkout> [--ref <ref>] [--check]
+Copies PRD.md, sad.md, adr/, contracts/, CONTEXT.md and test-plan.md (whichever exist) from the commit <ref>
+(default origin/main) of the be checkout, never from its working tree, into docs/features/<slug>/ with a
+"do not edit" header, and records the source in docs/features/<slug>/.spec-source. The record also carries the
+Trello card fields of the be state.json (id, number, title) that task-brief needs for the pull request title.
+--check exits 1 when a source file changed, appeared or was removed at <ref>, a copy was edited here, or there is no record.
+Exit 0 in sync, 1 drift or failure, 2 usage error.
+"""
+import argparse
+import hashlib
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import sdlc_common  # noqa: E402
+
+ARTIFACTS = ("PRD.md", "sad.md", "adr", "contracts", "CONTEXT.md", "test-plan.md")
+RECORD = ".spec-source"
+CARD_FIELDS = ("trello_card_id", "trello_card_id_short", "trello_card_title")
+
+
+class Failure(Exception):
+    pass
+
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def git_bytes(repo, *args):
+    result = subprocess.run(["git", "-C", str(repo)] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        raise Failure("git {} failed in {}: {}".format(" ".join(args), repo, result.stderr.decode().strip()))
+    return result.stdout
+
+
+def source_files(be, sha, slug):
+    """{path relative to the feature dir: blob bytes} for the copied artifacts at `sha`; empty when the feature dir
+    existed earlier in the history of `sha` and was removed since."""
+    prefix = (sdlc_common.FEATURES_DIR / slug).as_posix() + "/"
+    listed = git_bytes(be, "ls-tree", "-r", "--name-only", "-z", sha, "--", prefix).decode("utf-8").split("\0")
+    files = {}
+    for path in filter(None, listed):
+        rel = path[len(prefix):]
+        if rel in ARTIFACTS or ("/" in rel and rel.split("/", 1)[0] in ARTIFACTS):
+            files[rel] = git_bytes(be, "show", "{}:{}".format(sha, path))
+    if not files and not git_bytes(be, "log", "-1", "--format=%H", sha, "--", prefix).strip():
+        raise Failure("no spec artifacts for {} at {} in the be checkout".format(prefix.rstrip("/"), sha[:7]))
+    return files
+
+
+def card_fields(be, sha, slug):
+    path = (sdlc_common.FEATURES_DIR / slug / "state.json").as_posix()
+    if not git_bytes(be, "ls-tree", "--name-only", sha, "--", path).strip():
+        return {}
+    try:
+        state = json.loads(git_bytes(be, "show", "{}:{}".format(sha, path)).decode("utf-8"))
+    except ValueError:
+        raise Failure("{} at {} in the be checkout is not valid JSON".format(path, sha[:7]))
+    if not isinstance(state, dict):
+        raise Failure("{} at {} in the be checkout is not a JSON object".format(path, sha[:7]))
+    return {key: state[key] for key in CARD_FIELDS if state.get(key) is not None}
+
+
+def copy_text(rel, data, sha, slug):
+    path = "{}/{}".format((sdlc_common.FEATURES_DIR / slug).as_posix(), rel)
+    note = "Copied from be@{}:{} by sync-spec. Do not edit here.".format(sha, path)
+    if rel.endswith(".md"):
+        lines = data.decode("utf-8").splitlines(True)
+        bounds = sdlc_common.frontmatter_bounds([line.rstrip("\n") for line in lines])
+        at = bounds[1] + 1 if bounds else 0
+        return ("".join(lines[:at]) + "<!-- {} -->\n".format(note) + "".join(lines[at:])).encode("utf-8")
+    if rel.endswith((".yaml", ".yml")):
+        return "# {}\n".format(note).encode("utf-8") + data
+    return data
+
+
+def source_label(be):
+    """The be origin URL when it is a network URL (never a local path, the record is committed), else the dir name."""
+    url = sdlc_common.git(be, "remote", "get-url", "origin") or ""
+    return url if re.match(r"(https://|ssh://|git@)", url) else Path(be).resolve().name
+
+
+def sync(root, be, sha, slug):
+    target = sdlc_common.feature_dir(root, slug)
+    record = {"source_repo": source_label(be), "source_sha": sha, "files": {}}
+    for rel, data in sorted(source_files(be, sha, slug).items()):
+        copy = copy_text(rel, data, sha, slug)
+        path = target / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(copy)
+        record["files"][rel] = {"source_sha256": sha256(data), "copy_sha256": sha256(copy)}
+        print("sync-spec: {}".format(path.relative_to(root).as_posix()))
+    record.update(card_fields(be, sha, slug))
+    (target / RECORD).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print("sync-spec: {} files from be@{}".format(len(record["files"]), sha[:7]))
+
+
+def check(root, be, sha, slug):
+    target = sdlc_common.feature_dir(root, slug)
+    try:
+        record = json.loads((target / RECORD).read_text(encoding="utf-8"))
+        recorded = record["files"]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise Failure("no usable {}/{}: run sync-spec {} --from <be checkout> first".format(target, RECORD, slug))
+    drift = []
+    current = source_files(be, sha, slug)
+    for rel in sorted(set(current) | set(recorded)):
+        if rel not in recorded:
+            drift.append("{}: new in be@{}".format(rel, sha[:7]))
+        elif rel not in current:
+            drift.append("{}: removed in be@{}".format(rel, sha[:7]))
+        elif sha256(current[rel]) != recorded[rel].get("source_sha256"):
+            drift.append("{}: changed in be@{}".format(rel, sha[:7]))
+        local = target / rel
+        if rel in recorded and (not local.is_file() or sha256(local.read_bytes()) != recorded[rel].get("copy_sha256")):
+            drift.append("{}: the copy here was edited or removed".format(rel))
+    for line in drift:
+        print("sync-spec: drift: {}".format(line))
+    if drift:
+        raise Failure("{} is out of sync with be; re-run sync-spec {} --from <be checkout>".format(target.name, slug))
+    print("sync-spec: {} in sync with be@{}".format(slug, sha[:7]))
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("slug")
+    parser.add_argument("--from", dest="be", required=True, type=Path, help="local checkout of the be repository")
+    parser.add_argument("--ref", default="origin/main")
+    parser.add_argument("--check", action="store_true")
+    args = parser.parse_args(argv)
+    if not sdlc_common.valid_slug(args.slug):
+        print("sync-spec: invalid slug {!r}: must match {}".format(args.slug, sdlc_common.SLUG_RE.pattern), file=sys.stderr)
+        return 2
+    try:
+        root = sdlc_common.repo_root()
+        if root is None:
+            raise Failure("not inside a git repository")
+        sha = sdlc_common.git(args.be, "rev-parse", "--verify", "-q", args.ref + "^{commit}")
+        if not sha:
+            raise Failure("{} is not a commit in {} (git fetch there?)".format(args.ref, args.be))
+        (check if args.check else sync)(root, args.be, sha, args.slug)
+    except Failure as exc:
+        print("sync-spec: {}".format(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

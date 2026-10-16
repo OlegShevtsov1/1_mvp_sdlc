@@ -1,0 +1,2 @@
+# Dry-run stubs for scripts/ci/archon-check.sh; never installed. The loop ends on its first round.
+review: "Plan approved.\n<promise>PLAN_APPROVED</promise>"

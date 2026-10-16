@@ -1,0 +1,18 @@
+diff --git a/bin/task-brief b/bin/task-brief
+index 7882f18..71aed1d 100755
+--- a/bin/task-brief
++++ b/bin/task-brief
+@@ -166,13 +166,6 @@ def brief(root, slug, task_id):
+         "",
+         "Rules:",
+         "- Size limit: ≤ 1 day of work, ≤ 500 LOC diff. If it does not fit, stop and report instead of growing the diff.",
+-        "- Exactly three commits, in this order:",
+-        "  1. `test(<scope>): ...` adds the failing tests for the criteria above (RED);",
+-        "  2. `feat(<scope>): ...` or `fix(<scope>): ...` makes them pass (GREEN); do not change tests after RED;",
+-        "  3. `refactor(<scope>): ...` cleans up with every test still green.",
+-        "- Every commit message ends with these trailers:",
+-        "  SDLC-Task: {}".format(task_id),
+-        "  SDLC-AC: {}".format(", ".join(acs)),
+         "- Commands (from {}):".format(LOCAL_SETTINGS.as_posix()),
+     ]
+     out += ["  - {}: {}".format(label, settings[key]) for key, label in COMMAND_KEYS if settings.get(key)]

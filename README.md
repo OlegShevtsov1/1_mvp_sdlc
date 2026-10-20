@@ -1,55 +1,38 @@
 # 1_mvp_sdlc
 
+An AI-driven software delivery process for small product teams, packaged as code: Claude Code plugins that take an
+idea through specification, architecture and tasks, and an [Archon](https://github.com/coleam00/Archon) workflow
+("the factory") that turns each task into a tested, reviewed, merged and deployed pull request. It was built to deliver
+the Pilot application below end to end, and it is reused by every project that follows the same conventions
+(trunk with a `develop` branch, TDD commit order, tag-only production releases, health checks and rollback).
+
 ## Live
 
-Projects built with this SDLC:
+Built and operated with this toolkit:
 
-- **Pilot app (prod):** <https://app.pilot.up.km.ua> · API <https://pilot.up.km.ua/health>
+- **Pilot app (prod):** <https://app.pilot.up.km.ua> · API <https://pilot.up.km.ua/health> · Swagger <https://pilot.up.km.ua/api-docs/index.html>
 - **Pilot app (dev):** <https://app.dev.pilot.up.km.ua> · API <https://dev.pilot.up.km.ua/health>
-- Repos: [1_mvp_pilot_be](https://github.com/OlegShevtsov1/1_mvp_pilot_be) · [1_mvp_pilot_fe](https://github.com/OlegShevtsov1/1_mvp_pilot_fe)
+- Repositories: [1_mvp_pilot_be](https://github.com/OlegShevtsov1/1_mvp_pilot_be) (Rails API) ·
+  [1_mvp_pilot_fe](https://github.com/OlegShevtsov1/1_mvp_pilot_fe) (React SPA)
 
-The MVP SDLC toolkit: a Claude Code plugin marketplace with the course `sdlc` plugin and the `mvp-sdlc`
-adaptations, project templates, the "new project" orchestrator and the Archon orchestration (the `factory` and
-`plan-review` workflows).
+## How the AI process works
 
-The repository is private today and is planned to become public as part of the portfolio publication run (PUB).
-That is why the public-repo hygiene rules below apply from the very first commit.
+1. **Specify.** The course plugin `sdlc` (`/sdlc:interview`, `/sdlc:write-prd`, `/sdlc:architecture-design`,
+   `/sdlc:generate-data-model`, `/sdlc:break-tasks`, ...) produces the feature artefacts in the project repository:
+   idea brief, PRD, C4 architecture and ADRs, data model, task briefs. The `mvp-sdlc` plugin adapts it to Rails and
+   to the two-repository setup (`rails-data-model`, `sync-spec`, `task-brief`, `feature-start` from a Trello card) and
+   adds deterministic guards: a phase gate that refuses to skip a step, hooks that protect `main`, secrets and
+   published tags, and branch-name and PR-convention checks.
+2. **Build.** Each task is handed to the Archon `factory` workflow: plan (approved by a person) → tests first →
+   implementation → multi-lens review (code, tests, docs, seams; P0/P1 findings block) → merge gate (CI green,
+   conventions) → squash merge into `develop` → automatic dev deploy → health check → rollback on a red health check
+   → report. The workflow pack and its operator guide are in [orchestration/](orchestration/docs/archon-factory.md).
+3. **Release.** A person merges `develop` into `main` and tags an annotated `vX.Y.Z`; CI builds the release notes
+   from the CHANGELOG and production is deployed only from that tag, then watched for ten minutes. The process
+   documents are in [docs/sdlc/](docs/sdlc/README.md) (phases and gates, DoR/DoD, TDD, git and review, releases,
+   agent security, observability, metrics).
 
-## Status
-
-**S3 delivered: the `mvp-sdlc` plugin 0.1.0 beside the vendored course plugin `sdlc` 4.5.1 in the marketplace
-`mvp`** (S2: marketplace and layer-0 plugin lint). **C1 delivered: `docs/sdlc/`**, the SDLC process documents, starting
-with [docs/sdlc/README.md](docs/sdlc/README.md). **C6 built: `mvp-sdlc` eval cases (layer 1), `make eval`; the
-first pass^3 run is pending.** **S1-move delivered: the orchestration is imported** — the `factory` workflow with
-its history, `plan-review`, the installer and the factory guide (see [Orchestration](#orchestration)).
-**S3b delivered: the `check-branch-name` hook, `mvp-sdlc` 0.1.1.** **C1b delivered: the develop branch model in
-`docs/sdlc/` and factory briefs with the `PILOT-<n>:` title and `Type:` line.**
-
-## Planned structure
-
-| Path | Delivered by |
-|---|---|
-| `README.md`, `LICENSE`, `.gitignore`, `.editorconfig` | S1-lite (this skeleton) |
-| `.github/workflows/ci.yml` | S1-lite; extended by S2, S3, S1-move and later S4 |
-| `.github/workflows/main-guard.yml` | S1-lite |
-| `.github/dependabot.yml`, `.archon/factory-profile.yaml`, `scripts/ci/` | S1-lite |
-| `install.sh`, `.archon/mcp/monitoring.json` | S1-move |
-| `orchestration/factory/` | S1-move |
-| `orchestration/workflows/plan-review.yaml` | S1-move |
-| `orchestration/docs/archon-factory.md` | S1-move |
-| `orchestration/tests/dry-run/`, `scripts/ci/archon-check.sh` (CI checks `factory`, `archon`) | S1-move |
-| `.claude-plugin/marketplace.json` | S2 |
-| `plugins/sdlc/` (upstream course plugin 4.5.1, unchanged) | S2 |
-| `plugins/contracts.yaml`, `scripts/lint_plugins.py` (evals layer 0) | S2 |
-| `scripts/test_lint_plugins.py`, `tests/fixtures/broken-agent/` | S2 |
-| `orchestration/workflows/plugin-probe.yaml` | S2 |
-| `plugins/mvp-sdlc/` (adaptations, hooks, phase gate; CI check `mvp_sdlc`) | S3 (delivered) |
-| `plugins/mvp-sdlc/evals/` (eval cases, evals layer 1), `Makefile` (`eval`, `eval-results`) | C6 |
-| `scripts/evals.py`, `scripts/test_evals.py`, `eval/results/` | C6 |
-| `docs/sdlc/`, `scripts/check_links.py`, `scripts/check_docs.py` (CI check `docs`) | C1 (delivered) |
-| `templates/github/pull_request_template.md` | C1 |
-| `templates/project-be/`, `templates/project-fe/`, `bin/render-template` | S4 |
-| `bin/project-add` | S5 |
+The history of the plan runs that delivered this repository is in [docs/delivery-history.md](docs/delivery-history.md).
 
 ## Plugins
 
@@ -69,9 +52,8 @@ This repository is the Claude Code plugin marketplace `mvp` (`.claude-plugin/mar
 - Project repositories enable the plugin through a committed `.claude/settings.json`: `extraKnownMarketplaces` →
   `OlegShevtsov1/1_mvp_sdlc` and `enabledPlugins."sdlc@mvp": true` plus `"mvp-sdlc@mvp": true`, written by
   `bootstrap-project` (project scope only, never user scope).
-- Unattended Archon probe (`orchestration/workflows/plugin-probe.yaml`), 2026-10-14, Claude Code 2.1.281,
-  Archon 0.10.1: FAIL — a project-scope plugin enabled only through `.claude/settings.json` is not visible to an
-  unattended run; fallback per R-B3 pending (user scope on the operator machine).
+- Plugin skills are for interactive Claude Code sessions. An unattended Archon run sees the plugin's agents but not
+  its `/sdlc:*` skills (checked with `orchestration/workflows/plugin-probe.yaml`), so the factory never relies on them.
 
 ## Orchestration
 
@@ -81,7 +63,7 @@ This repository is the Claude Code plugin marketplace `mvp` (`.claude-plugin/mar
 - `./install.sh` installs all of them into `~/.archon/workflows`, backing up what it replaces, and validates them.
 - The operator guide — requirements, install and rollback, tasks, gates, results, troubleshooting — is
   [orchestration/docs/archon-factory.md](orchestration/docs/archon-factory.md).
-- The `mvp-ops` post-merge pack is not here: it is versioned in the private plan repository and installed from there.
+- The `mvp-ops` post-merge pack (operator steps after a merge) is versioned in a private planning repository.
 
 ## Checks
 
@@ -124,11 +106,10 @@ in CI. It needs Claude Code (logged in), `bwrap`, `socat` and `make`. Details:
 came from a merged pull request. If not, the run fails and an alert goes to the `MVP_VPN_ALERTS` Telegram topic.
 Check any commit by hand with `gh workflow run main-guard.yml -f sha=<commit>`.
 
-**Pending operator action:** set the repository secrets `TELEGRAM_MVP_VPN_ALERTS_BOT_TOKEN`,
-`TELEGRAM_MVP_VPN_ALERTS_CHAT_ID` and `TELEGRAM_MVP_VPN_ALERTS_THREAD_ID`. Until they are set the Telegram alert is
-skipped and a violation only shows up as a failed run.
+Without the repository secrets `TELEGRAM_MVP_VPN_ALERTS_BOT_TOKEN`, `TELEGRAM_MVP_VPN_ALERTS_CHAT_ID` and
+`TELEGRAM_MVP_VPN_ALERTS_THREAD_ID` the Telegram alert is skipped and a violation only shows up as a failed run.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The vendored course plugin under `plugins/sdlc/` (S2) keeps its own upstream MIT
+MIT, see [LICENSE](LICENSE). The vendored course plugin under `plugins/sdlc/` keeps its own upstream MIT
 license.

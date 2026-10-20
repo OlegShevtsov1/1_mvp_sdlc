@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# Prints one line of team delivery metrics for a release (R-C7), appended to the job summary when
+# GITHUB_STEP_SUMMARY is set; release.yml runs it for every release tag, and the operator copies
+# the line into the execution log. Team metrics only: nothing names a person.
+# Usage: bin/sdlc-metrics <tag> [--runs <factory runs dir>]
+#        bin/sdlc-metrics --escaped <tag>
+# The window of a release is (previous release tag, tag], by the tags' dates.
+#   prs                 pull requests in the release: (#N) at the end of squash subjects
+#   lead_time_h         from the earliest of their creation times to the tag
+#   pr_lead_median_h    median time from creation to merge
+#   prod_rollbacks      successful Kamal Manage rollback runs in the window (console rollbacks are
+#                       not visible to GitHub)
+#   delivered_false     factory runs (<dir>/*/report.json written in the window) not delivered
+#   findings            their review findings (review/findings.json): Critical P0, Important P1, others P2
+#   stale_drafts        docs/**/*.md at the tag with front matter status: Draft, unchanged for 30+ days
+# --escaped: the GlitchTip issues first seen in the 7 days after the tag (deploy/glitchtip_issues.sh
+# and its env); refuses to run before those 7 days are over.
+# Env: GH_REPO (owner/name) and a gh token that can read pull requests and Actions runs. Acts on the
+# repository in the cwd. Exit 0: printed. 1: unknown tag or a failed query. 2: usage error, or
+# --escaped too early.
+set -euo pipefail
+
+DAY=86400
+here="$(dirname "${BASH_SOURCE[0]}")"
+
+usage() {
+  echo "usage: $0 <tag> [--runs <factory runs dir>] | --escaped <tag>" >&2
+  exit 2
+}
+
+tag_date() {
+  local date
+  date="$(git for-each-ref --format='%(creatordate:unix)' "refs/tags/$1")"
+  [[ -n "$date" ]] || { echo "error: no tag $1" >&2; exit 1; }
+  echo "$date"
+}
+
+day() {
+  date -u -d "@$1" +%F
+}
+
+epoch() {
+  date -u -d "$1" +%s
+}
+
+# hours <seconds>...: the values in hours, one per line, rounded to 0.1.
+hours() {
+  printf '%s\n' "$@" | awk '{ printf "%g\n", int($1 / 360 + 0.5) / 10 }'
+}
+
+median() {
+  sort -g | awk '{ v[NR] = $1 } END { if (NR % 2) print v[(NR + 1) / 2]; else printf "%g\n", (v[NR / 2] + v[NR / 2 + 1]) / 2 }'
+}
+
+fail() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+emit() {
+  echo "$1"
+  [[ -z "${GITHUB_STEP_SUMMARY:-}" ]] || echo "$1" >> "${GITHUB_STEP_SUMMARY}"
+}
+
+escaped() {
+  local tag="$1" start end issues count
+  start="$(tag_date "$tag")"
+  end=$(( start + 7 * DAY ))
+  if (( $(date +%s) < end )); then
+    echo "error: escaped defects of ${tag} are counted 7 days after the tag, not before $(day "$end")" >&2
+    exit 2
+  fi
+  issues="$("${here}/../deploy/glitchtip_issues.sh" "$start" "$end")"
+  count="$(grep -c . <<< "$issues" || true)"
+  emit "sdlc-metrics ${tag} escaped_defects=${count} window=$(day "$start")..$(day "$end")"
+}
+
+release() {
+  local tag="$1" runs="$2" end prev start range pr_list prs=() created=() leads=() n json
+  : "${GH_REPO:?GH_REPO must be owner/name}"
+  end="$(tag_date "$tag")"
+  prev="$("${here}/../scripts/next-version.sh" --previous "${tag}^{commit}")"
+  start=0 range="$tag"
+  if [[ -n "$prev" ]]; then
+    start="$(tag_date "$prev")"
+    range="${prev}..${tag}"
+  fi
+
+  pr_list="$(git log --no-merges --format=%s "$range" | sed -nE 's/.*\(#([0-9]+)\)[[:space:]]*$/\1/p' | sort -un)" ||
+    fail "cannot read the history ${range}"
+  [[ -z "$pr_list" ]] || mapfile -t prs <<< "$pr_list"
+  for n in "${prs[@]}"; do
+    json="$(gh api "repos/${GH_REPO}/pulls/${n}" --jq '[.created_at, .merged_at] | @tsv')"
+    read -r opened merged <<< "$json"
+    created+=("$(epoch "$opened")")
+    [[ -z "$merged" || "$merged" == null ]] || leads+=("$(( $(epoch "$merged") - $(epoch "$opened") ))")
+  done
+  local lead_time='n/a' lead_median='n/a'
+  if (( ${#created[@]} > 0 )); then
+    lead_time="$(hours "$(( end - $(printf '%s\n' "${created[@]}" | sort -n | head -1) ))")"
+  fi
+  if (( ${#leads[@]} > 0 )); then
+    lead_median="$(hours "${leads[@]}" | median)"
+  fi
+
+  local rollbacks=0 run_times run_at
+  run_times="$(gh api "repos/${GH_REPO}/actions/workflows/kamal-manage.yml/runs?status=success&per_page=100" \
+                 --jq '.workflow_runs[] | select(.conclusion == "success" and (.display_title | test("rollback"))) | .created_at')" ||
+    fail "cannot read the Kamal Manage runs"
+  while read -r run_at; do
+    [[ -n "$run_at" ]] || continue
+    run_at="$(epoch "$run_at")"
+    (( run_at > start && run_at <= end )) && rollbacks=$(( rollbacks + 1 ))
+  done <<< "$run_times"
+
+  local delivered='n/a' findings='n/a'
+  if [[ -n "$runs" ]]; then
+    local report findings_file severities written total=0 undelivered=0 p0=0 p1=0 p2=0 severity
+    for report in "$runs"/*/report.json; do
+      [[ -e "$report" ]] || continue
+      written="$(stat -c %Y "$report")"
+      (( written > start && written <= end )) || continue
+      total=$(( total + 1 ))
+      if jq -e '.delivered == false' "$report" > /dev/null; then
+        undelivered=$(( undelivered + 1 ))
+      fi
+      findings_file="$(dirname "$report")/review/findings.json"
+      [[ -e "$findings_file" ]] || continue
+      severities="$(jq -r '.[].severity' "$findings_file")" || fail "cannot read ${findings_file}"
+      while read -r severity; do
+        case "$severity" in
+          '') ;;
+          Critical) p0=$(( p0 + 1 )) ;;
+          Important) p1=$(( p1 + 1 )) ;;
+          *) p2=$(( p2 + 1 )) ;;
+        esac
+      done <<< "$severities"
+    done
+    delivered="${undelivered}/${total}"
+    findings="P0:${p0},P1:${p1},P2:${p2}"
+  fi
+
+  local stale=0 path changed
+  while read -r path; do
+    git show "${tag}:${path}" | awk '
+      NR == 1 { if ($0 != "---") exit; next }
+      $0 == "---" { exit }
+      /^status:[[:space:]]*Draft[[:space:]]*$/ { found = 1 }
+      END { exit !found }' || continue
+    changed="$(git log -1 --format=%ct "$tag" -- "$path")"
+    (( end - changed > 30 * DAY )) && stale=$(( stale + 1 ))
+  done < <(git ls-tree -r --name-only "$tag" -- docs | grep '\.md$' || true)
+
+  emit "sdlc-metrics ${tag} date=$(day "$end") prev=${prev:-none} prs=${#prs[@]} lead_time_h=${lead_time} pr_lead_median_h=${lead_median} prod_rollbacks=${rollbacks} delivered_false=${delivered} findings=${findings} stale_drafts=${stale}"
+}
+
+case "${1:-}" in
+  --escaped)
+    (( $# == 2 )) || usage
+    escaped "$2"
+    ;;
+  ''|-*) usage ;;
+  *)
+    tag="$1" runs=''
+    shift
+    if (( $# > 0 )); then
+      [[ "$1" == '--runs' && $# -eq 2 ]] || usage
+      runs="$2"
+    fi
+    release "$tag" "$runs"
+    ;;
+esac

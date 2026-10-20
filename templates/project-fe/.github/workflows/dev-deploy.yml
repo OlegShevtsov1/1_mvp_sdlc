@@ -1,0 +1,226 @@
+name: Dev Deploy
+# bin/wait-dev-deploy finds the automatic run of a commit by this title.
+run-name: ${{ github.event_name == 'workflow_run' && format('Dev Deploy sha-{0}', github.event.workflow_run.head_sha) || format('Dev Deploy dispatched from {0}', github.ref_name) }}
+
+# Builds the image once (tag sha-<git sha>, reused if it is already in ECR) and deploys it
+# with Kamal to the shared dev host over the shared CI VPN. Deploys automatically after a
+# Front CI push run on develop or a hotfix/* branch (decision 28); those deploys stay
+# skipped until the repository variable DEV_AUTO_DEPLOY is "true".
+on:
+  workflow_run:
+    workflows: [Front CI]
+    types: [completed]
+    branches: [develop, 'hotfix/*']
+  workflow_dispatch:
+    inputs:
+      rollback_to:
+        description: Full git sha of an earlier dev deploy to roll back to (empty deploys the dispatched commit)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-deploy
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: 'Guard: branch, secrets, deploy parameters'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       vars.DEV_AUTO_DEPLOY == 'true')
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: dev
+    timeout-minutes: 5
+    outputs:
+      url: ${{ steps.guard.outputs.url }}
+      image: ${{ steps.guard.outputs.image }}
+      cache_image: ${{ steps.guard.outputs.cache_image }}
+      service: ${{ steps.guard.outputs.service }}
+      mode: ${{ steps.guard.outputs.mode }}
+      version: ${{ steps.guard.outputs.version }}
+      sha: ${{ steps.guard.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: 'Guard: required secrets present (names only)'
+        id: guard
+        env:
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ROLLBACK_TO: ${{ inputs.rollback_to }}
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          VPN_CI_OVPN: ${{ secrets.VPN_CI_OVPN }}
+          SRV_DEPLOY_SSH_KEY: ${{ secrets.SRV_DEPLOY_SSH_KEY }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          TELEGRAM_DEV_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_DEV_ALERTS_BOT_TOKEN }}
+          TELEGRAM_DEV_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_DEV_ALERTS_CHAT_ID }}
+          TELEGRAM_DEV_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_DEV_ALERTS_THREAD_ID }}
+        run: >-
+          bash deploy/preflight.sh dev
+          TELEGRAM_DEV_ALERTS_BOT_TOKEN
+          TELEGRAM_DEV_ALERTS_CHAT_ID
+          TELEGRAM_DEV_ALERTS_THREAD_ID
+
+  # The runner downloads every action a job references while setting the job up, even for
+  # steps that never run, so this job fails before the build when vpn-up/vpn-down are missing
+  # on 1_mvp_infra@env/dev or that repository does not share its actions with this one.
+  vpn-up-check:
+    name: 'Guard: vpn-up action available (1_mvp_infra@env/dev)'
+    needs: preflight
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 2
+    steps:
+      - if: false
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-up@env/dev
+        with:
+          ovpn: unused
+      - if: false
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-down@env/dev
+      - run: echo "vpn-up/vpn-down resolve at OlegShevtsov1/1_mvp_infra@env/dev"
+
+  deploy:
+    name: Build, push, deploy to dev
+    needs: [preflight, vpn-up-check]
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: dev
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      IMAGE: ${{ needs.preflight.outputs.image }}
+      MODE: ${{ needs.preflight.outputs.mode }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Image already in ECR?
+        id: image
+        if: needs.preflight.outputs.mode == 'deploy'
+        run: |
+          if err=$(aws ecr describe-images --repository-name "$IMAGE" --image-ids "imageTag=$VERSION" 2>&1 >/dev/null); then
+            echo "$VERSION is already in ECR: not rebuilding"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif grep -q ImageNotFoundException <<<"$err"; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$err" >&2
+            exit 1
+          fi
+
+      - if: steps.image.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v4
+
+      # Kamal only runs images labelled with its service name.
+      - if: steps.image.outputs.exists == 'false'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          provenance: false
+          tags: ${{ steps.ecr.outputs.registry }}/${{ needs.preflight.outputs.image }}:${{ needs.preflight.outputs.version }}
+          labels: service=${{ needs.preflight.outputs.service }}
+          cache-from: type=registry,ref=${{ steps.ecr.outputs.registry }}/${{ needs.preflight.outputs.cache_image }}:cache
+          cache-to: type=registry,ref=${{ steps.ecr.outputs.registry }}/${{ needs.preflight.outputs.cache_image }}:cache,mode=max,image-manifest=true,oci-mediatypes=true
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Install Kamal
+        env:
+          KAMAL_VERSION: 2.12.0
+        run: gem install kamal -v "$KAMAL_VERSION" --no-document
+
+      # Taken after the build so the shared VPN lock is held only while deploying.
+      - id: vpn
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-up@env/dev
+        with:
+          ovpn: ${{ secrets.VPN_CI_OVPN }}
+
+      - name: Load the deploy key
+        env:
+          DEV_HOST: ${{ steps.vpn.outputs.dev-host }}
+          SRV_DEPLOY_SSH_KEY: ${{ secrets.SRV_DEPLOY_SSH_KEY }}
+        run: |
+          echo "::add-mask::$DEV_HOST"
+          eval "$(ssh-agent -s)" >/dev/null
+          printf '%s\n' "$SRV_DEPLOY_SSH_KEY" | ssh-add - 2>/dev/null
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+
+      - name: Deploy or roll back with Kamal
+        env:
+          ROLLBACK_TO: ${{ inputs.rollback_to }}
+          DEV_HOST: ${{ steps.vpn.outputs.dev-host }}
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          if [ "$MODE" = rollback ]; then
+            bash deploy/rollback.sh dev "$ROLLBACK_TO"
+          else
+            bash deploy/deploy.sh dev "$VERSION"
+          fi
+
+      - if: always()
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-down@env/dev
+
+  notify:
+    name: Notify Telegram
+    needs: [preflight, vpn-up-check, deploy]
+    if: always() && needs.preflight.result != 'skipped'
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: dev
+    timeout-minutes: 5
+    steps:
+      - name: Compose the message
+        id: message
+        env:
+          PREFLIGHT: ${{ needs.preflight.result }}
+          VPN_CHECK: ${{ needs.vpn-up-check.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+          MODE: ${{ needs.preflight.outputs.mode }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          URL: ${{ needs.preflight.outputs.url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$DEPLOY" = success ]; then
+            echo "text=✅ Dev Deploy ($MODE) $VERSION → $URL" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$PREFLIGHT" != success ]; then
+            stage="guard (branch or secrets)"
+          elif [ "$VPN_CHECK" != success ]; then
+            stage="guard (vpn-up availability)"
+            echo '::error::vpn-up is not available: merge I4a (OlegShevtsov1/1_mvp_infra vpn-up/vpn-down on env/dev) and set its Actions access to "user"'
+          else
+            stage="deploy"
+          fi
+          echo "text=❌ Dev Deploy failed at $stage: $RUN_URL" >> "$GITHUB_OUTPUT"
+
+      - uses: OlegShevtsov1/1_mvp_infra/.github/actions/notify-telegram@env/dev
+        with:
+          topic: DEV_ALERTS
+          message: ${{ steps.message.outputs.text }}
+        env:
+          TELEGRAM_DEV_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_DEV_ALERTS_BOT_TOKEN }}
+          TELEGRAM_DEV_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_DEV_ALERTS_CHAT_ID }}
+          TELEGRAM_DEV_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_DEV_ALERTS_THREAD_ID }}

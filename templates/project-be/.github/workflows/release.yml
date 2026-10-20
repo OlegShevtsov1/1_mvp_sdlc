@@ -1,0 +1,122 @@
+name: Release
+
+# On a pushed release tag vX.Y.Z (R-C9): checks that the tag is annotated and on main
+# (deploy/release_tag_check.sh) and that its number is the one scripts/next-version.sh computes for
+# the tagged commit, then creates a draft GitHub Release whose notes are the tag's CHANGELOG.md
+# section, verbatim (scripts/release-notes.sh, no LLM), and prints the release metrics
+# (bin/sdlc-metrics). The operator publishes the draft. ✅ or ❌ goes to the prod alerts topic.
+# See README "Релізи й hotfix".
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Draft release
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+      actions: read
+    outputs:
+      message: ${{ steps.summarize.outputs.message }}
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the tag
+        id: tag
+        run: deploy/release_tag_check.sh "${TAG}"
+
+      - name: Check the version number
+        id: number
+        run: |
+          expected="v$(scripts/next-version.sh "${TAG}^{commit}")"
+          if [[ "${expected}" != "${TAG}" ]]; then
+            echo "::error::${TAG} is not the next version: scripts/next-version.sh computes ${expected} for the tagged commit"
+            exit 1
+          fi
+          echo "${TAG} is the next version"
+
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        run: |
+          scripts/release-notes.sh "${TAG}" > "${RUNNER_TEMP}/notes.md"
+          if [[ ! -s "${RUNNER_TEMP}/notes.md" ]]; then
+            echo "::error::the CHANGELOG.md section of ${TAG} is empty"
+            exit 1
+          fi
+          cat "${RUNNER_TEMP}/notes.md"
+
+      - name: Create the draft release
+        id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${TAG}" --draft --verify-tag --title "${TAG}" --notes-file "${RUNNER_TEMP}/notes.md"
+
+      # The release exists by now; a metrics failure is reported but does not undo it.
+      - name: Metrics
+        id: metrics
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bin/sdlc-metrics "${TAG}"
+
+      - name: Summarize
+        id: summarize
+        if: always()
+        env:
+          TAG_CHECK: ${{ steps.tag.outcome }}
+          NUMBER: ${{ steps.number.outcome }}
+          NOTES: ${{ steps.notes.outcome }}
+          CREATE: ${{ steps.create.outcome }}
+          METRICS: ${{ steps.metrics.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          names=('Check the tag' 'Check the version number' 'Release notes from CHANGELOG.md' 'Create the draft release')
+          outcomes=("${TAG_CHECK}" "${NUMBER}" "${NOTES}" "${CREATE}")
+          failed=''
+          for i in "${!names[@]}"; do
+            if [[ "${outcomes[i]}" == 'failure' || "${outcomes[i]}" == 'cancelled' ]]; then
+              failed="${names[i]}"
+              break
+            fi
+          done
+          if [[ "${CREATE}" == 'success' ]]; then
+            note=''
+            [[ "${METRICS}" == 'success' ]] || note=" (bin/sdlc-metrics: ${METRICS:-not run})"
+            message="✅ Release: draft release ${TAG} created, publish it after the prod deploy${note} ${RUN_URL}"
+          else
+            message="❌ Release ${TAG} failed at ${failed:-an earlier step}: no release was created (see the log) ${RUN_URL}"
+          fi
+          echo "${message}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "message=${message}" >> "${GITHUB_OUTPUT}"
+
+  notify:
+    name: Notify (Telegram)
+    needs: [release]
+    if: always()
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: prod
+    steps:
+      - uses: OlegShevtsov1/1_mvp_infra/.github/actions/notify-telegram@env/dev
+        env:
+          TELEGRAM_PROD_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_PROD_ALERTS_BOT_TOKEN }}
+          TELEGRAM_PROD_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_CHAT_ID }}
+          TELEGRAM_PROD_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_THREAD_ID }}
+        with:
+          topic: PROD_ALERTS
+          message: ${{ needs.release.outputs.message || format('❌ Release could not report its result {0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}

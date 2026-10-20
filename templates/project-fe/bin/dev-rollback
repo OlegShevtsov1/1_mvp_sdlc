@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# The factory's rollback step: dispatches Dev Deploy with rollback_to set to the commit on the
+# base branch (develop) before the merge, then waits for that run (bin/wait-dev-deploy). The
+# factory runs it in a checkout detached at the merge commit, and squash merges keep develop
+# linear, so HEAD^ is the commit dev ran before the merge.
+# Env: WAIT_DEV_DEPLOY overrides the waiter's path. gh uses its own stored authentication.
+set -uo pipefail
+waiter=${WAIT_DEV_DEPLOY:-$(dirname "$0")/wait-dev-deploy}
+
+previous=$(git rev-parse --verify --quiet 'HEAD^')
+[[ "${previous}" =~ ^[0-9a-f]{40}$ ]] || { echo "dev-rollback: no parent commit to roll back to" >&2; exit 2; }
+
+# A little before the dispatch, so the waiter cannot miss the run on a clock skew.
+since=$(date -u -d '-30 seconds' +%Y-%m-%dT%H:%M:%SZ)
+gh workflow run dev-deploy.yml --ref main -f "rollback_to=${previous}" \
+  || { echo "dev-rollback: could not dispatch Dev Deploy" >&2; exit 1; }
+echo "dev-rollback: Dev Deploy dispatched with rollback_to=${previous:0:7}"
+exec "${waiter}" --dispatched-since "${since}"

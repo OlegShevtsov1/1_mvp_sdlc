@@ -69,7 +69,8 @@ Two models, by repository (decisions 24–29):
 ## Pull request template
 
 `templates/github/pull_request_template.md` is the task Definition of Done as a checklist; the app repositories get
-it with their brownfield start (C2, C3) and new projects from the templates (planned, S4).
+it with their brownfield start (C2, C3) and new projects from the templates in
+`templates/project-be/` and `templates/project-fe/`.
 
 ## Who merges
 

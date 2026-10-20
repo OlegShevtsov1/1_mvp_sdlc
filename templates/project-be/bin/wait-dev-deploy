@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Waits until Dev Deploy has deployed a main commit: the factory's deploy command.
+#
+# Dev Deploy runs on workflow_run of Rails Tests and Rails CI and deploys from one of the two
+# triggers (deploy/dev_deploy_gate.sh). GitHub does not always create the second workflow_run run,
+# so when both CI runs succeeded and, for WAIT_DEV_DEPLOY_GRACE seconds, no Dev Deploy run of the
+# commit is running or deploying, Dev Deploy is dispatched once for main (only while main is still
+# the commit) and that run is awaited instead, with a warning. --rollback dispatches
+# action=rollback and waits for that run.
+#
+# Usage: bin/wait-dev-deploy [<40-hex sha>]   (default: HEAD)
+#        bin/wait-dev-deploy --rollback
+# Env: WAIT_DEV_DEPLOY_TIMEOUT (seconds, default 1200), WAIT_DEV_DEPLOY_INTERVAL (15),
+# WAIT_DEV_DEPLOY_GRACE (120); GH_REPO selects the repository for gh. Needs gh and jq.
+# Exit 0 deployed (or rolled back), 1 not, 2 usage error.
+set -euo pipefail
+
+timeout="${WAIT_DEV_DEPLOY_TIMEOUT:-1200}"
+interval="${WAIT_DEV_DEPLOY_INTERVAL:-15}"
+grace="${WAIT_DEV_DEPLOY_GRACE:-120}"
+deadline=$(( SECONDS + timeout ))
+sha=''
+
+usage() {
+  echo "usage: $0 [<40-hex sha>] | --rollback" >&2
+  exit 2
+}
+
+fail() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+check_deadline() {
+  (( SECONDS < deadline )) || fail "timed out after ${timeout}s; last seen:$1"
+}
+
+view() {
+  gh run view "$1" --json status,conclusion,url,headSha,jobs
+}
+
+# Reads `gh run view --json` and prints pending, gate-only, deployed, superseded or failed:<job>.
+# Job Report runs only when the gate decided to deploy; the deploy step is skipped when a newer
+# main commit appeared while the run waited for the VPN.
+classify() {
+  jq -r '
+    . as $run
+    | def job($name): first($run.jobs[] | select(.name == $name)) // null;
+    if .status != "completed" then "pending"
+    elif (job("Report") | . == null or .conclusion == "skipped") then "gate-only"
+    else
+      ([ "Preflight (secrets)", "Probe (shared VPN actions)", "Build once (ECR)", "Deploy (VPN + Kamal)" ]
+        | map(job(.) | select(. != null and (.conclusion == "failure" or .conclusion == "cancelled")))
+        | first | .name) as $failed
+      | ([job("Deploy (VPN + Kamal)") | .steps // [] | .[] | select(.name == "Deploy or roll back")]
+        | first | .conclusion) as $step
+      | if $failed then "failed:\($failed)"
+        elif $step == "success" then "deployed"
+        elif $step == "skipped" then "superseded"
+        else "failed:Deploy (VPN + Kamal)" end
+    end'
+}
+
+# Prints success, pending, none, or the conclusion of the latest push run of a CI workflow.
+ci_state() {
+  gh run list --workflow "$1" --commit "${sha}" --event push --limit 1 --json status,conclusion \
+    | jq -r 'if length == 0 then "none" elif .[0].status != "completed" then "pending" else .[0].conclusion end'
+}
+
+dispatch() {
+  local output
+  output="$(gh workflow run dev-deploy.yml --ref main -f "action=$1" 2>&1)" || fail "gh workflow run failed: ${output}"
+  dispatched_id="$(grep -oE '/actions/runs/[0-9]+' <<< "${output}" | head -n 1 | grep -oE '[0-9]+$' || true)"
+  [[ -n "${dispatched_id}" ]] || fail "gh workflow run printed no run URL; not guessing which run to wait for"
+}
+
+# $1 run id, $2 deploy|rollback. A dispatched run deploys main as of the dispatch.
+wait_for_run() {
+  local json url state
+  while true; do
+    json="$(view "$1")"
+    url="$(jq -r .url <<< "${json}")"
+    state="$(classify <<< "${json}")"
+    if [[ "$2" == deploy && "$(jq -r .headSha <<< "${json}")" != "${sha}" ]]; then
+      fail "${url} runs $(jq -r .headSha <<< "${json}"), not ${sha}: main moved after the dispatch"
+    fi
+    case "${state}" in
+      deployed)
+        if [[ "$2" == rollback ]]; then echo "==> Dev Deploy rolled back: ${url}"; else echo "==> Dev Deploy deployed sha-${sha}: ${url}"; fi
+        exit 0 ;;
+      failed:*) fail "Dev Deploy ${2} failed in ${state#failed:}: ${url}" ;;
+      gate-only|superseded) fail "Dev Deploy ${2} did not run (${state}): ${url}" ;;
+    esac
+    check_deadline " ${url} ${state}"
+    sleep "${interval}"
+  done
+}
+
+wait_for_merge_deploy() {
+  local quiet_since='' ids id json url state pending failure seen tests lint main_sha
+  while true; do
+    pending=0 failure='' seen=''
+    ids="$(gh run list --workflow dev-deploy.yml --commit "${sha}" --event workflow_run \
+      --json databaseId,status,conclusion,url --limit 20 | jq -r '.[].databaseId')"
+    for id in ${ids}; do
+      json="$(view "${id}")"
+      url="$(jq -r .url <<< "${json}")"
+      state="$(classify <<< "${json}")"
+      seen+=" ${url} ${state};"
+      case "${state}" in
+        deployed) echo "==> Dev Deploy deployed sha-${sha}: ${url}"; exit 0 ;;
+        pending) pending=1 ;;
+        superseded) failure="superseded: main moved on before ${url} deployed sha-${sha}" ;;
+        failed:*) failure="Dev Deploy failed in ${state#failed:}: ${url}" ;;
+      esac
+    done
+    (( pending )) || [[ -z "${failure}" ]] || fail "${failure}"
+
+    tests="$(ci_state rails-test.yml)"
+    lint="$(ci_state rails-lint.yml)"
+    [[ "${tests}" =~ ^(success|pending|none)$ ]] || fail "Rails Tests is ${tests} for ${sha}; Dev Deploy will not deploy it"
+    [[ "${lint}" =~ ^(success|pending|none)$ ]] || fail "Rails CI is ${lint} for ${sha}; Dev Deploy will not deploy it"
+    seen+=" Rails Tests ${tests}; Rails CI ${lint}"
+
+    if (( ! pending )) && [[ "${tests}" == success && "${lint}" == success ]]; then
+      quiet_since="${quiet_since:-${SECONDS}}"
+      if (( SECONDS - quiet_since >= grace )); then
+        main_sha="$(gh api 'repos/{owner}/{repo}/commits/main' | jq -r .sha)"
+        [[ "${main_sha}" == "${sha}" ]] \
+          || fail "sha-${sha} is superseded by a newer main commit (${main_sha}); its own Dev Deploy covers it"
+        echo "warning: the automatic trigger did not deploy ${sha} (no Dev Deploy run deployed it); dispatching Dev Deploy for main once"
+        dispatch deploy
+        wait_for_run "${dispatched_id}" deploy
+      fi
+    else
+      quiet_since=''
+    fi
+    check_deadline "${seen}"
+    sleep "${interval}"
+  done
+}
+
+if [[ "${1:-}" == --rollback ]]; then
+  (( $# == 1 )) || usage
+  dispatch rollback
+  wait_for_run "${dispatched_id}" rollback
+fi
+(( $# <= 1 )) || usage
+sha="${1:-$(git rev-parse HEAD)}"
+[[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || usage
+wait_for_merge_deploy

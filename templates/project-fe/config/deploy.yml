@@ -1,0 +1,24 @@
+<% project = File.read("config/project.env").scan(/^([A-Z_]+)=(.*)$/).to_h %>
+# Shared by every destination; per-environment settings live in config/deploy.<destination>.yml.
+minimum_version: 2.12.0
+require_destination: true
+
+image: <%= project.fetch("PROJECT_NAME") %>-front
+
+registry:
+  server: <%= ENV.fetch("ECR_REGISTRY") %>
+  username: AWS
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+builder:
+  arch: amd64
+
+proxy:
+  app_port: 80
+  healthcheck:
+    path: /health
+
+env:
+  secret:
+    - SENTRY_DSN

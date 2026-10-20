@@ -1,0 +1,35 @@
+name: pr-conventions-check
+
+# Pull requests into develop and main follow the branch model (decisions 24-26, 29): a <KEY>
+# branch name, a <KEY>-<n>: title and exactly one Type: line in the body, which becomes the
+# squash commit body (scripts/pr-conventions.sh). <KEY> is PROJECT_NAME from config/project.env
+# in capitals. Applies once the develop branch exists.
+on:
+  pull_request:
+    branches: [develop, main]
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  conventions:
+    name: Branch name, PR title, Type line
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check branch name, PR title and Type line
+        env:
+          REPO: ${{ github.repository }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/pr-conventions.sh

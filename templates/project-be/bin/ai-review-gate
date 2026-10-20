@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# The blocking step of the AI review (decision 32): reads the review's structured output, writes the
+# machine-readable summary <dir>/result.json ({"p0":n,"p1":n,"p2":n}) and the PR comment <dir>/comment.md,
+# and fails while there are P0 or P1 findings. It decides only from STRUCTURED_OUTPUT: the PR head is
+# checked out in the workspace, so a result.json found there could come from the PR itself.
+# Usage: bin/ai-review-gate [dir] (default ai-review). Env: STRUCTURED_OUTPUT, the JSON
+# {"p0":n,"p1":n,"p2":n,"comment":"<markdown>"}.
+# Exit 0: no P0/P1. Exit 1: P0/P1 findings, or the summary is missing or invalid (fail closed).
+set -uo pipefail
+dir=${1:-ai-review}
+summary=${STRUCTURED_OUTPUT:-}
+
+mkdir -p "${dir}"
+rm -f "${dir}/result.json" "${dir}/comment.md"
+
+valid='length == 1 and (.[0] | type == "object"
+  and ([.p0, .p1, .p2] | all(type == "number" and . == floor and . >= 0))
+  and (.comment | type == "string"))'
+if ! jq -se "${valid}" <<< "${summary}" > /dev/null 2>&1; then
+  echo "::error::AI review summary missing or invalid (no structured output from the review step): failing closed while AI_REVIEW=on"
+  exit 1
+fi
+
+jq -c '{p0, p1, p2}' <<< "${summary}" > "${dir}/result.json"
+read -r p0 p1 p2 < <(jq -r '"\(.p0) \(.p1) \(.p2)"' <<< "${summary}")
+{
+  echo "<!-- ai-review -->"
+  echo
+  echo "## AI review"
+  echo
+  jq -r '.comment' <<< "${summary}"
+  echo
+  echo "AI-REVIEW: P0=${p0} P1=${p1} P2=${p2}"
+} > "${dir}/comment.md"
+
+if (( p0 + p1 > 0 )); then
+  echo "::error::AI review found P0=${p0} P1=${p1}: review required before merge (decision 32)"
+  exit 1
+fi
+echo "AI review: P0=0 P1=0 P2=${p2}, nothing blocks the merge"

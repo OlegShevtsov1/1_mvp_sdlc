@@ -1,0 +1,362 @@
+name: Kamal Deploy
+
+# Deploys a release to prod with Kamal 2 (config/deploy.yml) through the shared mvp VPN
+# (vpn-up/vpn-down from 1_mvp_infra). Nothing is built: deploy/deploy.sh prod promotes the image
+# sha-<sha> that Dev Deploy built for the tagged commit to prod-sha-<sha> (same layers, prod service
+# label) and, after /health and the read-only smoke pass, points the ECR tag prod-current at it (the
+# image it replaces becomes prod-previous). See README "Prod deploy" and "Релізи й hotfix".
+#
+# Dual control: runs only from main, with environment=prod, confirm=prod and a version that is a
+# release tag vX.Y.Z, annotated and on main, whose image is already in ECR; a bare sha is refused.
+#
+# release-watch then watches prod for 10 minutes (/health every 30 s, then the new GlitchTip
+# issues of <PROJECT_NAME>-be-prod) and reports ✅ or ❌. It never rolls back: a person decides.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options: [prod]
+      version:
+        description: Release tag vX.Y.Z (annotated, on main); a bare sha is refused
+        required: true
+        type: string
+      confirm:
+        description: Type prod to deploy
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  guard:
+    name: Guard (ref, confirm, version)
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    outputs:
+      tag: ${{ steps.inputs.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the ref and the inputs
+        id: inputs
+        env:
+          REF: ${{ github.ref }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          CONFIRM: ${{ inputs.confirm }}
+          VERSION: ${{ inputs.version }}
+        run: deploy/prod_guard.sh deploy >> "${GITHUB_OUTPUT}"
+
+      - name: Check that the version is an annotated release tag on main
+        id: tag
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+        run: deploy/release_tag_check.sh "${TAG}" >> "${GITHUB_OUTPUT}"
+
+  # Only names are checked and printed, never values.
+  preflight:
+    name: Preflight (secrets)
+    needs: guard
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that every required secret is set
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          VPN_CI_OVPN: ${{ secrets.VPN_CI_OVPN }}
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          PROD_VPN_IP: ${{ secrets.PROD_VPN_IP }}
+          SECRET_KEY_BASE: ${{ secrets.SECRET_KEY_BASE }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_ALLOWED_FE_DSN: ${{ secrets.SENTRY_ALLOWED_FE_DSN }}
+          SMOKE_TOKEN: ${{ secrets.SMOKE_TOKEN }}
+          TELEGRAM_PROD_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_PROD_ALERTS_BOT_TOKEN }}
+          TELEGRAM_PROD_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_CHAT_ID }}
+          TELEGRAM_PROD_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_THREAD_ID }}
+        run: |
+          source deploy/_common.sh
+          # PROJECT_NAME comes from config/project.env and KAMAL_REGISTRY_PASSWORD from the ECR
+          # login inside deploy.sh; every other variable .kamal/secrets.prod reads is a secret.
+          mapfile -t kamal_secrets < <(secret_names .kamal/secrets.prod | grep -vxE 'PROJECT_NAME|KAMAL_REGISTRY_PASSWORD')
+          required=(
+            AWS_ROLE_ARN VPN_CI_OVPN PROD_SSH_KEY PROD_VPN_IP
+            "${kamal_secrets[@]}"
+            TELEGRAM_PROD_ALERTS_BOT_TOKEN TELEGRAM_PROD_ALERTS_CHAT_ID TELEGRAM_PROD_ALERTS_THREAD_ID
+          )
+          missing=()
+          for name in "${required[@]}"; do
+            [[ -n "${!name}" ]] || missing+=("${name}")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::${GITHUB_WORKFLOW} cannot start, missing secrets: ${missing[*]} (see README \"Prod deploy\")"
+            exit 1
+          fi
+          echo "all required secrets are set: ${required[*]}"
+
+  # A uses: that cannot be resolved kills its job at "Set up job", before any step can explain
+  # why, so the shared actions are resolved here, in a job that touches nothing.
+  # vpn-down without vpn-up only prints "nothing to clean up".
+  probe:
+    name: Probe (shared VPN actions)
+    needs: preflight
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    steps:
+      - name: Resolve the shared actions from 1_mvp_infra@env/dev
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-down@env/dev
+
+      - name: Check that vpn-up exists next to vpn-down
+        run: |
+          actions_dir="$(dirname "${RUNNER_WORKSPACE}")/_actions/OlegShevtsov1/1_mvp_infra"
+          if [[ -z "$(find "${actions_dir}" -path '*/.github/actions/vpn-up/action.yml' 2>/dev/null)" ]]; then
+            echo "::error::vpn-up is missing on OlegShevtsov1/1_mvp_infra@env/dev (I4a not merged)"
+            exit 1
+          fi
+          echo "vpn-up and vpn-down are available"
+
+  deploy:
+    name: Deploy (VPN + Kamal)
+    needs: [guard, probe]
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: prod
+    timeout-minutes: 30
+    # Shared with Kamal Manage, on this job only: two prod operations never overlap, and a
+    # rollback does not wait for release-watch.
+    concurrency:
+      group: kamal-prod
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      TAG: ${{ needs.guard.outputs.tag }}
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Before vpn-up: everything slow happens outside the VPN lock window.
+      - uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+
+      - name: Install crane
+        env:
+          CRANE_VERSION: 0.22.1
+          CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+        run: |
+          curl -sSfL -o "${RUNNER_TEMP}/crane.tgz" "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  ${RUNNER_TEMP}/crane.tgz" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xzf "${RUNNER_TEMP}/crane.tgz" -C "${RUNNER_TEMP}/bin" crane
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check that the version was built by Dev Deploy
+        run: |
+          source deploy/_common.sh
+          load_project_env
+          resolve_registry
+          crane_login
+          require_dev_image "${VERSION}" > /dev/null
+          echo "${PROJECT_NAME}:${VERSION} is in ECR"
+
+      - name: Load the prod SSH key into an agent (never written to disk)
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          eval "$(ssh-agent -a "${RUNNER_TEMP}/ssh-agent.sock")" > /dev/null
+          ssh-add - <<< "${PROD_SSH_KEY}"
+          echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK}" >> "${GITHUB_ENV}"
+
+      - name: VPN up
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-up@env/dev
+        with:
+          ovpn: ${{ secrets.VPN_CI_OVPN }}
+
+      - name: Check that prod is reachable over the VPN
+        env:
+          PROD_VPN_IP: ${{ secrets.PROD_VPN_IP }}
+        run: |
+          for attempt in 1 2 3; do
+            if nc -z -w 5 "${PROD_VPN_IP}" 22; then
+              echo "prod SSH is reachable over the VPN"
+              exit 0
+            fi
+            echo "attempt ${attempt}: prod SSH not reachable yet"
+            sleep 5
+          done
+          echo "::error::prod SSH is not reachable over the VPN"
+          exit 1
+
+      - name: Deploy
+        env:
+          PROD_VPN_IP: ${{ secrets.PROD_VPN_IP }}
+          SECRET_KEY_BASE: ${{ secrets.SECRET_KEY_BASE }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_ALLOWED_FE_DSN: ${{ secrets.SENTRY_ALLOWED_FE_DSN }}
+          SMOKE_TOKEN: ${{ secrets.SMOKE_TOKEN }}
+        run: deploy/deploy.sh prod "${TAG}"
+
+      - name: VPN down
+        if: always()
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-down@env/dev
+
+  # Polls the public URL without the VPN; the shared VPN lock is held only for the one GlitchTip
+  # query at the end, so other deploys are not blocked for 10 minutes.
+  release-watch:
+    name: Release watch (10 min)
+    needs: [guard, deploy]
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: prod
+    timeout-minutes: 20
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      TAG: ${{ needs.guard.outputs.tag }}
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Watch /health for 10 minutes
+        id: health
+        run: deploy/release_watch.sh health "${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: VPN up
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-up@env/dev
+        with:
+          ovpn: ${{ secrets.VPN_CI_OVPN }}
+
+      - name: Count new GlitchTip issues
+        id: glitchtip
+        continue-on-error: true
+        env:
+          SINCE: ${{ steps.health.outputs.since }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          GLITCHTIP_API_TOKEN: ${{ secrets.GLITCHTIP_API_TOKEN }}
+        run: |
+          deploy/glitchtip_issues.sh "${SINCE}" > "${RUNNER_TEMP}/issues.jsonl"
+          echo "new issues since the watch started: $(grep -c . "${RUNNER_TEMP}/issues.jsonl" || true) ($(jq -r .shortId "${RUNNER_TEMP}/issues.jsonl" | paste -sd ' ' -))"
+
+      - name: VPN down
+        if: always()
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-down@env/dev
+
+      - name: Verdict
+        id: verdict
+        if: always()
+        env:
+          CHECKS: ${{ steps.health.outputs.checks }}
+          FAILED: ${{ steps.health.outputs.failed }}
+          GLITCHTIP_OUTCOME: ${{ steps.glitchtip.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: ISSUES_FILE="${RUNNER_TEMP}/issues.jsonl" deploy/release_watch.sh verdict >> "${GITHUB_OUTPUT}"
+
+      - name: Notify (Telegram)
+        if: always()
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/notify-telegram@env/dev
+        env:
+          TELEGRAM_PROD_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_PROD_ALERTS_BOT_TOKEN }}
+          TELEGRAM_PROD_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_CHAT_ID }}
+          TELEGRAM_PROD_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_THREAD_ID }}
+        with:
+          topic: PROD_ALERTS
+          message: ${{ steps.verdict.outputs.message || format('❌ release-watch {0} could not report its result {1}/{2}/actions/runs/{3}', needs.guard.outputs.tag, github.server_url, github.repository, github.run_id) }}
+
+      - name: Fail on ❌
+        if: always() && steps.verdict.outputs.result != 'ok'
+        run: exit 1
+
+  report:
+    name: Report
+    needs: [guard, preflight, probe, deploy]
+    if: always()
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    outputs:
+      message: ${{ steps.summarize.outputs.message }}
+    steps:
+      - name: Summarize the job results
+        id: summarize
+        env:
+          VERSION: ${{ needs.guard.outputs.tag || inputs.version }}
+          GUARD: ${{ needs.guard.result }}
+          PREFLIGHT: ${{ needs.preflight.result }}
+          PROBE: ${{ needs.probe.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          explain() {
+            case "$1" in
+              guard) echo 'refused: workflow ref is not main, confirm/environment invalid, or the version is not an annotated release tag vX.Y.Z on main (a bare sha is refused); nothing touched prod' ;;
+              preflight) echo 'required secrets are missing: see the preflight error for their names and README "Prod deploy"' ;;
+              probe) echo "actions from OlegShevtsov1/1_mvp_infra@env/dev unavailable: I4a not merged to env/dev, or 1_mvp_infra Actions access is not 'user'" ;;
+              deploy) echo 'the image check, the VPN, Kamal, the health check or the swagger smoke failed: see the deploy log' ;;
+            esac
+          }
+          jobs=(guard preflight probe deploy)
+          results=("${GUARD}" "${PREFLIGHT}" "${PROBE}" "${DEPLOY}")
+          {
+            echo '| job | result |'
+            echo '| --- | --- |'
+            for i in "${!jobs[@]}"; do
+              echo "| ${jobs[i]} | ${results[i]} |"
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
+          failed=''
+          for i in "${!jobs[@]}"; do
+            if [[ "${results[i]}" == 'failure' || "${results[i]}" == 'cancelled' ]]; then
+              failed="${jobs[i]}"
+              break
+            fi
+          done
+          if [[ -n "${failed}" ]]; then
+            message="❌ Kamal Deploy prod ${VERSION:0:16} failed in ${failed}: $(explain "${failed}") ${RUN_URL}"
+            echo "::error::${failed} failed: $(explain "${failed}")"
+          else
+            message="✅ Kamal Deploy prod ${VERSION:0:16} succeeded ${RUN_URL}"
+          fi
+          echo "message=${message}" >> "${GITHUB_OUTPUT}"
+          echo "FAILED_JOB=${failed}" >> "${GITHUB_ENV}"
+
+      - name: Fail when a job failed
+        if: env.FAILED_JOB != ''
+        run: exit 1
+
+  notify:
+    name: Notify (Telegram)
+    needs: [report]
+    if: always()
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: prod
+    steps:
+      - uses: OlegShevtsov1/1_mvp_infra/.github/actions/notify-telegram@env/dev
+        env:
+          TELEGRAM_PROD_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_PROD_ALERTS_BOT_TOKEN }}
+          TELEGRAM_PROD_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_CHAT_ID }}
+          TELEGRAM_PROD_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_THREAD_ID }}
+        with:
+          topic: PROD_ALERTS
+          message: ${{ needs.report.outputs.message || format('❌ Kamal Deploy could not report its result {0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}

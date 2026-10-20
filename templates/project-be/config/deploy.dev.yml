@@ -1,0 +1,91 @@
+# Kamal 2 dev deployment, driven by deploy/deploy.sh and deploy/rollback.sh.
+#
+# Self-contained: always pass it with -c, never -d. A destination would be merged into
+# config/deploy.yml, which is the prod configuration.
+#
+#   bundle exec kamal app containers -c config/deploy.dev.yml
+#
+# The kamal-proxy on the dev host is shared with another deployment. Never run `kamal remove`
+# or `kamal proxy reboot|remove` with this file: they would stop or restart that proxy.
+#
+# Project identity comes from config/project.env (read relative to the working directory,
+# so run from the repository root); the host and the registry come from the environment.
+<%
+  project = File.readlines('config/project.env', chomp: true).grep(/\A[A-Z_]+=/).to_h { |line| line.split('=', 2) }
+  name = project.fetch('PROJECT_NAME')
+  zone = project.fetch('PROJECT_ZONE')
+  host = ENV.fetch('DEV_HOST')
+%>
+service: <%= name %>-dev
+image: <%= name %>
+
+secrets_path: .kamal/secrets.dev
+
+servers:
+  web:
+    - <%= host %>
+
+ssh:
+  user: dev
+
+# Images are built once by the Dev Deploy workflow (label service=<name>-dev) and deployed with
+# --skip-push, so the builder section only describes the target.
+registry:
+  server: <%= ENV.fetch('KAMAL_REGISTRY_SERVER') %>
+  username: AWS
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+builder:
+  arch: amd64
+
+proxy:
+  host: dev.<%= zone %>
+  app_port: 3000
+  forward_headers: true
+  healthcheck:
+    path: /health
+    interval: 3
+    timeout: 5
+  # The ports of the running shared proxy; only used if it had to be started from scratch.
+  run:
+    http_port: 8091
+    https_port: 8491
+
+deploy_timeout: 120
+
+env:
+  clear:
+    RAILS_ENV: production
+    RAILS_LOG_LEVEL: info
+    RAILS_MAX_THREADS: 5
+    DB_NAME: <%= name %>_dev
+    REDIS_URL: redis://<%= name %>-dev-redis:6379/0
+    SENTRY_ENVIRONMENT: dev
+    CORS_ALLOWED_ORIGINS: https://app.dev.<%= zone %>
+  secret:
+    - SECRET_KEY_BASE
+    - DATABASE_URL
+    - SENTRY_DSN
+    - SENTRY_ALLOWED_FE_DSN
+    - SMOKE_TOKEN
+
+# Both accessories join the "kamal" Docker network and are resolved by container name.
+# Neither publishes a port.
+accessories:
+  db:
+    image: postgres:16-alpine
+    host: <%= host %>
+    env:
+      clear:
+        POSTGRES_USER: postgres
+        POSTGRES_DB: <%= name %>_dev
+      secret:
+        - POSTGRES_PASSWORD
+    volumes:
+      - <%= name %>-dev-pg-data:/var/lib/postgresql/data
+  redis:
+    image: redis:7-alpine
+    host: <%= host %>
+    volumes:
+      - <%= name %>-dev-redis-data:/data

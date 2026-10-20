@@ -116,8 +116,8 @@ class CheckDocsTest(unittest.TestCase):
         self.assertFails("vpnctl project delegate")
 
     def test_planned_in_repo_path_that_exists_fails(self):
-        self.write("bin/render-template", "x\n")
-        self.append("docs/sdlc/01-section.md", "Render with `bin/render-template` (planned, S4).\n")
+        self.write("bin/project-add", "x\n")
+        self.append("docs/sdlc/01-section.md", "Create it with `bin/project-add` (planned, S5).\n")
         self.assertFails("now exists; update the docs and the registry")
 
     def test_unregistered_confirm_word_fails(self):

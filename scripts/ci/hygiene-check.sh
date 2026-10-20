@@ -40,9 +40,31 @@ check_except() {
   scan "${label}" "$@" -- . ":(exclude)${exclude}"
 }
 
+# The project templates are a copy of a real app: loopback, bind-all and RFC 5737 documentation addresses
+# are allowed there, and the Gemfile, its lock and brakeman.ignore carry four-part gem versions.
+template_ipv4() {
+  local hits rc out
+  hits=$(git grep -nIoE "${ipv4}" -- templates/project-be templates/project-fe \
+    ':(exclude)templates/project-be/Gemfile' ':(exclude)templates/project-be/Gemfile.lock' \
+    ':(exclude)templates/project-be/config/brakeman.ignore')
+  rc=$?
+  [ "${rc}" -le 1 ] || { echo "git grep failed (${rc}) on rule: IPv4 literal in a template" >&2; exit 2; }
+  out=$(printf '%s\n' "${hits}" | grep -vE \
+    ':[^0-9.]?(0\.0\.0\.0|127\.0\.0\.1|192\.0\.2\.[0-9]+|198\.51\.100\.[0-9]+|203\.0\.113\.[0-9]+)([^0-9.]|$)' |
+    grep -v '^$')
+  if [ -n "${out}" ]; then
+    echo "::error::public-repo check failed: IPv4 literal in a template"
+    printf '%s\n' "${out}" | cut -d: -f1,2 | sort -u
+    status=1
+  fi
+}
+
+ipv4='(^|[^0-9.])([0-9]{1,3}\.){3}[0-9]{1,3}([^0-9.]|$)'
 check "private LAN IP (192-168 range)"  -E  -e '192\.168\.'
 check "internal VPN IP (10-18 range)"   -E  -e '(^|[^0-9])10\.18\.'
-check "IPv4 literal (EIP or internal)" -E  -e '(^|[^0-9.])([0-9]{1,3}\.){3}[0-9]{1,3}([^0-9.]|$)'
+scan "IPv4 literal (EIP or internal)" -E -e "${ipv4}" -- . \
+  ':(exclude)templates/project-be' ':(exclude)templates/project-fe'
+template_ipv4
 check "internal hostname (vr8 prefix)"  -iE -e 'vr8[-]'
 check "internal hostname srvN.local"   -iE -e 'srv[0-9]+\.local'
 check "internal hostname (bonfir[e])"  -iE -e 'bonfir[e]'

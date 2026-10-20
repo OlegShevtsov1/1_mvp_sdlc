@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # Runs locally exactly what CI runs. Usage: check.sh [<check>|--list] (default: all checks, in order).
 # gitleaks and the hygiene check see committed/tracked content only, so run this after committing.
-# Every check listed here needs its own step in .github/workflows/ci.yml; test-check.sh enforces that.
+# Every check listed here needs its own step in a workflow under .github/workflows/; test-check.sh enforces that.
 set -euo pipefail
-checks=(actionlint tests plugins mvp_sdlc docs factory archon hygiene gitleaks)
+checks=(actionlint tests templates plugins mvp_sdlc docs factory archon hygiene gitleaks)
 
 run_actionlint() { actionlint -color; }
 run_tests() {
   local t
   for t in scripts/ci/test-*.sh; do bash "${t}"; done
 }
+run_templates() { python3 scripts/test_templates.py && bash scripts/ci/templates-check.sh; }
 run_plugins() { python3 scripts/test_lint_plugins.py && python3 scripts/lint_plugins.py && python3 scripts/test_evals.py; }
 run_mvp_sdlc() { bash plugins/mvp-sdlc/tests/run.sh; }
 run_docs() {
   python3 scripts/test_check_links.py && python3 scripts/test_check_docs.py &&
-    python3 scripts/check_links.py README.md docs/sdlc templates/github orchestration/docs && python3 scripts/check_docs.py
+    python3 scripts/check_links.py README.md docs/sdlc templates/github templates/README.md orchestration/docs && python3 scripts/check_docs.py
 }
 run_factory() { (cd orchestration/factory && bun test); }
 run_archon() { bash scripts/ci/tools.sh archon && bash scripts/ci/archon-check.sh; }

@@ -1,0 +1,32 @@
+# .archon/factory-profile.yaml — written by the Archon `factory` workflow.
+# Edit freely. While this file exists the workflow never asks these questions again.
+# `secrets` lists environment-variable NAMES only; values stay on the machine that runs Archon.
+version: 1
+stack:
+  language: "TypeScript"
+  framework: "React (Vite)"
+  test_command: "npm test"
+  lint_command: "npm run lint"
+  build_command: "npm run build"
+# Factory PRs go to develop (decision 27); release and hotfix PRs into main are the operator's.
+repo:
+  remote: "origin"
+  base_branch: "develop"
+  merge_strategy: "squash"
+  # Decision 27: the factory never merges a pull request whose base is listed here; it notifies the
+  # operator, who merges release (develop -> main) and hotfix (hotfix/* -> main) PRs by hand.
+  # develop exists; the factory engine does not read this key yet, the rule holds because factory
+  # PRs target develop.
+  manual_merge_bases: ["main"]
+# deploy.command waits for the automatic Dev Deploy of the merge commit (it never dispatches one).
+deploy:
+  command: "bin/wait-dev-deploy"
+  health_url: "https://app.dev.{{PROJECT_ZONE}}/health"
+  wait_seconds: 600
+  rollback_command: "bin/dev-rollback"
+# GlitchTip's API compatibility with the sentry provider is unverified; switch after it is checked.
+monitoring:
+  provider: "none"
+  mcp_config: ""
+  window_minutes: 10
+secrets: []

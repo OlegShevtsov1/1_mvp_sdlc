@@ -1,0 +1,34 @@
+name: pr-conventions-check
+
+# The authoritative gate for the branching conventions (decision 29): branch name, <KEY>-<n>: title
+# and exactly one Type: line in the body, see bin/pr-conventions-check. The check-branch-name.sh
+# session hook (S3b, 1_mvp_sdlc) only hints at the branch name before a push.
+# The title and body are untrusted input, so they reach the script only through env.
+
+on:
+  pull_request:
+    branches: [main, develop]
+    types: [opened, edited, reopened, synchronize]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  conventions:
+    name: PR conventions
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the branch, title and Type line
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bin/pr-conventions-check

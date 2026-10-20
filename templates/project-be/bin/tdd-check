@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Checks the TDD commit order of a pull request (R-C3), conditions numbered as in the SDLC docs:
+#   1. the first commit's subject starts with `test(` (RED);
+#   3. a `feat(` or `fix(` commit follows it, and no commit after the test commit up to and
+#      including that one changes spec/.
+# Condition 2 (the test commit is red) is proven by the tdd-check workflow, which runs the suite
+# on the test commit. Merge commits are skipped, so merging the base branch into the PR neither
+# counts as a commit nor brings the base branch's spec changes into condition 3.
+#
+# Exempt from all of this: a pull request whose body (env PR_BODY, untrusted, optional) has exactly
+# one Type: line, ci, chore or docs, and whose every changed file is under .github/, .archon/ or
+# docs/ or is Markdown. Both are required, so a self-declared Type cannot carry code past the check.
+#
+# Commits already reachable from env MAIN_REF (optional; the workflow sets origin/main) are not
+# checked: they reached main through an operator-merged pull request, so a back-merge of main into
+# develop after a hotfix whose every commit is already on main passes.
+#
+# Usage: [PR_BODY=<pull request body>] [MAIN_REF=<ref>] bin/tdd-check <base sha> <head sha>
+# Prints ::error::condition <n> failed: ... for every failed condition. On success writes
+# test_sha=<sha> to GITHUB_OUTPUT when it is set. Exit 0 pass, 1 fail, 2 usage error.
+set -euo pipefail
+
+[[ $# -eq 2 ]] || { echo "usage: $0 <base sha> <head sha>" >&2; exit 2; }
+
+mapfile -t commits < <(git rev-list --reverse --topo-order --no-merges "$1..$2")
+if [[ -n "${MAIN_REF:-}" ]] && (( ${#commits[@]} > 0 )); then
+  git rev-parse --verify --quiet "${MAIN_REF}^{commit}" > /dev/null || { echo "error: MAIN_REF ${MAIN_REF} does not resolve" >&2; exit 2; }
+  not_on_main="$(git rev-list --reverse --topo-order --no-merges "$1..$2" "^${MAIN_REF}")" ||
+    { echo "error: cannot list the commits that are not on ${MAIN_REF}" >&2; exit 2; }
+  if [[ -z "${not_on_main}" ]]; then
+    echo "tdd-check: every commit is already on main (${MAIN_REF}), nothing to check"
+    exit 0
+  fi
+  mapfile -t commits <<< "${not_on_main}"
+fi
+subject() { git log -1 --format=%s "$1"; }
+describe() { echo "${1:0:7} \"$(subject "$1")\""; }
+
+failed=0
+test_index=''
+for i in "${!commits[@]}"; do
+  if [[ "$(subject "${commits[i]}")" =~ ^test\( ]]; then
+    test_index="${i}"
+    break
+  fi
+done
+
+if (( ${#commits[@]} == 0 )); then
+  echo "::error::condition 1 failed: the pull request has no commits"
+  echo "::error::condition 3 failed: no test( commit to compare from"
+  exit 1
+fi
+
+mapfile -t types < <(tr -d '\r' <<< "${PR_BODY:-}" | grep -E '^Type:' || true)
+if (( ${#types[@]} == 1 )) && [[ "${types[0]}" =~ ^Type:\ (ci|chore|docs)[[:space:]]*$ ]]; then
+  type="${BASH_REMATCH[1]}"
+  mapfile -t paths < <(git diff --name-only "$1...$2")
+  non_code=$(( ${#paths[@]} > 0 ))
+  for path in "${paths[@]}"; do
+    [[ "${path}" == .github/* || "${path}" == .archon/* || "${path}" == docs/* || "${path}" == *.md ]] || non_code=0
+  done
+  if (( non_code )); then
+    echo "tdd-check: Type: ${type} pull request changes only .github/, .archon/, docs/ and Markdown files: exempt from the TDD order"
+    exit 0
+  fi
+fi
+
+if [[ "${test_index}" != 0 ]]; then
+  echo "::error::condition 1 failed: the first commit $(describe "${commits[0]}") does not start with test("
+  failed=1
+fi
+
+green=''
+if [[ -z "${test_index}" ]]; then
+  echo "::error::condition 3 failed: no test( commit to compare from"
+  failed=1
+else
+  test_sha="${commits[test_index]}"
+  changed=()
+  for commit in "${commits[@]:test_index+1}"; do
+    mapfile -t -O "${#changed[@]}" changed < <(git diff-tree --no-commit-id --name-only -r "${commit}" -- spec/)
+    if [[ "$(subject "${commit}")" =~ ^(feat|fix)\( ]]; then
+      green="${commit}"
+      break
+    fi
+  done
+  if [[ -z "${green}" ]]; then
+    echo "::error::condition 3 failed: no feat( or fix( commit after the test commit $(describe "${test_sha}")"
+    failed=1
+  elif (( ${#changed[@]} > 0 )); then
+    files="$(printf '%s\n' "${changed[@]}" | sort -u | paste -sd ' ' -)"
+    echo "::error::condition 3 failed: spec/ changed between the test commit $(describe "${test_sha}") and $(describe "${green}"): ${files}"
+    failed=1
+  fi
+fi
+
+(( failed == 0 )) || exit 1
+echo "tdd-check: test commit $(describe "${test_sha}") → $(describe "${green}"), spec/ unchanged in between"
+[[ -z "${GITHUB_OUTPUT:-}" ]] || echo "test_sha=${test_sha}" >> "${GITHUB_OUTPUT}"

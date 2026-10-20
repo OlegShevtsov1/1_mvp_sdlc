@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Detects commits that reached main without a merged pull request (R-C4); port of
+# OlegShevtsov1/1_mvp_sdlc scripts/ci/main-guard.sh. The develop-guard workflow runs it for develop
+# (decision 27). The alert itself is sent by the workflow.
+# Env: REPO (owner/name), SHA (commit on the branch), BRANCH (main or develop, default main; only named
+# in the messages), GH_TOKEN for gh; MAIN_GUARD_SLEEP (seconds between attempts).
+# Exit 0: the commit came from a merged PR. Exit 1: it did not. Exit 2: bad input or GitHub API error.
+# On exit 1 and 2 writes message=<alert text> to GITHUB_OUTPUT when it is set.
+set -uo pipefail
+repo=${REPO:-}
+sha=${SHA:-}
+branch=${BRANCH:-main}
+attempts=5
+pause=${MAIN_GUARD_SLEEP:-5}
+
+alert() {
+  [ -z "${GITHUB_OUTPUT:-}" ] || echo "message=$1" >> "${GITHUB_OUTPUT}"
+}
+
+# The rejected value is never written to GITHUB_OUTPUT: a newline in it would forge another output.
+[[ "${repo}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "main-guard: invalid REPO '${repo}'" >&2; alert "❌ main-guard could not decide: invalid REPO"; exit 2; }
+[[ "${sha}" =~ ^[0-9a-f]{7,40}$ ]] || { echo "main-guard: invalid SHA '${sha}'" >&2; alert "❌ main-guard could not decide: invalid SHA"; exit 2; }
+[[ "${branch}" =~ ^(main|develop)$ ]] || { echo "main-guard: invalid BRANCH '${branch}'" >&2; alert "❌ main-guard could not decide: invalid BRANCH"; exit 2; }
+short=${sha:0:7}
+
+# GitHub links a fresh squash commit to its PR with a short delay, so an empty answer is retried.
+prs=""
+for ((i = 1; i <= attempts; i++)); do
+  if prs=$(gh api "repos/${repo}/commits/${sha}/pulls" \
+    --jq '[.[] | select(.merged_at != null) | .number] | join(",")'); then
+    [ -z "${prs}" ] || break
+  elif [ "${i}" -eq "${attempts}" ]; then
+    echo "main-guard: GitHub API error for ${short}; cannot decide" >&2
+    alert "❌ ${repo}: main-guard could not decide for commit ${short} (GitHub API error)"
+    exit 2
+  fi
+  [ "${i}" -eq "${attempts}" ] || sleep "${pause}"
+done
+
+if [ -n "${prs}" ]; then
+  echo "main-guard: ${short} came from merged PR #${prs}"
+  exit 0
+fi
+
+echo "::error::main-guard: commit ${short} reached ${branch} without a merged PR"
+alert "❌ ${repo}: commit ${short} reached ${branch} without a merged PR"
+exit 1

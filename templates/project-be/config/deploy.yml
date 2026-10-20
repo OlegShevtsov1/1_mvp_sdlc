@@ -1,0 +1,103 @@
+# Kamal 2 prod deployment, driven by deploy/deploy.sh, deploy/rollback.sh and deploy/manage.sh
+# (the Kamal Deploy and Kamal Manage workflows).
+#
+# Self-contained: always pass it with -c, never -d (there are no destination files).
+#
+#   bundle exec kamal app containers -c config/deploy.yml
+#
+# Project identity comes from config/project.env (read relative to the working directory,
+# so run from the repository root); the host and the registry come from the environment.
+# PROD_VPN_IP is the prod host's address on the mvp VPN, the only way in over SSH. It is a
+# secret and is never committed.
+<%
+  project = File.readlines('config/project.env', chomp: true).grep(/\A[A-Z_]+=/).to_h { |line| line.split('=', 2) }
+  name = project.fetch('PROJECT_NAME')
+  zone = project.fetch('PROJECT_ZONE')
+  host = ENV.fetch('PROD_VPN_IP')
+%>
+service: <%= name %>
+image: <%= name %>
+
+secrets_path: .kamal/secrets.prod
+
+servers:
+  web:
+    - <%= host %>
+
+ssh:
+  user: ubuntu
+
+# Nothing is built for prod: deploy/deploy.sh promotes the dev-built sha-<sha> to prod-sha-<sha>
+# (same layers, label service=<name>) and deploys it with --skip-push.
+registry:
+  server: <%= ENV.fetch('KAMAL_REGISTRY_SERVER') %>
+  username: AWS
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+builder:
+  arch: amd64
+
+# kamal-proxy terminates TLS with a Let's Encrypt certificate for the zone, so ports 80 and 443
+# must be open to the internet. It sets X-Forwarded-Proto itself and drops the client's.
+proxy:
+  ssl: true
+  host: <%= zone %>
+  app_port: 3000
+  healthcheck:
+    path: /health
+    interval: 3
+    timeout: 5
+
+deploy_timeout: 120
+
+env:
+  clear:
+    RAILS_ENV: production
+    RAILS_FORCE_SSL: "true"
+    RAILS_LOG_LEVEL: info
+    RAILS_MAX_THREADS: 5
+    DB_NAME: <%= name %>_prod
+    REDIS_URL: redis://<%= name %>-redis:6379/0
+    SENTRY_ENVIRONMENT: prod
+    CORS_ALLOWED_ORIGINS: https://app.<%= zone %>
+  secret:
+    - SECRET_KEY_BASE
+    - DATABASE_URL
+    - SENTRY_DSN
+    - SENTRY_ALLOWED_FE_DSN
+    - SMOKE_TOKEN
+
+# db and redis join the "kamal" Docker network and are resolved by container name.
+# Neither publishes a port; their data lives in named volumes that survive redeploys.
+# beszel-agent runs on the host network (it reports the host) and listens on 45876, which only the
+# VPN reaches. kamal deploy does not boot it; boot it once by hand (README "Beszel agent") with
+# BESZEL_HUB_KEY, the hub's public key (not a secret), set. Never where an agent already listens.
+accessories:
+  db:
+    image: postgres:16-alpine
+    host: <%= host %>
+    env:
+      clear:
+        POSTGRES_USER: postgres
+        POSTGRES_DB: <%= name %>_prod
+      secret:
+        - POSTGRES_PASSWORD
+    volumes:
+      - <%= name %>-pg-data:/var/lib/postgresql/data
+  redis:
+    image: redis:7-alpine
+    host: <%= host %>
+    volumes:
+      - <%= name %>-redis-data:/data
+  beszel-agent:
+    image: henrygd/beszel-agent:0.21.0
+    host: <%= host %>
+    network: host
+    env:
+      clear:
+        LISTEN: "45876"
+        KEY: "<%= ENV.fetch('BESZEL_HUB_KEY', '') %>"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - <%= name %>-beszel-agent-data:/var/lib/beszel-agent

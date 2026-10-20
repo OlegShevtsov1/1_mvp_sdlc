@@ -1,0 +1,230 @@
+name: Kamal Manage
+run-name: Kamal Manage ${{ inputs.action }}
+
+# Operates the prod deployment over the shared mvp VPN: status, logs, restart (deploy/manage.sh),
+# rollback to prod-previous or a given version (deploy/rollback.sh prod, which also moves the ECR
+# tags prod-current/prod-previous), and remove, which deletes only this app from the prod host: the
+# kamal-proxy there is shared with the backend.
+#
+# Dual control: runs only from main; restart needs confirm=prod, rollback the typed confirm
+# ROLLBACK-prod, remove needs confirm=remove-prod; the guard runs without the "prod" environment,
+# so a refused run never sees its secrets.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do with prod
+        required: true
+        type: choice
+        options: [status, logs, restart, rollback, remove]
+      version:
+        description: Rollback target, prod-previous or the 40-hex git sha (optionally sha-<sha>) of an earlier prod deploy
+        required: false
+        default: ''
+        type: string
+      confirm:
+        description: prod for restart, ROLLBACK-prod for rollback, remove-prod for remove; not needed for status and logs
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+# Shared with Kamal Deploy: two prod operations never overlap.
+concurrency:
+  group: kamal-prod
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: 'Guard: ref, action, confirm'
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.inputs.outputs.version }}
+      sha: ${{ steps.inputs.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the ref and the inputs
+        id: inputs
+        env:
+          REF: ${{ github.ref }}
+          ACTION: ${{ inputs.action }}
+          CONFIRM: ${{ inputs.confirm }}
+          VERSION: ${{ inputs.version }}
+        run: bash deploy/prod_guard.sh manage >> "$GITHUB_OUTPUT"
+
+  preflight:
+    name: 'Guard: required secrets present (names only)'
+    needs: guard
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: prod
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check that every required secret is set
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          VPN_CI_OVPN: ${{ secrets.VPN_CI_OVPN }}
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          PROD_VPN_IP: ${{ secrets.PROD_VPN_IP }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          TELEGRAM_PROD_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_PROD_ALERTS_BOT_TOKEN }}
+          TELEGRAM_PROD_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_CHAT_ID }}
+          TELEGRAM_PROD_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_THREAD_ID }}
+        run: >-
+          bash deploy/prod_preflight.sh
+          TELEGRAM_PROD_ALERTS_BOT_TOKEN
+          TELEGRAM_PROD_ALERTS_CHAT_ID
+          TELEGRAM_PROD_ALERTS_THREAD_ID
+
+  # The runner downloads every action a job references while setting the job up, even for
+  # steps that never run, so this job fails before the deploy when vpn-up/vpn-down are missing
+  # on 1_mvp_infra@env/dev or that repository does not share its actions with this one.
+  vpn-up-check:
+    name: 'Guard: vpn-up action available (1_mvp_infra@env/dev)'
+    needs: preflight
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 2
+    steps:
+      - if: false
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-up@env/dev
+        with:
+          ovpn: unused
+      - if: false
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-down@env/dev
+      - run: echo "vpn-up/vpn-down resolve at OlegShevtsov1/1_mvp_infra@env/dev"
+
+  manage:
+    name: Manage prod
+    needs: [guard, preflight, vpn-up-check]
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: prod
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # rollback moves the ECR tags prod-current/prod-previous.
+      - name: Install crane
+        env:
+          CRANE_VERSION: 0.22.1
+          CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/crane.tgz" "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "$CRANE_SHA256  $RUNNER_TEMP/crane.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/crane.tgz" -C "$RUNNER_TEMP/bin" crane
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Install Kamal
+        env:
+          KAMAL_VERSION: 2.12.0
+        run: gem install kamal -v "$KAMAL_VERSION" --no-document
+
+      - name: Load the prod SSH key
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          eval "$(ssh-agent -s)" >/dev/null
+          printf '%s\n' "$PROD_SSH_KEY" | ssh-add - 2>/dev/null
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+
+      - uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-up@env/dev
+        with:
+          ovpn: ${{ secrets.VPN_CI_OVPN }}
+
+      - name: Check that prod is reachable over the VPN
+        env:
+          PROD_VPN_IP: ${{ secrets.PROD_VPN_IP }}
+        run: |
+          for attempt in 1 2 3; do
+            if nc -z -w 5 "$PROD_VPN_IP" 22; then
+              echo "prod SSH is reachable over the VPN"
+              exit 0
+            fi
+            echo "attempt $attempt: prod SSH not reachable yet"
+            sleep 5
+          done
+          echo "::error::prod SSH is not reachable over the VPN"
+          exit 1
+
+      - name: Run the action with Kamal
+        env:
+          ACTION: ${{ inputs.action }}
+          SHA: ${{ needs.guard.outputs.sha }}
+          VERSION: ${{ needs.guard.outputs.version }}
+          ROLLBACK_CONFIRM: ${{ inputs.confirm }}
+          PROD_VPN_IP: ${{ secrets.PROD_VPN_IP }}
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          if [ "$ACTION" = rollback ]; then
+            bash deploy/rollback.sh prod "${SHA:-$VERSION}"
+          else
+            bash deploy/manage.sh "$ACTION"
+          fi
+
+      - if: always()
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-down@env/dev
+
+  notify:
+    name: Notify Telegram
+    needs: [guard, preflight, vpn-up-check, manage]
+    if: always()
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: prod
+    timeout-minutes: 5
+    steps:
+      - name: Compose the message
+        id: message
+        env:
+          GUARD: ${{ needs.guard.result }}
+          PREFLIGHT: ${{ needs.preflight.result }}
+          VPN_CHECK: ${{ needs.vpn-up-check.result }}
+          MANAGE: ${{ needs.manage.result }}
+          ACTION: ${{ inputs.action }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$MANAGE" = success ]; then
+            echo "text=✅ Kamal Manage prod $ACTION succeeded: $RUN_URL" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$GUARD" != success ]; then
+            stage="guard (ref, action or confirm)"
+          elif [ "$PREFLIGHT" != success ]; then
+            stage="guard (secrets)"
+          elif [ "$VPN_CHECK" != success ]; then
+            stage="guard (vpn-up availability)"
+          else
+            stage="$ACTION"
+          fi
+          echo "text=❌ Kamal Manage prod $ACTION failed at $stage: $RUN_URL" >> "$GITHUB_OUTPUT"
+
+      - uses: OlegShevtsov1/1_mvp_infra/.github/actions/notify-telegram@env/dev
+        with:
+          topic: PROD_ALERTS
+          message: ${{ steps.message.outputs.text }}
+        env:
+          TELEGRAM_PROD_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_PROD_ALERTS_BOT_TOKEN }}
+          TELEGRAM_PROD_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_CHAT_ID }}
+          TELEGRAM_PROD_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_THREAD_ID }}

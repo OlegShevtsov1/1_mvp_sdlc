@@ -42,7 +42,6 @@ PLANNED = {
     "next-version.sh": ("C4", None),
     "release-watch": ("C4", None),
     "bin/sdlc-metrics": ("C4", None),
-    "bin/render-template": ("S4", "bin/render-template"),
     "bin/project-add": ("S5", "bin/project-add"),
     "vpnctl project add": ("P2", None),
     "vpnctl project bootstrap": ("P2", None),

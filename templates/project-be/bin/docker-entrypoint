@@ -1,0 +1,22 @@
+#!/bin/bash -e
+
+# Enable jemalloc for reduced memory usage and latency.
+if [ -z "${LD_PRELOAD+x}" ] && [ -f /usr/lib/*/libjemalloc.so.2 ]; then
+  export LD_PRELOAD="$(echo /usr/lib/*/libjemalloc.so.2)"
+fi
+
+# If running the rails server then create or migrate existing database
+if [ "${1}" == "./bin/rails" ] && [ "${2}" == "server" ]; then
+  # On a first deploy the database accessory may still be initialising.
+  if [ -n "${DATABASE_URL:-}" ] && command -v pg_isready >/dev/null 2>&1; then
+    for attempt in $(seq 1 60); do
+      pg_isready -q -d "${DATABASE_URL}" && break
+      echo "waiting for database (${attempt}/60)..."
+      sleep 1
+    done
+  fi
+
+  ./bin/rails db:prepare
+fi
+
+exec "${@}"

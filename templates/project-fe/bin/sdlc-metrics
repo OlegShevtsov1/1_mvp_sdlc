@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Team release metrics (R-C7), one line per release, printed and appended to GITHUB_STEP_SUMMARY:
+#   sdlc-metrics repo= release= date= previous= prs= lead_time_days= cycle_time_median_hours=
+#   rollbacks_prod= stale_drafts= delivered_false= review_p0_p1_p2=
+# The release is the squash commits "(#<pr>)" since the previous release tag (all of them for the
+# first release). Lead time: tag date minus the earliest author date of those commits. Cycle time:
+# median PR open-to-merge. Rollbacks: successful "Kamal Manage rollback" runs since the previous
+# tag. Stale drafts: docs/features files still "status: Draft" with no commit for over 30 days.
+# delivered_false and review findings (Critical/Important/Suggestion = P0/P1/P2) come from the
+# factory's run artifacts (<dir>/<run>/report.json, <dir>/<run>/review/findings.json) of the PRs
+# in the release; that directory exists only on the factory machine.
+# Missing data prints n/a and never fails the release. Metrics are team-level, never personal.
+# Usage: bin/sdlc-metrics [--factory-runs <dir>] vX.Y.Z
+#        bin/sdlc-metrics --escaped vX.Y.Z   escaped defects: GlitchTip issues of the prod frontend
+#                                            first seen within 7 days of the tag (run after them;
+#                                            needs the env of deploy/glitchtip_issues.sh)
+# Env: GH_REPO (default: this clone's repository); gh with a token that reads PRs and Actions runs.
+# Exit 0: printed. Exit 1: --escaped before its window closed or without GlitchTip. Exit 2: usage.
+set -uo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+day=86400
+
+usage() {
+  echo 'usage: bin/sdlc-metrics [--factory-runs <dir>] vX.Y.Z | bin/sdlc-metrics --escaped vX.Y.Z' >&2
+  exit 2
+}
+
+mode=release factory_runs=''
+while [ $# -gt 0 ]; do
+  case $1 in
+    --escaped) mode=escaped; shift ;;
+    --factory-runs) [ $# -ge 2 ] || usage; factory_runs=$2; shift 2 ;;
+    -*) usage ;;
+    *) break ;;
+  esac
+done
+[ $# -eq 1 ] || usage
+tag=$1
+[[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage
+git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null || usage
+tag_epoch=$(git for-each-ref --format='%(creatordate:unix)' "refs/tags/$tag")
+
+iso() {
+  date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+}
+
+if [ "$mode" = escaped ]; then
+  closes=$((tag_epoch + 7 * day))
+  if [ "$(date +%s)" -lt "$closes" ]; then
+    echo "sdlc-metrics: escaped defects of $tag: the 7-day window closes on $(date -u -d "@$closes" +%Y-%m-%d)" >&2
+    exit 1
+  fi
+  issues=$({ "$root/deploy/glitchtip_issues.sh" is:unresolved && "$root/deploy/glitchtip_issues.sh" is:resolved; } | jq -s add) ||
+    { echo "sdlc-metrics: could not read the GlitchTip issues" >&2; exit 1; }
+  escaped=$(jq --argjson from "$tag_epoch" --argjson to "$closes" '
+    [.[] | select(.firstSeen != null)
+     | select((.firstSeen | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601) as $seen
+              | $seen >= $from and $seen < $to)]
+    | unique_by(.id) | length' <<<"$issues")
+  echo "sdlc-metrics-escaped release=$tag escaped_defects=$escaped window=7d"
+  exit 0
+fi
+
+repo=${GH_REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)}
+previous=$("$root/scripts/next-version.sh" --previous-tag "$tag" 2>/dev/null) || previous=''
+range=$tag
+[ -z "$previous" ] || range="$previous..$tag"
+
+prs=() authored=()
+while IFS=$'\t' read -r author_epoch subject; do
+  if [[ $subject =~ \(#([0-9]+)\)$ ]]; then
+    prs+=("${BASH_REMATCH[1]}")
+    authored+=("$author_epoch")
+  fi
+done < <(git log --no-merges --format='%at%x09%s' "$range")
+
+lead_time=n/a
+if [ ${#authored[@]} -gt 0 ]; then
+  earliest=$(printf '%s\n' "${authored[@]}" | sort -n | head -n 1)
+  lead_time=$(awk -v seconds=$((tag_epoch - earliest)) -v day=$day 'BEGIN { printf "%.1f", seconds / day }')
+fi
+
+cycle_time=n/a
+if [ ${#prs[@]} -gt 0 ] && [ -n "$repo" ]; then
+  hours=()
+  for pr in "${prs[@]}"; do
+    hour=$(gh api "repos/$repo/pulls/$pr" 2>/dev/null |
+      jq -er '((.merged_at | fromdateiso8601) - (.created_at | fromdateiso8601)) / 3600' 2>/dev/null) || { hours=(); break; }
+    hours+=("$hour")
+  done
+  if [ ${#hours[@]} -gt 0 ]; then
+    cycle_time=$(printf '%s\n' "${hours[@]}" | sort -g |
+      awk '{ value[NR] = $1 } END { m = (NR % 2) ? value[(NR + 1) / 2] : (value[NR / 2] + value[NR / 2 + 1]) / 2; printf "%.1f", m }')
+  fi
+fi
+
+rollbacks=n/a
+if [ -n "$repo" ]; then
+  if [ -n "$previous" ]; then
+    since=$(git for-each-ref --format='%(creatordate:unix)' "refs/tags/$previous")
+  else
+    since=$(printf '%s\n' "${authored[@]:-$tag_epoch}" | sort -n | head -n 1)
+  fi
+  rollbacks=$(gh api "repos/$repo/actions/workflows/kamal-manage.yml/runs?status=success&per_page=100&created=$(iso "$since")..$(iso "$tag_epoch")" 2>/dev/null |
+    jq -er '[.workflow_runs[] | select(.display_title | test("rollback"))] | length' 2>/dev/null) || rollbacks=n/a
+fi
+
+stale_drafts=0
+while read -r file; do
+  [ -n "$file" ] || continue
+  changed=$(git log -1 --format=%at "$tag" -- "${file#"$tag":}")
+  [ "$changed" -ge $((tag_epoch - 30 * day)) ] || stale_drafts=$((stale_drafts + 1))
+done < <(git grep -l -iE '^status: *draft' "$tag" -- docs/features/ 2>/dev/null)
+
+delivered_false=n/a review=n/a
+if [ -n "$factory_runs" ] && [ -n "$repo" ]; then
+  runs=0 undelivered=0 p0=0 p1=0 p2=0
+  for report in "$factory_runs"/*/report.json; do
+    [ -f "$report" ] || continue
+    read -r delivered pr_url < <(jq -r '[.delivered, .pr_url] | @tsv' "$report" 2>/dev/null) || continue
+    [[ $pr_url =~ /$repo/pull/([0-9]+)$ ]] || continue
+    [[ " ${prs[*]} " == *" ${BASH_REMATCH[1]} "* ]] || continue
+    runs=$((runs + 1))
+    [ "$delivered" = true ] || undelivered=$((undelivered + 1))
+    findings="$(dirname "$report")/review/findings.json"
+    if [ -f "$findings" ]; then
+      read -r critical important suggestion < <(jq -r '[("Critical", "Important", "Suggestion") as $severity
+        | map(select(.severity == $severity)) | length] | @tsv' "$findings" 2>/dev/null) || continue
+      p0=$((p0 + critical)) p1=$((p1 + important)) p2=$((p2 + suggestion))
+    fi
+  done
+  if [ "$runs" -gt 0 ]; then
+    delivered_false="$undelivered/$runs" review="$p0/$p1/$p2"
+  fi
+fi
+
+line="sdlc-metrics repo=${repo:-n/a} release=$tag date=$(date -u -d "@$tag_epoch" +%Y-%m-%d) previous=${previous:-none}"
+line+=" prs=${#prs[@]} lead_time_days=$lead_time cycle_time_median_hours=$cycle_time rollbacks_prod=$rollbacks"
+line+=" stale_drafts=$stale_drafts delivered_false=$delivered_false review_p0_p1_p2=$review"
+echo "$line"
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  echo "$line" >>"$GITHUB_STEP_SUMMARY"
+fi

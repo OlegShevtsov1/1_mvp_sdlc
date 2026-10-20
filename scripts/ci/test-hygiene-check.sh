@@ -52,3 +52,10 @@ run_case "Telegram chat ID"           1 fixture.txt "chat $(printf -- '-100%s' 1
 run_case "local home path"            1 fixture.txt "$(printf '/home/%s/projects' dev)" "local home path"
 run_case "notifier may name Bot API"  0 scripts/ci/notify-telegram.sh "url ${telegram_api}"
 run_case "Bot API elsewhere is caught" 1 fixture.txt "url ${telegram_api}" "Telegram"
+run_case "template may use loopback"  0 templates/project-be/x.rb "bind $(printf '%s.%s.%s.%s' 127 0 0 1)"
+run_case "template may use a documentation IP" 0 templates/project-be/x.rb "ip $(printf '%s.%s.%s.%s' 192 0 2 10)"
+run_case "public IP in a template"    1 templates/project-fe/x.ts "dns $(printf '%s.%s.%s.%s' 8 8 4 4)" "IPv4 literal in a template"
+run_case "template lockfile may carry four-part versions" 0 templates/project-be/Gemfile.lock \
+  "    rails ($(printf '%s.%s.%s.%s' 7 2 3 2))"
+run_case "four-part version elsewhere is caught" 1 fixture.txt \
+  "    rails ($(printf '%s.%s.%s.%s' 7 2 3 2))" "IPv4 literal"

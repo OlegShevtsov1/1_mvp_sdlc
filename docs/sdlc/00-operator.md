@@ -58,7 +58,8 @@ Also once, on the operator machine:
 ## 2. A new project
 
 Once per project, for a project other than the pilot. The automated flow is **planned**:
-`bin/project-add <name>` (planned, S5) will create the backend and frontend repositories from templates (planned, S4), the registry entry in
+`bin/project-add <name>` (planned, S5) will create the backend and frontend repositories from the templates in `templates/project-be/` and
+`templates/project-fe/`, the registry entry in
 `1_mvp_infra`, the prod VPN profile, ECR, the role, the DNS zone, the dev sites, Gatus and Beszel, the GlitchTip
 projects, the Trello board `<NAME>` and the Notion page `<NAME>`; the infrastructure part is
 `vpnctl project add|bootstrap|delegate|remove` (planned, P2). What exists today in `1_mvp_infra`:

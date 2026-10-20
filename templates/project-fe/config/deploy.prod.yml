@@ -1,0 +1,22 @@
+<% project = File.read("config/project.env").scan(/^([A-Z_]+)=(.*)$/).to_h %>
+<% name, zone = project.fetch("PROJECT_NAME"), project.fetch("PROJECT_ZONE") %>
+service: <%= name %>-fe
+
+# PROD_VPN_IP is the prod host's mvp VPN address: a secret, never committed.
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch("PROD_VPN_IP") %>
+
+ssh:
+  user: ubuntu
+
+# Joins the kamal-proxy the backend already runs on the prod host; it terminates TLS with Let's Encrypt.
+proxy:
+  ssl: true
+  host: app.<%= zone %>
+
+env:
+  clear:
+    API_URL: https://<%= zone %>
+    ENV_NAME: prod

@@ -1,0 +1,191 @@
+name: Manual Rails CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to run tests on'
+        required: true
+        default: 'main'
+      check_type:
+        description: 'Select check type to run'
+        required: true
+        type: choice
+        options:
+          - all
+          - lint
+          - fasterer
+          - security
+          - rspec
+        default: 'all'
+      with_redis:
+        description: 'Run with Redis (only affects RSpec)'
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.branch }}-${{ inputs.check_type }}
+  cancel-in-progress: true
+
+jobs:
+  setup:
+    name: Setup
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-22.04' }}
+    outputs:
+      ruby-version: ${{ steps.ruby-version.outputs.ruby-version }}
+
+    steps:
+      - name: Check out Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Get Ruby version
+        id: ruby-version
+        run: echo "ruby-version=3.3.6" >> "$GITHUB_OUTPUT"
+
+  lint:
+    name: Lint
+    needs: setup
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-22.04' }}
+    if: ${{ github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'lint' }}
+
+    steps:
+      - name: Check out Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Set up Ruby ${{ needs.setup.outputs.ruby-version }}
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ needs.setup.outputs.ruby-version }}
+          bundler-cache: true
+
+      - name: Run Rubocop
+        run: bundle exec rubocop --parallel
+
+  fasterer:
+    name: Fasterer
+    needs: setup
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-22.04' }}
+    if: ${{ github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'fasterer' }}
+
+    steps:
+      - name: Check out Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Set up Ruby ${{ needs.setup.outputs.ruby-version }}
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ needs.setup.outputs.ruby-version }}
+          bundler-cache: true
+
+      - name: Run Fasterer
+        run: bundle exec fasterer
+
+  security:
+    name: Security Checks
+    needs: setup
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-22.04' }}
+    if: ${{ github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'security' }}
+
+    steps:
+      - name: Check out Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Set up Ruby ${{ needs.setup.outputs.ruby-version }}
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ needs.setup.outputs.ruby-version }}
+          bundler-cache: true
+
+      - name: Run Security Checks
+        run: |
+          bundle exec bundler-audit --update
+          bundle exec brakeman -q -w2
+
+  test:
+    name: RSpec
+    needs: setup
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-22.04' }}
+    if: ${{ github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'rspec' }}
+
+    services:
+      postgres:
+        image: postgres:15
+        ports:
+          - 5432
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      # Redis service for caching and session tests
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Set up Ruby ${{ needs.setup.outputs.ruby-version }}
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ needs.setup.outputs.ruby-version }}
+          bundler-cache: true
+
+      - name: Check Redis connection
+        run: redis-cli -h localhost -p "${REDIS_PORT}" ping
+        env:
+          REDIS_PORT: ${{ job.services.redis.ports['6379'] }}
+        continue-on-error: true
+        if: ${{ github.event.inputs.with_redis == 'true' }}
+
+      - name: Install PostgreSQL Dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev
+
+      - name: Set Up Database
+        run: |
+          cp config/database.github-actions.yml config/database.yml
+          bundle exec rake db:create
+          bundle exec rake db:migrate
+          bundle exec rake db:schema:load
+          bundle exec rake db:seed
+        env:
+          RAILS_ENV: test
+          DATABASE_URL: postgres://postgres:password@localhost:${{ job.services.postgres.ports['5432'] }}/github-actions
+          REDIS_URL: ${{ github.event.inputs.with_redis == 'true' && format('redis://localhost:{0}/0', job.services.redis.ports['6379']) || '' }}
+
+      - name: Run RSpec
+        run: bundle exec rspec
+        env:
+          RAILS_ENV: test
+          DATABASE_URL: postgres://postgres:password@localhost:${{ job.services.postgres.ports['5432'] }}/github-actions
+          REDIS_URL: ${{ github.event.inputs.with_redis == 'true' && format('redis://localhost:{0}/0', job.services.redis.ports['6379']) || '' }}
+
+      # Optional step to save test coverage report
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/

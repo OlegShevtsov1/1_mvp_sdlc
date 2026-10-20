@@ -1,0 +1,40 @@
+name: changelog-check
+
+# A pull request whose Type: line is feat or fix adds an entry under [Unreleased] in CHANGELOG.md
+# (R-C9), or adds its own version section (hotfix); see bin/changelog-check. The label
+# skip-changelog lets trivia through; chore, docs, ci, refactor and test need no entry, and the
+# release pull request develop → main is not checked. The body and labels are untrusted input, so
+# they reach the script only through env; editing them re-runs the check.
+
+on:
+  pull_request:
+    branches: [develop, main]
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changelog:
+    name: CHANGELOG entry
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check the CHANGELOG entry
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: bin/changelog-check

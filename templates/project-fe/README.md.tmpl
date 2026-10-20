@@ -1,0 +1,203 @@
+# {{APP_MODULE}} frontend
+
+Generated from the OlegShevtsov1/1_mvp_sdlc project templates at {{SDLC_VERSION}}.
+
+React + Vite + TypeScript frontend of the {{APP_MODULE}} project; the backend is
+[`{{REPO_BE}}`](https://github.com/{{REPO_BE}}). One Docker image (nginx serving the built
+bundle) runs in every environment; the backend URL, the error-reporting DSN and the environment
+name are read when the container starts (`/config.js`), never baked into the bundle.
+
+The project name and DNS zone are written only in [`config/project.env`](config/project.env)
+(`PROJECT_NAME={{PROJECT_NAME}}`, `PROJECT_ZONE={{PROJECT_ZONE}}`); the Kamal configs, deploy
+scripts and tests derive everything else from it. Rules for working here are in
+[`CLAUDE.md`](CLAUDE.md) and `.claude/rules/`.
+
+## Requirements
+
+- Node.js (the version in `.nvmrc`; `nvm use` picks it up) and npm
+- Ruby (any recent version; `npm test` renders the Kamal config with it)
+- For deploys from a console: Docker, Ruby with `gem install kamal -v 2.12.0`, the AWS CLI,
+  access to the shared CI VPN; for prod also
+  [crane](https://github.com/google/go-containerregistry/tree/main/cmd/crane) and `jq`
+
+## Local setup
+
+```bash
+nvm use
+npm ci
+git config core.hooksPath scripts/git-hooks   # pre-push hook: published v* tags are immutable
+npm run dev                                   # dev server on http://localhost:3000
+```
+
+Without a runtime config the page shows `API status: not configured` and error reporting stays
+off. To talk to a local backend, create the gitignored `public/config.js`:
+
+```js
+window.APP_CONFIG = {
+  API_URL: "http://localhost:3001",
+  SENTRY_DSN: "",
+  ENV_NAME: "local",
+  APP_VERSION: "local",
+};
+```
+
+## Commands
+
+The checks Front CI runs (`.github/workflows/front-ci.yml`), in its order; the list is kept in
+sync with `CLAUDE.md` §Commands:
+
+```bash
+gitleaks git --redact --exit-code 1 --verbose .   # secrets in the full history
+bash scripts/check-public-repo.sh                 # no internal hosts, IPs, IDs or local paths
+actionlint -color                                 # workflow lint
+npm run lint                                      # ESLint
+npm run typecheck                                 # tsc -b
+npm test                                          # Vitest: src/ and tests/
+npm audit --audit-level=high
+npm run build                                     # production bundle in dist/
+bash scripts/check-bundle-config.sh src dist      # no environment values in src/ or dist/
+bash scripts/check-asset-hashes.sh dist           # bundle file names carry a content hash
+```
+
+`npm run e2e` runs the Playwright checks in `e2e/` against a deployed app (not part of CI), e.g.
+`E2E_BASE_URL=https://app.dev.{{PROJECT_ZONE}} E2E_ENV_NAME=dev npm run e2e`.
+
+## GitHub secrets and variables
+
+Names only (taken from the workflows); values are never committed. `PROD_VPN_IP` is set by
+`project-add`; the others must exist before the workflow that reads them runs.
+
+Repository secrets:
+
+- `AWS_ROLE_ARN` — the role the workflows assume for ECR (OIDC)
+- `VPN_CI_OVPN` — the shared CI VPN profile
+- `SRV_DEPLOY_SSH_KEY` — SSH key of the dev host's deploy user
+- `ANTHROPIC_API_KEY` — AI PR review (only used when `AI_REVIEW` is `on`)
+
+Environment `dev` secrets:
+
+- `SENTRY_DSN` — the dev frontend DSN
+- `TELEGRAM_DEV_ALERTS_BOT_TOKEN`, `TELEGRAM_DEV_ALERTS_CHAT_ID`, `TELEGRAM_DEV_ALERTS_THREAD_ID` —
+  the project's dev alerts topic
+
+Environment `prod` secrets:
+
+- `PROD_VPN_IP` — the prod host's VPN address (set by `project-add`; never a file)
+- `PROD_SSH_KEY` — SSH key of the prod host
+- `SENTRY_DSN` — the prod frontend DSN
+- `TELEGRAM_PROD_ALERTS_BOT_TOKEN`, `TELEGRAM_PROD_ALERTS_CHAT_ID`, `TELEGRAM_PROD_ALERTS_THREAD_ID` —
+  the project's prod alerts topic
+- `BE_REPO_READ_TOKEN` — fine-grained token, Contents: read on the backend repository (release-order
+  check)
+- `GLITCHTIP_API_URL`, `GLITCHTIP_API_TOKEN` — release-watch reads the prod frontend project's
+  issues
+
+Repository variables:
+
+- `RUNS_ON` — runner label for every job (default `ubuntu-latest`)
+- `DEV_AUTO_DEPLOY` — `true` deploys dev after every green Front CI push to `develop` or `hotfix/*`
+- `AI_REVIEW` — `on` enables the AI PR review; anything else keeps it off
+
+The workflows use the shared composite actions `vpn-up`, `vpn-down` and `notify-telegram` from
+`OlegShevtsov1/1_mvp_infra@env/dev`.
+
+## Branch model
+
+Work branches off `develop`: `feature/<KEY>-<n>-<slug>` or, for a fix of production,
+`hotfix/<KEY>-<n>-<slug>`, where `<KEY>` is `PROJECT_NAME` from `config/project.env` in capitals,
+`<n>` the card number and `<slug>` comes from the card title. The Archon factory's
+`archon/task-factory-*` branches are accepted too. Features reach `develop` by squash pull request;
+hotfixes go to `main`, then back to `develop`; the operator merges `develop → main` (the release PR)
+and hotfix PRs by hand. Every PR title is `<KEY>-<n>: <card title>` with exactly one
+`Type: feat|fix|chore|docs|refactor|test|ci` line in the body (`pr-conventions-check`). Details:
+[`CLAUDE.md`](CLAUDE.md), `.claude/rules/git.md`.
+
+Checks on pull requests: Front CI, `tdd-check` (the first commit of a code change is a failing
+`test(...)`), `pr-conventions-check`, `changelog-check` and, when enabled, `ai-review`.
+`main-guard` and `develop-guard` check that every commit on `main`/`develop` came from a merged PR.
+
+## Deploy
+
+- Dev: Dev Deploy ([`.github/workflows/dev-deploy.yml`](.github/workflows/dev-deploy.yml)) builds
+  the image once, pushes it to ECR and deploys it with Kamal to the shared dev host as
+  `app.dev.{{PROJECT_ZONE}}` (`config/deploy.yml` + `config/deploy.dev.yml`). Runs after a green
+  Front CI push on `develop` or `hotfix/*` when `DEV_AUTO_DEPLOY` is `true`, or on demand:
+  `gh workflow run dev-deploy.yml --ref develop`.
+- Prod: Kamal Deploy ([`.github/workflows/kamal-deploy.yml`](.github/workflows/kamal-deploy.yml))
+  promotes the dev image unchanged (no rebuild) and deploys a release tag to the prod host as
+  `app.{{PROJECT_ZONE}}`, behind the `kamal-proxy` the backend already runs there
+  (`config/deploy.prod.yml`):
+  `gh workflow run "Kamal Deploy" --ref main -f environment=prod -f version=v<X.Y.Z> -f confirm=prod`.
+  Kamal Manage ([`.github/workflows/kamal-manage.yml`](.github/workflows/kamal-manage.yml)) runs
+  `status`, `logs`, `restart`, `rollback` and `remove`.
+- Console equivalents: `deploy/deploy.sh`, `deploy/rollback.sh`, `deploy/promote.sh`,
+  `deploy/manage.sh` (they print variable names, never values).
+
+### Stopping and starting by hand
+
+Kamal names containers after the version it runs: `sha-<git sha>` on dev, `prod-sha-<git sha>` on
+prod. Prefer `deploy/manage.sh restart`. When you must start by hand, read the running version with
+`kamal app version -d <dev|prod> -q` and always pass it:
+
+```bash
+kamal app start -d prod --version prod-sha-<full git sha>
+kamal app start -d dev --version sha-<full git sha>
+```
+
+### Monitoring (Beszel)
+
+The frontend has no Beszel accessory. It shares the prod host with the backend (it joins the
+backend's `kamal-proxy`), and a host runs one Beszel agent: the agent is the backend's Kamal
+accessory (see the backend README). A second agent would collide on its port and report the same
+host twice. The shared dev host's agent is deployed by the infrastructure repository.
+
+## Releases and hotfixes
+
+Prod runs only released versions: annotated tags `vX.Y.Z` on `main`, each with a section in
+[`CHANGELOG.md`](CHANGELOG.md). In short:
+
+1. A `Type: feat` or `Type: fix` PR adds its entry under `## [Unreleased]` (or carries the label
+   `skip-changelog`); every section keeps `Minimum backend version: vX.Y.Z`, equal to
+   [`deploy/min-be-version`](deploy/min-be-version).
+2. Release prep PR into `develop` renames `[Unreleased]` to the number
+   `scripts/next-version.sh origin/develop` prints; then the release PR `develop → main`.
+3. Tag the merge commit: `git tag -a vX.Y.Z -m vX.Y.Z origin/main && git push origin vX.Y.Z`.
+   The Release workflow checks the tag and creates a draft GitHub Release from the CHANGELOG
+   section; the operator publishes it.
+4. Deploy the tag with Kamal Deploy. The backend release named in `deploy/min-be-version` must be
+   on prod first (`deploy/be_version_check.sh`); `release-watch` then watches prod for 10 minutes.
+
+A hotfix branch `hotfix/<KEY>-<n>-<slug>` from `main` goes by PR into `main` with its own
+`## [X.Y.Z]` section, is tagged and deployed the same way, then back-merged into `develop` with a
+merge commit. Published tags are never moved or deleted.
+
+## Template inventory
+
+Tick each item once it is checked on this repository.
+
+- [ ] Runtime `/config.js` written at container start (`docker/40-config-js.sh`, `src/config.ts`)
+- [ ] Error tunnel `<API_URL>/api/errors` in `src/sentry.ts`
+- [ ] nginx cache headers (`nginx.conf`: `/assets` immutable, `index.html` no-cache, `/config.js` no-store)
+- [ ] Beszel agent (backend accessory, shared host)
+- [ ] Deploy configs `config/deploy.yml`, `config/deploy.dev.yml`, `config/deploy.prod.yml`, `config/project.env`, `.kamal/secrets-common`
+- [ ] Deploy scripts and guards in `deploy/` (deploy, rollback, promote, manage, preflight, prod guard, tag and main checks, release-watch)
+- [ ] `deploy/min-be-version` and the backend release-order check
+- [ ] Workflow `front-ci`
+- [ ] Workflow `ai-review`
+- [ ] Workflow `changelog-check`
+- [ ] Workflow `dev-deploy`
+- [ ] Workflow `develop-guard`
+- [ ] Workflow `kamal-deploy`
+- [ ] Workflow `kamal-manage`
+- [ ] Workflow `main-guard`
+- [ ] Workflow `pr-conventions-check`
+- [ ] Workflow `release`
+- [ ] Workflow `tdd-check`
+- [ ] Release tooling (`scripts/next-version.sh`, `scripts/release-notes.sh`, `scripts/release-check.sh`, `bin/sdlc-metrics`)
+- [ ] `CHANGELOG.md` skeleton
+- [ ] Pre-push hook `scripts/git-hooks/pre-push`
+- [ ] `.claude/settings.json` and `.claude/rules/`
+- [ ] `CLAUDE.md`
+- [ ] PR template with the `Type:` line
+- [ ] `tdd-check` on a live test PR
+- [ ] `pr-conventions-check` on a live test PR

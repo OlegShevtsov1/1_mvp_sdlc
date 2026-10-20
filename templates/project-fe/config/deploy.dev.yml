@@ -1,0 +1,21 @@
+<% project = File.read("config/project.env").scan(/^([A-Z_]+)=(.*)$/).to_h %>
+<% name, zone = project.fetch("PROJECT_NAME"), project.fetch("PROJECT_ZONE") %>
+service: <%= name %>-fe-dev
+
+# DEV_HOST is the shared dev host's VPN address: the vpn-up output in CI, the operator's env on the console.
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch("DEV_HOST") %>
+
+ssh:
+  user: dev
+
+# Joins the kamal-proxy already running on the shared dev host; mvp-proxy terminates TLS in front of it.
+proxy:
+  host: app.dev.<%= zone %>
+
+env:
+  clear:
+    API_URL: https://dev.<%= zone %>
+    ENV_NAME: dev

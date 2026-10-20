@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Checks that a pull request which will be released as a feature or a fix says so in CHANGELOG.md
+# (R-C9); the changelog-check workflow runs it on every pull request into develop or main.
+# The PR body becomes the squash commit body, so its Type: line is the one scripts/next-version.sh
+# will read. Passes when any of these holds:
+#   - the label skip-changelog is set (trivia);
+#   - the head is develop and the base main: the release PR, whose entries are already in;
+#   - the body has no single Type: line (pr-conventions-check fails that), or it is not feat or fix;
+#   - [Unreleased] in CHANGELOG.md differs between the merge base and the head;
+#   - the head adds a ## [X.Y.Z] section (a hotfix PR into main adds its version directly).
+# Comparing with the merge base, not the base branch tip, keeps a stale branch from passing on
+# entries others added to the base since.
+# Env: BASE_SHA, HEAD_SHA, HEAD_REF, BASE_REF, PR_BODY and PR_LABELS (JSON array of label names);
+# the body and labels are untrusted.
+# Exit 0: pass. Exit 1: an entry is missing (printed as ::error::). Exit 2: usage error.
+set -euo pipefail
+
+if [[ -z "${BASE_SHA:-}" || -z "${HEAD_SHA:-}" ]]; then
+  echo 'usage: BASE_SHA and HEAD_SHA must be set (HEAD_REF, BASE_REF, PR_BODY, PR_LABELS may be empty)' >&2
+  exit 2
+fi
+notes="$(dirname "${BASH_SOURCE[0]}")/../scripts/release-notes.sh"
+
+if jq -e 'index("skip-changelog")' <<< "${PR_LABELS:-[]}" > /dev/null; then
+  echo 'changelog-check: label skip-changelog is set, no CHANGELOG entry needed'
+  exit 0
+fi
+if [[ "${HEAD_REF:-}" == develop && "${BASE_REF:-}" == main ]]; then
+  echo 'changelog-check: release pull request develop into main, its entries are already in CHANGELOG.md'
+  exit 0
+fi
+
+mapfile -t types < <(tr -d '\r' <<< "${PR_BODY:-}" | grep -E '^Type:' || true)
+if (( ${#types[@]} != 1 )); then
+  echo "changelog-check: the body has ${#types[@]} Type: lines, left to pr-conventions-check"
+  exit 0
+fi
+type="$(sed -E 's/^Type:[[:space:]]*//; s/[[:space:]]*$//' <<< "${types[0]}")"
+if [[ "${type}" != feat && "${type}" != fix ]]; then
+  echo "changelog-check: Type: ${type} needs no CHANGELOG entry"
+  exit 0
+fi
+
+merge_base="$(git merge-base "${BASE_SHA}" "${HEAD_SHA}")"
+changelog_at() {
+  git show "$1:CHANGELOG.md" 2> /dev/null || true
+}
+unreleased() {
+  "${notes}" Unreleased <(changelog_at "$1") 2> /dev/null || echo '<no [Unreleased] section>'
+}
+versions() {
+  changelog_at "$1" | grep -E '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' | sed -E 's/^## \[([^]]+)\].*/\1/' | sort -u || true
+}
+
+if [[ "$(unreleased "${merge_base}")" != "$(unreleased "${HEAD_SHA}")" ]]; then
+  echo "changelog-check: Type: ${type} pull request changes [Unreleased] in CHANGELOG.md"
+  exit 0
+fi
+added="$(comm -13 <(versions "${merge_base}") <(versions "${HEAD_SHA}") | paste -sd ' ' -)"
+if [[ -n "${added}" ]]; then
+  echo "changelog-check: Type: ${type} pull request adds CHANGELOG.md section ${added}"
+  exit 0
+fi
+
+echo "::error::Type: ${type} pull request does not change [Unreleased] in CHANGELOG.md: add an entry under ## [Unreleased] (Keep a Changelog category), or set the label skip-changelog if it is not worth one"
+exit 1

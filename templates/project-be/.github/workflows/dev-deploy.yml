@@ -1,0 +1,388 @@
+name: Dev Deploy
+
+# Every commit pushed to develop or a hotfix/* branch that both Rails Tests and Rails CI passed
+# (decision 28) is built once into ECR (sha-<git sha>) and deployed to the dev host with Kamal 2,
+# through the shared mvp VPN (vpn-up/vpn-down from 1_mvp_infra). A main commit is deployed only by a
+# dispatch on main, as bin/wait-dev-deploy does for the factory. See README "Dev deploy".
+#
+# No concurrency group on purpose: the VPN lock taken by vpn-up serializes the deploy part
+# across repositories, and Kamal's deploy lock serializes it on the host.
+
+on:
+  workflow_run:
+    workflows: [Rails Tests, Rails CI]
+    types: [completed]
+    branches: [develop, 'hotfix/*']
+  workflow_dispatch:
+    inputs:
+      action:
+        description: deploy builds (if needed) and deploys the dispatched commit; rollback boots an earlier version
+        type: choice
+        options: [deploy, rollback]
+        default: deploy
+      version:
+        description: Rollback target sha-<40 hex>; empty rolls back to the version before the current one
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  gate:
+    name: Gate
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
+      reason: ${{ steps.decide.outputs.reason }}
+      sha: ${{ steps.decide.outputs.sha }}
+      action: ${{ steps.decide.outputs.action }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide whether to deploy
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_NAME: ${{ github.event.workflow_run.name }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_ACTION: ${{ inputs.action }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${EVENT}" == 'workflow_dispatch' ]]; then
+            if [[ -n "${INPUT_VERSION}" && ! "${INPUT_VERSION}" =~ ^sha-[0-9a-f]{40}$ ]]; then
+              echo "::error::version must be empty or sha-<40 hex git sha>"
+              exit 1
+            fi
+            decision="$(printf 'deploy=true\nreason=dispatched %s\n' "${INPUT_ACTION}")"
+            sha="${GITHUB_SHA}"
+            action="${INPUT_ACTION}"
+          elif [[ "${RUN_EVENT}" != 'push' || "${RUN_CONCLUSION}" != 'success' ]]; then
+            decision="$(printf 'deploy=false\nreason=not deploying: %s %s run was %s\n' "${RUN_NAME}" "${RUN_EVENT}" "${RUN_CONCLUSION}")"
+            sha="${HEAD_SHA}"
+            action=deploy
+          else
+            decision="$(deploy/dev_deploy_gate.sh)"
+            sha="${HEAD_SHA}"
+            action=deploy
+          fi
+          {
+            echo "${decision}"
+            echo "sha=${sha}"
+            echo "action=${action}"
+            echo "version=${INPUT_VERSION}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "gate: ${decision//$'\n'/, }"
+          echo "**Gate:** ${decision#*reason=}" >> "${GITHUB_STEP_SUMMARY}"
+
+  # Fails fast, before anything is built, when a secret the deploy needs is missing.
+  # Only names are checked and printed, never values.
+  preflight:
+    name: Preflight (secrets)
+    needs: gate
+    if: needs.gate.outputs.deploy == 'true'
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Check that every required secret is set
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          VPN_CI_OVPN: ${{ secrets.VPN_CI_OVPN }}
+          SRV_DEPLOY_SSH_KEY: ${{ secrets.SRV_DEPLOY_SSH_KEY }}
+          SECRET_KEY_BASE: ${{ secrets.SECRET_KEY_BASE }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_ALLOWED_FE_DSN: ${{ secrets.SENTRY_ALLOWED_FE_DSN }}
+          SMOKE_TOKEN: ${{ secrets.SMOKE_TOKEN }}
+          TELEGRAM_DEV_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_DEV_ALERTS_BOT_TOKEN }}
+          TELEGRAM_DEV_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_DEV_ALERTS_CHAT_ID }}
+          TELEGRAM_DEV_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_DEV_ALERTS_THREAD_ID }}
+        run: |
+          source deploy/_common.sh
+          # PROJECT_NAME comes from config/project.env and KAMAL_REGISTRY_PASSWORD from the ECR
+          # login inside deploy.sh; every other variable .kamal/secrets.dev reads is a secret.
+          mapfile -t kamal_secrets < <(secret_names .kamal/secrets.dev | grep -vxE 'PROJECT_NAME|KAMAL_REGISTRY_PASSWORD')
+          required=(
+            AWS_ROLE_ARN VPN_CI_OVPN SRV_DEPLOY_SSH_KEY
+            "${kamal_secrets[@]}"
+            TELEGRAM_DEV_ALERTS_BOT_TOKEN TELEGRAM_DEV_ALERTS_CHAT_ID TELEGRAM_DEV_ALERTS_THREAD_ID
+          )
+          missing=()
+          for name in "${required[@]}"; do
+            [[ -n "${!name}" ]] || missing+=("${name}")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Dev Deploy cannot start, missing secrets: ${missing[*]} (see README \"Dev deploy\")"
+            exit 1
+          fi
+          echo "all required secrets are set: ${required[*]}"
+
+  # A uses: that cannot be resolved kills its job at "Set up job", before any step can explain
+  # why, so the shared actions are resolved here, in a job that builds and deploys nothing.
+  # vpn-down without vpn-up only prints "nothing to clean up".
+  probe:
+    name: Probe (shared VPN actions)
+    needs: preflight
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    steps:
+      - name: Resolve the shared actions from 1_mvp_infra@env/dev
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-down@env/dev
+
+      - name: Check that vpn-up exists next to vpn-down
+        run: |
+          actions_dir="$(dirname "${RUNNER_WORKSPACE}")/_actions/OlegShevtsov1/1_mvp_infra"
+          if [[ -z "$(find "${actions_dir}" -path '*/.github/actions/vpn-up/action.yml' 2>/dev/null)" ]]; then
+            echo "::error::vpn-up is missing on OlegShevtsov1/1_mvp_infra@env/dev (I4a not merged)"
+            exit 1
+          fi
+          echo "vpn-up and vpn-down are available"
+
+  build:
+    name: Build once (ECR)
+    needs: [gate, probe]
+    if: needs.gate.outputs.action == 'deploy'
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+    env:
+      SHA: ${{ needs.gate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Load the project identity
+        run: grep -E '^[A-Z_]+=' config/project.env >> "${GITHUB_ENV}"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # The account id is part of the registry host; it must never show up in a log.
+      - name: Resolve the ECR registry
+        run: |
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          echo "::add-mask::${account}"
+          echo "REGISTRY=${account}.dkr.ecr.${AWS_REGION}.amazonaws.com" >> "${GITHUB_ENV}"
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Check whether sha-<sha> is already in ECR
+        id: exists
+        run: |
+          if docker buildx imagetools inspect "${REGISTRY}/${PROJECT_NAME}:sha-${SHA}" > /dev/null 2>&1; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "sha-${SHA} is already in ECR, not building it again"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+          echo "BUILD_STARTED=$(date +%s)" >> "${GITHUB_ENV}"
+
+      # Kamal refuses an image whose service label differs from the configured service.
+      - name: Build and push sha-<sha>
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          provenance: false
+          tags: ${{ env.REGISTRY }}/${{ env.PROJECT_NAME }}:sha-${{ env.SHA }}
+          labels: service=${{ env.PROJECT_NAME }}-dev
+          build-args: APP_RELEASE=${{ env.SHA }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.PROJECT_NAME }}-build-cache:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.PROJECT_NAME }}-build-cache:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+
+      - name: Record the image digest
+        id: digest
+        env:
+          EXISTED: ${{ steps.exists.outputs.exists }}
+        run: |
+          digest="$(docker buildx imagetools inspect "${REGISTRY}/${PROJECT_NAME}:sha-${SHA}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          if [[ "${EXISTED}" == 'true' ]]; then built='skipped (already in ECR)'; else built='built'; fi
+          {
+            echo '| image tag | digest | build | seconds |'
+            echo '| --- | --- | --- | --- |'
+            echo "| sha-${SHA} | ${digest} | ${built} | $(( $(date +%s) - BUILD_STARTED )) |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  deploy:
+    name: Deploy (VPN + Kamal)
+    needs: [gate, probe, build]
+    if: ${{ !cancelled() && needs.gate.outputs.deploy == 'true' && needs.probe.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: dev
+    timeout-minutes: 20
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      SHA: ${{ needs.gate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      # Before vpn-up: everything slow happens outside the VPN lock window.
+      - uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Load the deploy SSH key into an agent (never written to disk)
+        env:
+          SRV_DEPLOY_SSH_KEY: ${{ secrets.SRV_DEPLOY_SSH_KEY }}
+        run: |
+          eval "$(ssh-agent -a "${RUNNER_TEMP}/ssh-agent.sock")" > /dev/null
+          ssh-add - <<< "${SRV_DEPLOY_SSH_KEY}"
+          echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK}" >> "${GITHUB_ENV}"
+
+      - name: VPN up
+        id: vpn
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-up@env/dev
+        with:
+          ovpn: ${{ secrets.VPN_CI_OVPN }}
+
+      # The lock wait can be long; a newer commit on the branch has its own run by then, and a
+      # deleted branch (a merged hotfix) has nothing left to deploy.
+      - name: Check that the commit is still the head of its branch
+        id: current
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          # Only a 404 means the branch is gone; any other failure must fail the deploy, not skip it.
+          error="$(mktemp)"
+          if ! head="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" --jq .object.sha 2> "${error}")"; then
+            cat "${error}" >&2
+            grep -q 'HTTP 404' "${error}" || exit 1
+            head=''
+          fi
+          if [[ -z "${head}" ]]; then
+            echo "::notice::superseded: branch ${BRANCH} no longer exists, not deploying ${SHA}"
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          elif [[ "${head}" != "${SHA}" ]]; then
+            echo "::notice::superseded: ${BRANCH} is now ${head}, not deploying ${SHA}"
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Deploy or roll back
+        if: steps.current.outputs.skip != 'true'
+        env:
+          DEV_HOST: ${{ steps.vpn.outputs.dev-host }}
+          ACTION: ${{ needs.gate.outputs.action }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          SECRET_KEY_BASE: ${{ secrets.SECRET_KEY_BASE }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_ALLOWED_FE_DSN: ${{ secrets.SENTRY_ALLOWED_FE_DSN }}
+          SMOKE_TOKEN: ${{ secrets.SMOKE_TOKEN }}
+        run: |
+          if [[ "${ACTION}" == 'rollback' ]]; then
+            deploy/rollback.sh dev "${VERSION}"
+          else
+            deploy/deploy.sh dev "sha-${SHA}"
+          fi
+
+      - name: VPN down
+        if: always()
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/vpn-down@env/dev
+
+  report:
+    name: Report
+    needs: [gate, preflight, probe, build, deploy]
+    if: always() && needs.gate.outputs.deploy == 'true'
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    outputs:
+      message: ${{ steps.summarize.outputs.message }}
+    steps:
+      - name: Summarize the job results
+        id: summarize
+        env:
+          ACTION: ${{ needs.gate.outputs.action }}
+          SHA: ${{ needs.gate.outputs.sha }}
+          PREFLIGHT: ${{ needs.preflight.result }}
+          PROBE: ${{ needs.probe.result }}
+          BUILD: ${{ needs.build.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          explain() {
+            case "$1" in
+              preflight) echo 'required secrets are missing: see the preflight error for their names and README "Dev deploy"' ;;
+              probe) echo "actions from OlegShevtsov1/1_mvp_infra@env/dev unavailable: I4a not merged to env/dev, or 1_mvp_infra Actions access is not 'user'" ;;
+              build) echo 'the image could not be built or pushed to ECR' ;;
+              deploy) echo 'the VPN, Kamal, the health check or the swagger smoke failed: see the deploy log' ;;
+            esac
+          }
+          {
+            echo '| job | result |'
+            echo '| --- | --- |'
+            for job in preflight probe build deploy; do
+              result_var="${job^^}"
+              echo "| ${job} | ${!result_var} |"
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
+          failed=''
+          for job in preflight probe build deploy; do
+            result_var="${job^^}"
+            if [[ "${!result_var}" == 'failure' || "${!result_var}" == 'cancelled' ]]; then
+              failed="${job}"
+              break
+            fi
+          done
+          if [[ -n "${failed}" ]]; then
+            message="❌ Dev Deploy ${ACTION} sha-${SHA:0:12} failed in ${failed}: $(explain "${failed}") ${RUN_URL}"
+            echo "::error::${failed} failed: $(explain "${failed}")"
+          else
+            message="✅ Dev Deploy ${ACTION} sha-${SHA:0:12} succeeded ${RUN_URL}"
+          fi
+          echo "message=${message}" >> "${GITHUB_OUTPUT}"
+          echo "FAILED_JOB=${failed}" >> "${GITHUB_ENV}"
+
+      - name: Fail when a job failed
+        if: env.FAILED_JOB != ''
+        run: exit 1
+
+  notify:
+    name: Notify (Telegram)
+    needs: [gate, report]
+    if: always() && needs.gate.outputs.deploy == 'true'
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: dev
+    steps:
+      - uses: OlegShevtsov1/1_mvp_infra/.github/actions/notify-telegram@env/dev
+        env:
+          TELEGRAM_DEV_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_DEV_ALERTS_BOT_TOKEN }}
+          TELEGRAM_DEV_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_DEV_ALERTS_CHAT_ID }}
+          TELEGRAM_DEV_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_DEV_ALERTS_THREAD_ID }}
+        with:
+          topic: DEV_ALERTS
+          message: ${{ needs.report.outputs.message || format('❌ Dev Deploy could not report its result {0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}

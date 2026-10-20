@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Published release tags are immutable: refuses a push that deletes a remote refs/tags/v* or
+# overwrites one that already exists there. New tags and branch pushes pass.
+# Install per clone: git config core.hooksPath scripts/git-hooks (git push --no-verify skips it;
+# server-side tag rules are separate).
+# Stdin (from git): <local ref> <local sha> <remote ref> <remote sha>, one line per ref.
+set -uo pipefail
+zero='^0+$'
+status=0
+while read -r _local_ref local_sha remote_ref remote_sha; do
+  case ${remote_ref} in
+    refs/tags/v*) ;;
+    *) continue ;;
+  esac
+  if [[ ${local_sha} =~ ${zero} ]] || ! [[ ${remote_sha} =~ ${zero} ]]; then
+    echo "pre-push: published tag ${remote_ref#refs/tags/} is immutable: deleting or moving it is refused" >&2
+    status=1
+  fi
+done
+exit "${status}"

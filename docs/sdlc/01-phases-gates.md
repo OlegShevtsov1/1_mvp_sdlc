@@ -85,7 +85,7 @@ The course plugin is vendored unchanged (R-B1); invoke its skills as `/sdlc:<ski
 | `review-feature` | 6 | once per feature, after every task is done (R-C5) |
 | `ship-feature` | 8 | changelog entry and PR body; never merges; gated (`ship`) |
 | `user-documentation` | 8 | optional, against a running dev app, when the feature changes what users see |
-| `scaffold` | — | **not used**: projects come from our templates (planned, S4) |
+| `scaffold` | — | **not used**: projects come from the templates in `templates/project-be/` and `templates/project-fe/` |
 
 ## Our skills and commands
 

@@ -1,0 +1,16 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "{{APP_MODULE}} API",
+    "version": "v1",
+    "description": "API documentation for {{APP_MODULE}} application"
+  },
+  "paths": {
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Local server"
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+name: develop-guard
+
+# The twin of main-guard.yml for develop (decision 27): every commit on develop must come from a
+# merged pull request (scripts/main-guard.sh). A commit that did not, or one that cannot be
+# checked, alerts the dev alerts Telegram topic.
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full git sha of a commit on develop to check (empty checks the pushed commit)
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  guard:
+    name: Commit came from a merged PR
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ inputs.sha || github.sha }}
+          BRANCH: develop
+        run: bash scripts/main-guard.sh
+
+  alert:
+    name: Notify Telegram
+    needs: guard
+    if: failure()
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: dev
+    timeout-minutes: 5
+    steps:
+      - name: Compose the message
+        id: message
+        env:
+          SHA: ${{ inputs.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          echo "text=❌ develop-guard: commit ${SHA:0:7} on develop has no merged PR (or could not be checked): $RUN_URL" >> "$GITHUB_OUTPUT"
+
+      - uses: OlegShevtsov1/1_mvp_infra/.github/actions/notify-telegram@env/dev
+        with:
+          topic: DEV_ALERTS
+          message: ${{ steps.message.outputs.text }}
+        env:
+          TELEGRAM_DEV_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_DEV_ALERTS_BOT_TOKEN }}
+          TELEGRAM_DEV_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_DEV_ALERTS_CHAT_ID }}
+          TELEGRAM_DEV_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_DEV_ALERTS_THREAD_ID }}

@@ -1,0 +1,37 @@
+name: changelog-check
+
+# CHANGELOG discipline (R-C9, scripts/changelog-check.sh): a PR whose body has Type: feat or
+# Type: fix adds an entry under [Unreleased] in CHANGELOG.md (a hotfix PR may add its version
+# section instead); the label skip-changelog exempts it. Re-runs when labels change.
+on:
+  pull_request:
+    branches: [develop, main]
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changelog:
+    name: CHANGELOG entry for feat and fix
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check the CHANGELOG entry
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash scripts/changelog-check.sh

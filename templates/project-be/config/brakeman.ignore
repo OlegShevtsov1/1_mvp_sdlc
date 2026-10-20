@@ -1,0 +1,15 @@
+{
+  "ignored_warnings": [
+    {
+      "warning_type": "Unmaintained Dependency",
+      "warning_code": 120,
+      "fingerprint": "d84924377155b41e094acae7404ec2e521629d86f97b0ff628e3d1b263f8101c",
+      "check_name": "EOLRails",
+      "message": "Support for Rails 7.2.2.1 ended on 2026-08-09",
+      "file": "Gemfile.lock",
+      "confidence": "High",
+      "note": "Known: Rails upgrade is tracked separately; not in scope of the srv Kamal deploy."
+    }
+  ],
+  "brakeman_version": "7.0.2"
+}

@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Smoke-tests every operation documented in swagger/v1/swagger.json against a running deployment.
+# Usage: bin/swagger_smoke BASE_URL   (e.g. http://localhost:3000)
+# SMOKE_CONNECT_TO (a curl --connect-to value) sends every request to another address than
+# BASE_URL's host, e.g. to a reverse proxy that routes on the Host header; SMOKE_FORWARDED_PROTO
+# adds X-Forwarded-Proto, e.g. https for an app that forces SSL behind a TLS terminator.
+# SMOKE_READ_ONLY=1 sends only GET requests and creates nothing: for prod, where records the full
+# run creates may never be deletable.
+set -uo pipefail
+
+BASE="${1:-}"
+if [[ -z "$BASE" ]]; then
+  echo "usage: $0 BASE_URL" >&2
+  exit 64
+fi
+BASE="${BASE%/}"
+
+PASSED=0
+FAILED=0
+BODY="$(mktemp)"
+CURL_EXTRA=()
+[[ -n "${SMOKE_CONNECT_TO:-}" ]] && CURL_EXTRA+=(--connect-to "$SMOKE_CONNECT_TO")
+[[ -n "${SMOKE_FORWARDED_PROTO:-}" ]] && CURL_EXTRA+=(-H "X-Forwarded-Proto: $SMOKE_FORWARDED_PROTO")
+trap 'rm -f "$BODY"' EXIT
+
+# check <name> <expected-status> <method> <path> [json-body] [extra curl args...]
+check() {
+  local name="$1" expected="$2" method="$3" path="$4" data="${5:-}"
+  shift 5 2>/dev/null || shift 4
+  local status
+  if [[ -n "$data" ]]; then
+    status="$(curl -sS -o "$BODY" -w '%{http_code}' -X "$method" "$BASE$path" "${CURL_EXTRA[@]}" \
+      -H 'Content-Type: application/json' -H 'Accept: application/json' \
+      "$@" --data "$data")"
+  else
+    status="$(curl -sS -o "$BODY" -w '%{http_code}' -X "$method" "$BASE$path" "${CURL_EXTRA[@]}" \
+      -H 'Accept: application/json' "$@")"
+  fi
+  if [[ "$status" == "$expected" ]]; then
+    printf 'PASS  %-6s %-46s %s  %s\n' "$method" "$path" "$status" "$name"
+    PASSED=$((PASSED + 1))
+  else
+    printf 'FAIL  %-6s %-46s expected %s got %s  %s\n' "$method" "$path" "$expected" "$status" "$name"
+    echo "      body: $(head -c 300 "$BODY")"
+    FAILED=$((FAILED + 1))
+  fi
+}
+
+finish() {
+  echo
+  echo "passed: $PASSED  failed: $FAILED"
+  [[ "$FAILED" -eq 0 ]] || exit 1
+  echo 'all passed'
+  exit 0
+}
+
+json() {
+  python3 -c 'import json,sys
+value = json.load(sys.stdin)
+for key in sys.argv[1:]:
+    value = value[key]
+print(value)' "$@" < "$BODY"
+}
+
+# Unique per run: use it in the names and emails of records a writing check creates.
+STAMP="$(date +%s)-$RANDOM"
+
+# --- health ---------------------------------------------------------------
+check 'health endpoint' 200 GET /health
+grep -q '"status":"ok"' "$BODY" || { echo 'FAIL  /health body is not {"status":"ok"}'; FAILED=$((FAILED + 1)); }
+
+if [[ "${SMOKE_READ_ONLY:-}" == '1' ]]; then
+  # Add a GET check (e.g. the 401 of an endpoint without a token) for every documented operation
+  # that prod can be probed with without creating anything.
+  check 'swagger UI' 200 GET /api-docs/index.html
+  check 'swagger JSON' 200 GET /api-docs/v1/swagger.json
+  finish
+fi
+
+# --- operations -----------------------------------------------------------
+# One check per documented operation and status in swagger/v1/swagger.json
+# (spec/deploy/swagger_smoke_coverage_spec.rb enforces it). Writing checks go here, below the
+# read-only block; extract ids from responses with json, e.g. ID="$(json data id)".
+
+# --- docs -----------------------------------------------------------------
+check 'swagger UI' 200 GET /api-docs/index.html
+check 'swagger JSON' 200 GET /api-docs/v1/swagger.json
+
+finish

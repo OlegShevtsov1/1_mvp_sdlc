@@ -1,0 +1,49 @@
+name: develop-guard
+
+# The twin of main-guard for develop (decision 27): every commit on develop must come from a merged
+# pull request. A direct push cannot be blocked before branch protection exists, so it is detected
+# afterwards and alerted to the project's dev alerts topic.
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: commit to check; default = the pushed commit
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  guard:
+    name: Commit on develop came from a merged PR
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    # The dev alerts Telegram secrets exist only in the dev environment.
+    environment: dev
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the commit's pull request
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ inputs.sha || github.sha }}
+          BRANCH: develop
+        run: bin/main-guard
+
+      - name: Alert DEV_ALERTS
+        if: failure() && steps.check.outcome == 'failure'
+        uses: OlegShevtsov1/1_mvp_infra/.github/actions/notify-telegram@env/dev
+        env:
+          TELEGRAM_DEV_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_DEV_ALERTS_BOT_TOKEN }}
+          TELEGRAM_DEV_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_DEV_ALERTS_CHAT_ID }}
+          TELEGRAM_DEV_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_DEV_ALERTS_THREAD_ID }}
+        with:
+          topic: DEV_ALERTS
+          message: ${{ steps.check.outputs.message }} — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

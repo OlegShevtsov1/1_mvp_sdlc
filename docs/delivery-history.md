@@ -10,14 +10,15 @@ with [docs/sdlc/README.md](docs/sdlc/README.md). **C6 built: `mvp-sdlc` eval cas
 first pass^3 run is pending.** **S1-move delivered: the orchestration is imported** — the `factory` workflow with
 its history, `plan-review`, the installer and the factory guide (see [Orchestration](#orchestration)).
 **S3b delivered: the `check-branch-name` hook, `mvp-sdlc` 0.1.1.** **C1b delivered: the develop branch model in
-`docs/sdlc/` and factory briefs with the `PILOT-<n>:` title and `Type:` line.**
+`docs/sdlc/` and factory briefs with the `PILOT-<n>:` title and `Type:` line.** **S4 delivered: the project templates
+`templates/project-be/` and `templates/project-fe/` from the pilot release, rendered by `bin/render-template`.**
 
 ## Planned structure
 
 | Path | Delivered by |
 |---|---|
 | `README.md`, `LICENSE`, `.gitignore`, `.editorconfig` | S1-lite (this skeleton) |
-| `.github/workflows/ci.yml` | S1-lite; extended by S2, S3, S1-move and later S4 |
+| `.github/workflows/ci.yml` | S1-lite; extended by S2, S3, S1-move |
 | `.github/workflows/main-guard.yml` | S1-lite |
 | `.github/dependabot.yml`, `.archon/factory-profile.yaml`, `scripts/ci/` | S1-lite |
 | `install.sh`, `.archon/mcp/monitoring.json` | S1-move |
@@ -35,6 +36,7 @@ its history, `plan-review`, the installer and the factory guide (see [Orchestrat
 | `scripts/evals.py`, `scripts/test_evals.py`, `eval/results/` | C6 |
 | `docs/sdlc/`, `scripts/check_links.py`, `scripts/check_docs.py` (CI check `docs`) | C1 (delivered) |
 | `templates/github/pull_request_template.md` | C1 |
-| `templates/project-be/`, `templates/project-fe/`, `bin/render-template` | S4 |
+| `templates/project-be/`, `templates/project-fe/`, `templates/README.md`, `bin/render-template` | S4 |
+| `.github/workflows/templates.yml`, `scripts/ci/templates-check.sh`, `scripts/test_templates.py` (CI check `templates`) | S4 |
 | `bin/project-add` | S5 |
 

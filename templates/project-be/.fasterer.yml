@@ -1,0 +1,12 @@
+# Exclude vendor directory and other generated/non-editable content
+exclude_paths:
+  - 'vendor/**/*.rb'
+  - 'bin/**/*.rb'
+  - 'db/schema.rb'
+  - 'node_modules/**/*.rb'
+  - 'tmp/**/*.rb'
+  - 'log/**/*.rb'
+  - 'config/routes.rb'
+# Optionally disable specific speed checks
+#skip_checks:
+#  - fetch_with_argument_vs_block

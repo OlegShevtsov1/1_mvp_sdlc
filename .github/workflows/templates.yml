@@ -1,0 +1,29 @@
+name: Templates
+
+on:
+  pull_request:
+    paths:
+      - templates/**
+      - bin/render-template
+      - scripts/ci/templates-check.sh
+      - scripts/test_templates.py
+      - .github/workflows/templates.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  render:
+    name: "Render tplcheck: placeholders, pilot, gitleaks, actionlint"
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Render both templates and check them
+        run: bash scripts/ci/check.sh templates

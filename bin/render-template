@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Render a project template into a new repository tree.
+
+Usage: bin/render-template <be|fe> <name> <dest>
+
+Copies templates/project-<be|fe>/ into <dest>, substituting the six {{PLACEHOLDERS}} derived from <name>
+and dropping the .tmpl suffix. Any other {{UPPER_CASE}} token refuses the render. <dest> may be missing,
+empty or hold only .git; a dest already holding exactly this render is left alone; anything else is refused.
+Exit codes: 0 rendered or unchanged, 1 dest differs, 2 usage or template error.
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+SDLC = Path(__file__).resolve().parent.parent
+NAME = re.compile(r"^[a-z][a-z0-9]{1,15}$")
+PLACEHOLDER = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
+SUFFIX = ".tmpl"
+MAX_LISTED = 20
+
+
+def fail(message, code=2):
+    print(message, file=sys.stderr)
+    sys.exit(code)
+
+
+def values(name):
+    sha = subprocess.run(
+        ["git", "-C", str(SDLC), "rev-parse", "--short=12", "HEAD"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        universal_newlines=True,
+    )
+    if sha.returncode != 0:
+        fail("render-template: {} is not a git checkout; SDLC_VERSION needs its commit".format(SDLC))
+    return {
+        "PROJECT_NAME": name,
+        "PROJECT_ZONE": "{}.up.km.ua".format(name),
+        "APP_MODULE": name.capitalize(),
+        "REPO_BE": "OlegShevtsov1/1_mvp_{}_be".format(name),
+        "REPO_FE": "OlegShevtsov1/1_mvp_{}_fe".format(name),
+        "SDLC_VERSION": sha.stdout.strip(),
+    }
+
+
+def read_sources(source, known):
+    """Return {rendered relative path: (text or bytes, executable)}; exit 2 on any template error."""
+    files, errors = {}, []
+    for path in sorted(source.rglob("*")):
+        rel = path.relative_to(source).as_posix()
+        if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            errors.append("{}: not a regular file".format(rel))
+            continue
+        if path.is_dir():
+            continue
+        data = path.read_bytes()
+        try:
+            content = data.decode("utf-8")
+        except UnicodeDecodeError:
+            content = data
+        else:
+            for number, line in enumerate(content.splitlines(), 1):
+                for token in PLACEHOLDER.findall(line):
+                    if token not in known:
+                        errors.append("{}:{}: unknown placeholder {{{{{}}}}}".format(rel, number, token))
+        target = rel[: -len(SUFFIX)] if rel.endswith(SUFFIX) else rel
+        if target in files:
+            errors.append("{}: renders to {}, which already exists".format(rel, target))
+        files[target] = (content, os.access(str(path), os.X_OK))
+    if errors:
+        fail("\n".join(errors))
+    return files
+
+
+def write_tree(files, values_by_name, into):
+    for rel, (content, executable) in files.items():
+        path = into / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, str):
+            content = PLACEHOLDER.sub(lambda m: values_by_name[m.group(1)], content).encode("utf-8")
+        path.write_bytes(content)
+        path.chmod(0o755 if executable else 0o644)
+
+
+def tree(root):
+    return {
+        path.relative_to(root).as_posix(): (path.read_bytes(), os.access(str(path), os.X_OK))
+        for path in root.rglob("*")
+        if path.is_file() and path.relative_to(root).parts[0] != ".git"
+    }
+
+
+def main(argv):
+    if len(argv) != 3 or argv[0] not in ("be", "fe") or not NAME.match(argv[1]):
+        fail("usage: bin/render-template <be|fe> <name> <dest>  (name: ^[a-z][a-z0-9]{1,15}$)")
+    kind, name, dest = argv[0], argv[1], Path(argv[2]).absolute()
+    if dest.exists() and not dest.is_dir():
+        fail("render-template: {} exists and is not a directory".format(dest))
+    source = SDLC / "templates" / "project-{}".format(kind)
+    if not source.is_dir():
+        fail("render-template: no template at {}".format(source))
+    values_by_name = values(name)
+    files = read_sources(source, values_by_name)
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".render-", dir=str(dest.parent)))
+    try:
+        write_tree(files, values_by_name, staging)
+        existing = [p for p in dest.iterdir() if p.name != ".git"] if dest.exists() else []
+        if not existing:
+            dest.mkdir(exist_ok=True)
+            for entry in staging.iterdir():
+                shutil.move(str(entry), str(dest / entry.name))
+            print("rendered {} {} into {} ({} files)".format(kind, name, dest, len(files)))
+            return 0
+        rendered, current = tree(staging), tree(dest)
+        if rendered == current:
+            print("unchanged: {} already holds this render".format(dest))
+            return 0
+        differing = sorted(p for p in rendered.keys() | current.keys() if rendered.get(p) != current.get(p))
+        print("refused: {} is not empty and differs from this render".format(dest))
+        for rel in differing[:MAX_LISTED]:
+            print("  {}".format(rel))
+        if len(differing) > MAX_LISTED:
+            print("  ... and {} more".format(len(differing) - MAX_LISTED))
+        return 1
+    finally:
+        shutil.rmtree(str(staging), ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

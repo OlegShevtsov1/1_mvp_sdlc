@@ -1,0 +1,38 @@
+# .archon/factory-profile.yaml — written by the Archon `factory` workflow.
+# Edit freely. While this file exists the workflow never asks these questions again.
+# `secrets` lists environment-variable NAMES only; values stay on the machine that runs Archon.
+version: 1
+stack:
+  language: "Ruby"
+  framework: "Rails"
+  test_command: "bundle exec rspec"
+  lint_command: "bundle exec rubocop --parallel"
+  build_command: ""
+repo:
+  remote: "origin"
+  base_branch: "develop"
+  merge_strategy: "squash"
+  # Decision 27: the factory never merges a pull request whose base is listed here; it notifies the
+  # operator, who merges release (develop -> main) and hotfix (hotfix/* -> main) PRs by hand.
+  # develop exists; the factory engine does not read this key yet, the rule holds because factory
+  # PRs target develop.
+  manual_merge_bases: ["main"]
+# The Dev Deploy GitHub workflow is the deployer: it builds and deploys every commit pushed to
+# develop or a hotfix/* branch that Rails Tests and Rails CI passed. A merge into main is not one
+# of them, so bin/wait-dev-deploy waits for the run for the merged commit and dispatches Dev Deploy
+# for main once when the automatic trigger did not deploy it; --rollback dispatches action=rollback
+# and waits for that run.
+deploy:
+  command: "bin/wait-dev-deploy"
+  health_url: "https://dev.{{PROJECT_ZONE}}/health"
+  wait_seconds: 600
+  rollback_command: "bin/wait-dev-deploy --rollback"
+# none until a GlitchTip API token and an MCP config that keeps the GlitchTip host out of the
+# repository exist.
+monitoring:
+  provider: "none"
+  mcp_config: ""
+  window_minutes: 10
+secrets:
+  - "SECRET_KEY_BASE"
+  - "POSTGRES_PASSWORD"

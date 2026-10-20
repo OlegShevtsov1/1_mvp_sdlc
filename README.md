@@ -65,12 +65,26 @@ This repository is the Claude Code plugin marketplace `mvp` (`.claude-plugin/mar
   [orchestration/docs/archon-factory.md](orchestration/docs/archon-factory.md).
 - The `mvp-ops` post-merge pack (operator steps after a merge) is versioned in a private planning repository.
 
+## Project templates
+
+`templates/project-be/` (Rails 7.2 API) and `templates/project-fe/` (React, Vite, TypeScript) are the first commit of
+a new project's backend and frontend repositories: the process, deploy and observability scaffolding of the pilot
+release, without its business code. Render one with
+
+```sh
+bin/render-template <be|fe> <name> <dest>
+```
+
+which fills in the project name and the values derived from it. Sources, placeholders, checks, the differences from
+the pilot workflows and the update procedure: [templates/README.md](templates/README.md).
+
 ## Checks
 
 ```sh
 bash scripts/ci/check.sh            # everything CI runs
-bash scripts/ci/check.sh --list     # the checks it knows; each has its own CI step
+bash scripts/ci/check.sh --list     # the checks it knows; each has its own workflow step
 bash scripts/ci/check.sh hygiene    # one check
+bash scripts/ci/check.sh templates  # render tests; render both templates: no placeholder, no pilot, gitleaks, actionlint
 bash scripts/ci/check.sh plugins    # plugin lint, evals layer 0, eval runner tests (python3 >= 3.8, stdlib only)
 bash scripts/ci/check.sh mvp_sdlc   # mvp-sdlc plugin tests: hooks, phase gate, scripts
 bash scripts/ci/check.sh docs       # SDLC docs: links, references that exist, English only
@@ -91,7 +105,9 @@ contain: internal or private IP addresses, internal hostnames, AWS account IDs, 
 Trello or Notion links or IDs, Telegram links or chat IDs, or local home directory paths. It prints only `file:line`,
 never the matching text. Three exceptions: `scripts/ci/notify-telegram.sh` may name the Telegram Bot API host,
 `plugins/mvp-sdlc/bin/feature-start` may name the Trello API host, and the vendored
-`plugins/sdlc/skills/generate-data-model/SKILL.md` is exempt from the 12-digit rule only (a UUID example).
+`plugins/sdlc/skills/generate-data-model/SKILL.md` is exempt from the 12-digit rule only (a UUID example). The
+project templates have their own IPv4 rule: loopback, the bind-all address and the RFC 5737 documentation ranges are allowed
+there, and the backend `Gemfile`, `Gemfile.lock` and `config/brakeman.ignore` may carry four-part gem versions.
 
 ### LLM evals
 
@@ -108,6 +124,12 @@ Check any commit by hand with `gh workflow run main-guard.yml -f sha=<commit>`.
 
 Without the repository secrets `TELEGRAM_MVP_VPN_ALERTS_BOT_TOKEN`, `TELEGRAM_MVP_VPN_ALERTS_CHAT_ID` and
 `TELEGRAM_MVP_VPN_ALERTS_THREAD_ID` the Telegram alert is skipped and a violation only shows up as a failed run.
+
+## Public mirrors
+
+The public mirrors `OlegShevtsov1/1_mvp_sdlc`, `OlegShevtsov1/1_mvp_pilot_be` and `OlegShevtsov1/1_mvp_pilot_fe` are
+refreshed by `scripts/publish-mirror.sh`, run by hand from the operator host: one commit per sync, no primary history,
+no Dependabot config. Details: [scripts/publish-mirror.README.md](scripts/publish-mirror.README.md).
 
 ## License
 

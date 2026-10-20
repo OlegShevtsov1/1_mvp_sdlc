@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Decides whether the AI review (decision 32) applies to a pull request; the AI review workflow runs it
+# on the PR fetched with gh pr view, because an issue_comment event carries no head, base or draft.
+# Skipped: drafts, the factory's archon/task-factory-* (the factory reviews its own PRs, R-C5), the
+# release PR develop -> main, and dependabot.
+# Usage: bin/ai-review-skip <pr.json> (fields headRefName, baseRefName, isDraft, author.login).
+# Prints skip=true or skip=false, also to GITHUB_OUTPUT when set.
+# Exit 0: decided (a skip is green). Exit 2: usage error.
+set -euo pipefail
+pr_json=${1:-}
+
+if [[ -z "${pr_json}" || ! -r "${pr_json}" ]]; then
+  echo "usage: bin/ai-review-skip <pr.json>" >&2
+  exit 2
+fi
+
+head_ref=$(jq -r '.headRefName' "${pr_json}")
+base_ref=$(jq -r '.baseRefName' "${pr_json}")
+is_draft=$(jq -r '.isDraft' "${pr_json}")
+author=$(jq -r '.author.login' "${pr_json}")
+
+reason=""
+if [[ "${is_draft}" == true ]]; then
+  reason="draft"
+elif [[ "${head_ref}" == archon/task-factory-* ]]; then
+  reason="factory branch (the factory reviews its own PRs, R-C5)"
+elif [[ "${head_ref}" == develop && "${base_ref}" == main ]]; then
+  reason="release PR develop -> main"
+elif [[ "${author}" == "dependabot[bot]" || "${author}" == app/dependabot ]]; then
+  reason="dependabot"
+fi
+
+if [[ -n "${reason}" ]]; then
+  echo "AI review skipped: ${reason}"
+  result="skip=true"
+else
+  echo "AI review applies: ${head_ref} -> ${base_ref}"
+  result="skip=false"
+fi
+echo "${result}"
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  echo "${result}" >> "${GITHUB_OUTPUT}"
+fi

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Checks a pull request against the branching conventions (decisions 24-26, 29); the
+# pr-conventions-check workflow runs it on every pull request into main or develop.
+#   1. The head branch is feature/<KEY>-<n>-<slug> or hotfix/<KEY>-<n>-<slug>, the factory's
+#      archon/task-factory-*, or develop when the base is main (the release PR).
+#   2. The title, which becomes the squash subject, is <KEY>-<n>: <card title>.
+#   3. The body, which becomes the squash body, has exactly one line starting with Type:, and its value
+#      is feat, fix, chore, docs, refactor, test or ci.
+# <KEY> is the ticket key: PROJECT_NAME from config/project.env in capitals (the Trello board name).
+# Env: HEAD_REF, BASE_REF, PR_TITLE, PR_BODY.
+# Exit 0: every condition holds. Exit 1: at least one failed; each failure is printed.
+# Exit 2: usage error, or config/project.env gives no valid key.
+set -uo pipefail
+head_ref=${HEAD_REF:-}
+base_ref=${BASE_REF:-}
+title=${PR_TITLE:-}
+body=${PR_BODY:-}
+
+if [[ -z "${head_ref}" || -z "${base_ref}" ]]; then
+  echo "usage: HEAD_REF and BASE_REF must be set (PR_TITLE and PR_BODY may be empty)" >&2
+  exit 2
+fi
+
+project_env="$(dirname "$0")/../config/project.env"
+project_name=$(sed -n 's/^PROJECT_NAME=//p' "${project_env}" 2>/dev/null | head -n 1)
+key=$(tr '[:lower:]' '[:upper:]' <<< "${project_name}")
+if ! [[ "${key}" =~ ^[A-Z][A-Z0-9]*$ ]]; then
+  echo "pr-conventions-check: no valid ticket key: PROJECT_NAME in config/project.env is '${project_name}', expected letters and digits starting with a letter" >&2
+  exit 2
+fi
+
+failed=0
+fail() {
+  echo "::error::condition $1 failed: $2"
+  failed=1
+}
+
+if ! [[ "${head_ref}" =~ ^(feature|hotfix)/${key}-[0-9]+-[a-z0-9-]+$ ||
+  "${head_ref}" =~ ^archon/task-factory-.+$ ||
+  ( "${head_ref}" == develop && "${base_ref}" == main ) ]]; then
+  fail 1 "branch '${head_ref}' into '${base_ref}' is not one of feature/${key}-<n>-<slug>, hotfix/${key}-<n>-<slug>, archon/task-factory-*, develop (into main)"
+fi
+
+if ! [[ "${title}" =~ ^${key}-[0-9]+:\ .+$ ]]; then
+  fail 2 "title '${title}' is not ${key}-<n>: <card title>"
+fi
+
+# GitHub sends edited bodies with CRLF line ends.
+body=$(tr -d '\r' <<< "${body}")
+type_lines=$(grep -c '^Type:' <<< "${body}")
+if (( type_lines == 0 )); then
+  fail 3 "the body has no Type: line"
+elif (( type_lines > 1 )); then
+  fail 3 "the body has ${type_lines} Type: lines, exactly one is required"
+else
+  type_line=$(grep '^Type:' <<< "${body}" | sed 's/[[:space:]]*$//')
+  [[ "${type_line}" =~ ^Type:\ (feat|fix|chore|docs|refactor|test|ci)$ ]] ||
+    fail 3 "the Type: line '${type_line}' has an invalid value, expected one of feat, fix, chore, docs, refactor, test, ci"
+fi
+
+(( failed == 0 )) || exit 1
+echo "pr-conventions-check: '${head_ref}' into '${base_ref}', title and Type: line follow the conventions"

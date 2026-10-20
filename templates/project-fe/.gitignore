@@ -1,0 +1,25 @@
+node_modules
+dist
+dist-ssr
+*.local
+.env*.local
+
+*.tsbuildinfo
+
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Kamal secret values stay local; only .kamal/secrets-common (references) is tracked
+.kamal/secrets
+.kamal/secrets.*
+
+# local runtime config for `npm run dev`
+public/config.js
+
+test-results/
+playwright-report/
+.claude/*.local.md

@@ -1,0 +1,128 @@
+# {{APP_MODULE}} backend
+
+Generated from the OlegShevtsov1/1_mvp_sdlc project templates at {{SDLC_VERSION}}.
+
+The backend (be) repository of the `{{PROJECT_NAME}}` project: a Rails 7.2 API (Ruby 3.3.6, PostgreSQL 16,
+Redis 7) with the process, deploy and observability scaffolding already in place and no business code yet. The
+frontend is `{{REPO_FE}}`. Conventions, hard rules and the feature workflow are in `CLAUDE.md`; read it first.
+
+`config/project.env` holds the project identity (`PROJECT_NAME`, `PROJECT_ZONE`); the Kamal configs, the deploy
+scripts and the workflows read it. The app answers on `https://{{PROJECT_ZONE}}` (prod) and
+`https://dev.{{PROJECT_ZONE}}` (dev).
+
+## Local setup
+
+1. Ruby 3.3.6 (`.ruby-version`), PostgreSQL and Redis running locally.
+2. `bin/setup` (installs gems, prepares the database, sets `git config core.hooksPath .githooks`).
+   Or by hand: `bundle install`, `bin/rails db:create db:schema:load`, `git config core.hooksPath .githooks`.
+3. `bin/rails server -p 3000`; `GET http://localhost:3000/health` answers `{"status":"ok",...}` and the API docs
+   are at `http://localhost:3000/api-docs`.
+
+`DATABASE_URL` and `REDIS_URL` override the defaults of `config/database.yml` and `config/environments/*.rb`.
+
+## Commands
+
+- Tests: `bundle exec rspec`
+- Lint: `bundle exec rubocop --parallel`
+- Security: `bundle exec brakeman --no-pager -q`; `bundle exec bundler-audit check --update`
+- Dev deploy wait (the factory's deploy command): `bin/wait-dev-deploy [<sha>]`; rollback:
+  `bin/wait-dev-deploy --rollback`
+- Smoke test of a running instance: `bin/swagger_smoke http://localhost:3000`
+  (`SMOKE_READ_ONLY=1` sends only GET requests, as prod does)
+- Kamal configs (self-contained, always `-c`, never `-d`):
+  `bundle exec kamal config -c config/deploy.dev.yml` (needs `DEV_HOST`, `KAMAL_REGISTRY_SERVER`),
+  `bundle exec kamal config -c config/deploy.yml` (needs `PROD_VPN_IP`, `KAMAL_REGISTRY_SERVER`)
+- Release tooling: `scripts/next-version.sh [<ref>]`, `scripts/release-notes.sh vX.Y.Z`, `bin/sdlc-metrics <tag>`
+
+## GitHub secrets and variables
+
+Names only; values never go into the repository.
+
+- Repository secrets: `AWS_ROLE_ARN`, `VPN_CI_OVPN`, `SRV_DEPLOY_SSH_KEY`, `ANTHROPIC_API_KEY` (AI review only).
+- Environment `dev`: `SECRET_KEY_BASE`, `POSTGRES_PASSWORD` (URL-safe, never changed after the first deploy),
+  `SENTRY_DSN`, `SENTRY_ALLOWED_FE_DSN`, `SMOKE_TOKEN`, `TELEGRAM_DEV_ALERTS_BOT_TOKEN`,
+  `TELEGRAM_DEV_ALERTS_CHAT_ID`, `TELEGRAM_DEV_ALERTS_THREAD_ID`.
+- Environment `prod`: `PROD_VPN_IP` (the prod host's VPN address, set by `project-add`; never committed),
+  `PROD_SSH_KEY`, `SECRET_KEY_BASE`, `POSTGRES_PASSWORD`, `SENTRY_DSN`, `SENTRY_ALLOWED_FE_DSN`, `SMOKE_TOKEN`,
+  `GLITCHTIP_API_TOKEN` (read-only, for `release-watch`), `TELEGRAM_PROD_ALERTS_BOT_TOKEN`,
+  `TELEGRAM_PROD_ALERTS_CHAT_ID`, `TELEGRAM_PROD_ALERTS_THREAD_ID`.
+- Repository variables: `RUNS_ON` (runner label; default `ubuntu-latest`), `AI_REVIEW` (`on` enables the AI
+  review workflow; anything else keeps it off).
+
+The `TELEGRAM_DEV_ALERTS_*` secrets are the project's dev alerts topic (Dev Deploy, `main-guard`,
+`develop-guard`); `TELEGRAM_PROD_ALERTS_*` the prod alerts topic (Kamal Deploy, Kamal Manage, Release).
+
+## Branch model and releases
+
+Short version; the rules are in `CLAUDE.md` ("Conventions", "Hard Rules").
+
+- Features: `feature/<KEY>-<n>-<slug>` → squash PR into `develop` with title `<KEY>-<n>: <card title>` and exactly
+  one `Type:` line in the body. `<KEY>` is `PROJECT_NAME` from `config/project.env` in capitals.
+- Every commit on `develop` or `hotfix/*` that Rails Tests and Rails CI passed is deployed to dev by Dev Deploy.
+- Release: a release-prep PR moves `[Unreleased]` in `CHANGELOG.md` into `## [X.Y.Z] - YYYY-MM-DD`
+  (`scripts/next-version.sh`), the release PR `develop` → `main` is merged by hand with a merge commit, the operator
+  tags the commit dev tested with an annotated `vX.Y.Z`, `Release` drafts the GitHub Release, and prod is deployed
+  only from that tag:
+  `gh workflow run "Kamal Deploy" --ref main -f environment=prod -f version=vX.Y.Z -f confirm=prod`.
+  `release-watch` then watches `/health` and GlitchTip for 10 minutes; it never rolls back by itself.
+- Rollback: `gh workflow run "Kamal Manage" --ref main -f action=rollback -f confirm=ROLLBACK-prod`.
+- Hotfix: `hotfix/<KEY>-<n>-<slug>` from `main`, PR into `main` merged by hand, tagged with the PATCH version,
+  then back-merged into `develop` with a merge commit.
+- Published `v*` tags are never moved or deleted (`.githooks/pre-push`).
+
+## Beszel agent (prod host monitoring)
+
+`config/deploy.yml` has the accessory `beszel-agent` (`henrygd/beszel-agent:0.21.0`, host network, listens on
+45876, reachable only over the VPN). `kamal deploy` does not boot accessories, and the hub key is not a deploy
+secret, so boot it once by hand from a console on the VPN with the deploy environment set:
+
+```
+BESZEL_HUB_KEY='<the hub public key>' PROD_VPN_IP=<prod VPN address> KAMAL_REGISTRY_SERVER=<registry> \
+  bundle exec kamal accessory boot beszel-agent -c config/deploy.yml
+```
+
+`BESZEL_HUB_KEY` is the Beszel hub's public key (it contains a space, so quote it). Do not boot it on a host where
+an agent already listens on 45876 (for example one deployed by the infrastructure repository): the second agent
+cannot bind the port and would report the same host twice. The frontend shares the prod host and has no agent of
+its own.
+
+## Template inventory
+
+Check each item once on a fresh repository rendered from the template.
+
+- [ ] `config/project.env` with `PROJECT_NAME` and `PROJECT_ZONE` only
+- [ ] Kamal configs `config/deploy.dev.yml` and `config/deploy.yml` (self-contained, `-c`)
+- [ ] Kamal secrets files `.kamal/secrets.dev` and `.kamal/secrets.prod` (indirections only)
+- [ ] Deploy scripts `deploy/deploy.sh`, `rollback.sh`, `promote.sh`, `manage.sh`, `_common.sh`
+- [ ] Deploy guards `deploy/prod_guard.sh`, `dev_deploy_gate.sh`, `release_tag_check.sh`
+- [ ] Swagger smoke `bin/swagger_smoke` (full and read-only)
+- [ ] Health endpoint `GET /health` with the release
+- [ ] Error tunnel `POST /api/errors` (`SentryTunnel`)
+- [ ] GlitchTip smoke `POST /admin/glitchtip_smoke/:kind` and `glitchtip:smoke` rake task
+- [ ] CORS (`CORS_ALLOWED_ORIGINS`)
+- [ ] Sentry SDK reporting to GlitchTip
+- [ ] Beszel agent accessory `beszel-agent` in `config/deploy.yml`
+- [ ] Workflow `rails-test`
+- [ ] Workflow `rails-lint`
+- [ ] Workflow `manual-rails-ci`
+- [ ] Workflow `dev-deploy`
+- [ ] Workflow `kamal-deploy`
+- [ ] Workflow `kamal-manage`
+- [ ] Workflow `release`
+- [ ] Workflow `changelog-check`
+- [ ] Workflow `main-guard`
+- [ ] Workflow `develop-guard`
+- [ ] Workflow `pr-conventions-check`
+- [ ] Workflow `tdd-check`
+- [ ] Workflow `ai-review` (off unless `AI_REVIEW` is `on`)
+- [ ] Release tooling `scripts/next-version.sh`, `scripts/release-notes.sh`, `deploy/release_watch.sh`,
+      `deploy/glitchtip_issues.sh`, `bin/sdlc-metrics`
+- [ ] `CHANGELOG.md` skeleton with an empty `[Unreleased]`
+- [ ] Pre-push hook `.githooks/pre-push` (published tags never moved or deleted)
+- [ ] `.claude/settings.json` (plugins `sdlc` and `mvp-sdlc` with their hooks, `permissions.deny`)
+- [ ] `.claude/rules/` (`api`, `git`, `migrations`, `security`, `testing`)
+- [ ] `CLAUDE.md`
+- [ ] PR template `.github/pull_request_template.md` with the `Type:` line
+- [ ] `tdd-check` on a live test PR (covered by `spec/deploy/tdd_check_spec.rb` until proven live)
+- [ ] `pr-conventions-check` on a live test PR (covered by `spec/deploy/pr_conventions_check_spec.rb` until proven
+      live)

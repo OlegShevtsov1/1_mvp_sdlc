@@ -1,0 +1,143 @@
+name: TDD check
+
+# Every pull request is test-first (R-C3, docs/sdlc 03-dor-dod in OlegShevtsov1/1_mvp_sdlc): its first
+# commit is test( and fails the suite, then a feat( or fix( commit makes it pass without touching
+# spec/. The factory pushes a branch in one go, so the test commit never gets a CI run of its own:
+# job red runs the suite on it and records the result as the tdd-check/red commit status.
+# A ci/chore/docs pull request that changes only .github/, .archon/, docs/ or Markdown is exempt
+# (bin/tdd-check); the body decides that, so it reaches the script as untrusted input through env
+# only, and editing it re-runs the check.
+# Commits already on main are not checked again (MAIN_REF), so a back-merge of main into develop
+# after a hotfix passes; the release pull request develop → main is skipped (decision 27).
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  order:
+    name: TDD order
+    if: ${{ !(github.event.pull_request.head.ref == 'develop' && github.event.pull_request.base.ref == 'main') }}
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    outputs:
+      test_sha: ${{ steps.order.outputs.test_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check the commit order
+        id: order
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          MAIN_REF: origin/main
+        run: bin/tdd-check "${BASE_SHA}" "${HEAD_SHA}"
+
+  red:
+    name: TDD RED on the test commit
+    needs: order
+    if: needs.order.outputs.test_sha != ''
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      statuses: write
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: {{PROJECT_NAME}}_test
+        ports: ['5432']
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ['6379']
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      RAILS_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.order.outputs.test_sha }}
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+
+      - name: Setup DB
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:${{ job.services.postgres.ports['5432'] }}/{{PROJECT_NAME}}_test
+          REDIS_URL: redis://localhost:${{ job.services.redis.ports['6379'] }}/0
+        run: bundle exec rails db:create db:schema:load
+
+      - name: RSpec on the test commit
+        id: rspec
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:${{ job.services.postgres.ports['5432'] }}/{{PROJECT_NAME}}_test
+          REDIS_URL: redis://localhost:${{ job.services.redis.ports['6379'] }}/0
+        run: |
+          set +e
+          bundle exec rspec --format progress --format json --out "${RUNNER_TEMP}/rspec.json"
+          echo "exit_code=$?" >> "${GITHUB_OUTPUT}"
+
+      # RSpec exits 1 both for a failed example and for a file that did not load; only the first
+      # proves RED. No report at all (rspec crashed) counts as broken too.
+      - name: Classify the result
+        id: result
+        env:
+          EXIT_CODE: ${{ steps.rspec.outputs.exit_code }}
+        run: |
+          summary="$(jq -c .summary "${RUNNER_TEMP}/rspec.json" 2> /dev/null || echo '{}')"
+          failures="$(jq -r '.failure_count // 0' <<< "${summary}")"
+          outside="$(jq -r '.errors_outside_of_examples_count // 0' <<< "${summary}")"
+          if [[ "${EXIT_CODE}" == 0 ]]; then
+            result=green
+          elif (( failures > 0 && outside == 0 )); then
+            result=red
+          else
+            result=broken
+          fi
+          echo "result=${result}" >> "${GITHUB_OUTPUT}"
+          echo "rspec exit ${EXIT_CODE}, ${failures} failed examples, ${outside} errors outside examples: ${result}"
+
+      - name: Record the result as the tdd-check/red status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_SHA: ${{ needs.order.outputs.test_sha }}
+          RESULT: ${{ steps.result.outputs.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          case "${RESULT}" in
+            red) state=failure description='RED proven: examples failed on the test commit' ;;
+            green) state=success description='bundle exec rspec passed on the test commit: RED not proven' ;;
+            *) state=error description='bundle exec rspec failed without a failing example: RED not proven' ;;
+          esac
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${TEST_SHA}" \
+            -f state="${state}" -f context=tdd-check/red -f description="${description}" -f target_url="${RUN_URL}" > /dev/null
+          echo "tdd-check/red on ${TEST_SHA:0:7}: ${state} (${RESULT})"
+
+      - name: Require RED
+        env:
+          TEST_SHA: ${{ needs.order.outputs.test_sha }}
+          RESULT: ${{ steps.result.outputs.result }}
+        run: |
+          case "${RESULT}" in
+            red) ;;
+            green)
+              echo "::error::condition 2 failed: the test commit ${TEST_SHA:0:7} is green (bundle exec rspec passed), RED not proven"
+              exit 1 ;;
+            *)
+              echo "::error::condition 2 failed: bundle exec rspec on the test commit ${TEST_SHA:0:7} failed without a failing example (a file did not load or rspec crashed), RED not proven"
+              exit 1 ;;
+          esac

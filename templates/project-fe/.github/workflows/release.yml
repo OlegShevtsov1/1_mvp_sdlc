@@ -1,0 +1,78 @@
+name: Release
+
+# A pushed tag v* becomes a draft GitHub Release (R-C9), which the operator reviews and publishes.
+# scripts/release-check.sh first requires an annotated vX.Y.Z tag whose commit is on main, whose
+# number is what scripts/next-version.sh gives, and whose CHANGELOG section exists; the Release
+# text is exactly that section (scripts/release-notes.sh). No LLM, nothing is pushed. The last
+# step prints the release metrics line (bin/sdlc-metrics). The result goes to the prod alerts topic.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Check the tag, draft the Release
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # checkout may store the pushed tag as a lightweight one; the forced refetch restores the
+      # annotated tag objects, and main is needed for the ancestry check.
+      - name: Fetch the tags and main
+        run: git fetch --force origin '+refs/tags/*:refs/tags/*' '+refs/heads/main:refs/remotes/origin/main'
+
+      - name: Check the tag
+        run: bash scripts/release-check.sh "$TAG"
+
+      - name: Release notes from CHANGELOG.md
+        run: bash scripts/release-notes.sh "$TAG" > "$RUNNER_TEMP/notes.md"
+
+      - name: Create the draft Release
+        run: gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+
+      - name: Release metrics
+        run: bash bin/sdlc-metrics "$TAG"
+
+  notify:
+    name: Notify Telegram
+    needs: release
+    if: always()
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: prod
+    timeout-minutes: 5
+    steps:
+      - name: Compose the message
+        id: message
+        env:
+          RELEASE: ${{ needs.release.result }}
+          TAG: ${{ github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$RELEASE" = success ]; then
+            echo "text=✅ Release $TAG: draft ready for review: $RUN_URL" >> "$GITHUB_OUTPUT"
+          else
+            echo "text=❌ Release $TAG failed: $RUN_URL" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: OlegShevtsov1/1_mvp_infra/.github/actions/notify-telegram@env/dev
+        with:
+          topic: PROD_ALERTS
+          message: ${{ steps.message.outputs.text }}
+        env:
+          TELEGRAM_PROD_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_PROD_ALERTS_BOT_TOKEN }}
+          TELEGRAM_PROD_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_CHAT_ID }}
+          TELEGRAM_PROD_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_PROD_ALERTS_THREAD_ID }}

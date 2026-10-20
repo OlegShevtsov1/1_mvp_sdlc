@@ -1,0 +1,12 @@
+paths:
+  # Each deploy workflow's vpn-up-check references the VPN actions in steps that never run,
+  # only so the runner has to resolve them while setting up the job.
+  .github/workflows/dev-deploy.yml:
+    ignore:
+      - 'constant expression "false" in condition'
+  .github/workflows/kamal-deploy.yml:
+    ignore:
+      - 'constant expression "false" in condition'
+  .github/workflows/kamal-manage.yml:
+    ignore:
+      - 'constant expression "false" in condition'

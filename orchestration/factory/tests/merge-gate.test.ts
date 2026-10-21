@@ -14,6 +14,7 @@ function prState(extra: Record<string, unknown> = {}): string {
     pr_url: PR_URL,
     read: true,
     head: "feature-x",
+    base: "develop",
     state: "OPEN",
     is_draft: false,
     checkout_is_head: true,
@@ -24,20 +25,23 @@ function prState(extra: Record<string, unknown> = {}): string {
   });
 }
 
-function run(env: Record<string, string>): Result {
+// An undefined value removes that variable from the gate's environment.
+function run(env: Record<string, string | undefined>): Result {
   const artifacts = mkdtempSync(join(tmpdir(), "factory-merge-gate-art-"));
+  const merged: Record<string, string | undefined> = {
+    ...process.env,
+    ARTIFACTS_DIR: artifacts,
+    INPUTS_PR: prState(),
+    INPUTS_TEST_COMMAND: "true",
+    INPUTS_LINT_COMMAND: "true",
+    INPUTS_BUILD_COMMAND: "true",
+    INPUTS_SECRET_NAMES: "[]",
+    INPUTS_MANUAL_MERGE_BASES: '["main"]',
+    ...env,
+  };
   const p = Bun.spawnSync(["bun", MERGE_GATE], {
     cwd: artifacts,
-    env: {
-      ...process.env,
-      ARTIFACTS_DIR: artifacts,
-      INPUTS_PR: prState(),
-      INPUTS_TEST_COMMAND: "true",
-      INPUTS_LINT_COMMAND: "true",
-      INPUTS_BUILD_COMMAND: "true",
-      INPUTS_SECRET_NAMES: "[]",
-      ...env,
-    },
+    env: Object.fromEntries(Object.entries(merged).filter((e): e is [string, string] => e[1] !== undefined)),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -68,14 +72,14 @@ describe("merge-gate", () => {
   test("a clean, ready PR and green checks → green", () => {
     const r = run({});
     expectOneLine(r);
-    expect(r.doc).toEqual({ green: true, pr_url: PR_URL, head: "feature-x", reason: "" });
+    expect(r.doc).toEqual({ action: "merge", pr_url: PR_URL, head: "feature-x", base: "develop", reason: "" });
   });
 
   test("a failing test command refuses and stops before lint and build", () => {
     const { marks, env } = markerCommands();
     const r = run({ ...env, INPUTS_TEST_COMMAND: "exit 1" });
     expectOneLine(r);
-    expect(r.doc).toMatchObject({ green: false, pr_url: PR_URL, head: "feature-x" });
+    expect(r.doc).toMatchObject({ action: "refuse", pr_url: PR_URL, head: "feature-x", base: "develop" });
     expect(r.doc.reason).toBe("test command exited 1 on the pull request head; see merge-gate.log");
     expect(existsSync(join(marks, "lint"))).toBe(false);
     expect(existsSync(join(marks, "build"))).toBe(false);
@@ -90,12 +94,13 @@ describe("merge-gate", () => {
       ["checkout not head", { checkout_is_head: false }, "the checkout is not the pull request head, so the checks would not test what would be merged"],
       ["dirty checkout", { checkout_clean: false }, "the checkout has uncommitted changes to tracked files"],
       ["unreadable CI checks", { checks_read: false }, "could not read the pull request's CI checks from GitHub"],
+      ["unreadable base branch", { base: "" }, "could not read the pull request's base branch"],
     ];
     for (const [, extra, reason] of cases) {
       const { marks, env } = markerCommands();
       const r = run({ ...env, INPUTS_PR: prState(extra) });
       expectOneLine(r);
-      expect(r.doc).toMatchObject({ green: false, pr_url: PR_URL, reason });
+      expect(r.doc).toMatchObject({ action: "refuse", pr_url: PR_URL, reason });
       expect(existsSync(join(marks, "test"))).toBe(false);
     }
   });
@@ -104,7 +109,7 @@ describe("merge-gate", () => {
     for (const pr of [prState({ pr_url: "", read: false, head: "" }), prState({ pr_url: `${PR_URL}; rm -rf /` }), "not json", "{}"]) {
       const r = run({ INPUTS_PR: pr });
       expectOneLine(r);
-      expect(r.doc).toEqual({ green: false, pr_url: "", head: "", reason: "delivery did not return a GitHub pull request URL" });
+      expect(r.doc).toEqual({ action: "refuse", pr_url: "", head: "", base: "", reason: "delivery did not return a GitHub pull request URL" });
     }
   });
 
@@ -113,7 +118,7 @@ describe("merge-gate", () => {
       const { marks, env } = markerCommands();
       const r = run({ ...env, INPUTS_PR: prState({ checks: [{ name: "Lint", bucket: "pass" }, { name: "Tests", bucket }] }) });
       expectOneLine(r);
-      expect(r.doc).toMatchObject({ green: false, reason: `CI check Tests is ${bucket} on the pull request head` });
+      expect(r.doc).toMatchObject({ action: "refuse", reason: `CI check Tests is ${bucket} on the pull request head` });
       expect(existsSync(join(marks, "test"))).toBe(false);
     }
   });
@@ -123,7 +128,7 @@ describe("merge-gate", () => {
       const { marks, env } = markerCommands();
       const r = run({ ...env, INPUTS_LINT_COMMAND: "exit 1", INPUTS_PR: prState({ checks: [{ name, bucket: "pass" }] }) });
       expectOneLine(r);
-      expect(r.doc.green).toBe(true);
+      expect(r.doc.action).toBe("merge");
       expect(existsSync(join(marks, "test"))).toBe(true);
       expect(existsSync(join(marks, "build"))).toBe(true);
       expect(readFileSync(join(r.artifacts, "merge-gate.log"), "utf8")).toContain(`lint: deferred to the pull request's CI check '${name}' (pass)`);
@@ -135,14 +140,40 @@ describe("merge-gate", () => {
     for (const checks of checksCases) {
       const r = run({ INPUTS_LINT_COMMAND: "exit 1", INPUTS_PR: prState({ checks }) });
       expectOneLine(r);
-      expect(r.doc).toMatchObject({ green: false, reason: "lint command exited 1 on the pull request head; see merge-gate.log" });
+      expect(r.doc).toMatchObject({ action: "refuse", reason: "lint command exited 1 on the pull request head; see merge-gate.log" });
     }
   });
 
   test("a project with no checks at all is green", () => {
     const r = run({ INPUTS_TEST_COMMAND: "", INPUTS_LINT_COMMAND: "", INPUTS_BUILD_COMMAND: "" });
     expectOneLine(r);
-    expect(r.doc.green).toBe(true);
+    expect(r.doc.action).toBe("merge");
+  });
+
+  test("a green PR into a manual base is handed to the operator after every check ran", () => {
+    const { marks, env } = markerCommands();
+    const r = run({ ...env, INPUTS_PR: prState({ base: "main" }) });
+    expectOneLine(r);
+    expect(r.doc).toEqual({ action: "notify", pr_url: PR_URL, head: "feature-x", base: "main", reason: "" });
+    for (const check of ["test", "lint", "build"]) expect(existsSync(join(marks, check))).toBe(true);
+  });
+
+  test("a red PR into a manual base is refused, not handed to the operator", () => {
+    const r = run({ INPUTS_TEST_COMMAND: "exit 1", INPUTS_PR: prState({ base: "main" }) });
+    expectOneLine(r);
+    expect(r.doc).toMatchObject({ action: "refuse", base: "main", reason: "test command exited 1 on the pull request head; see merge-gate.log" });
+  });
+
+  test("an empty manual_merge_bases lets the factory merge into main", () => {
+    const r = run({ INPUTS_PR: prState({ base: "main" }), INPUTS_MANUAL_MERGE_BASES: "[]" });
+    expectOneLine(r);
+    expect(r.doc).toMatchObject({ action: "merge", base: "main" });
+  });
+
+  test("without manual_merge_bases, main is a manual base", () => {
+    const r = run({ INPUTS_PR: prState({ base: "main" }), INPUTS_MANUAL_MERGE_BASES: undefined });
+    expectOneLine(r);
+    expect(r.doc).toMatchObject({ action: "notify", base: "main" });
   });
 
   test("a secret printed by a check never reaches merge-gate.log", () => {
@@ -152,7 +183,7 @@ describe("merge-gate", () => {
       FACTORY_TEST_SECRET: "s3cr3t-value-123",
     });
     expectOneLine(r);
-    expect(r.doc.green).toBe(true);
+    expect(r.doc.action).toBe("merge");
     const log = readFileSync(join(r.artifacts, "merge-gate.log"), "utf8");
     expect(log).toContain("token=***");
     expect(log).not.toContain("s3cr3t-value-123");

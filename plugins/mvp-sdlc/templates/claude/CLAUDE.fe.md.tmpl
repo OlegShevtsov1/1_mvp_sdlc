@@ -29,6 +29,14 @@ Per-developer command overrides live in `.claude/sdlc.local.md` (not committed).
 - One task is at most one day of work and at most 500 changed lines.
 - Rules for git, testing, API use, security and frontend code are in `.claude/rules/`.
 
+## Board flow
+
+Cards on the project's Trello board go through `Backlog → Ready → In Progress → Review → Test → (Blocked) →
+Ready to Release → Test after Release → Done`. The harness moves them, not you: `feature-start` and the factory
+move a card to `In Progress`, the factory to `Review` and `Test`, post-merge and the release runs onward. Never
+move a card by hand from an agent session. Who moves it at each step:
+https://github.com/OlegShevtsov1/1_mvp_sdlc/blob/main/docs/sdlc/03-dor-dod.md#board-flow
+
 ## Hard Rules
 
 - Never push to `main` and never force-push; every change reaches `main` through a reviewed pull request.

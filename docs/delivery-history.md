@@ -11,7 +11,8 @@ first pass^3 run is pending.** **S1-move delivered: the orchestration is importe
 its history, `plan-review`, the installer and the factory guide (see [Orchestration](#orchestration)).
 **S3b delivered: the `check-branch-name` hook, `mvp-sdlc` 0.1.1.** **C1b delivered: the develop branch model in
 `docs/sdlc/` and factory briefs with the `PILOT-<n>:` title and `Type:` line.** **S4 delivered: the project templates
-`templates/project-be/` and `templates/project-fe/` from the pilot release, rendered by `bin/render-template`.**
+`templates/project-be/` and `templates/project-fe/` from the pilot release, rendered by `bin/render-template`.** **S6 delivered: the develop branch model for this repository**
+(`develop-guard.yml`, `pr-conventions-check.yml`, factory base `develop`).
 
 ## Planned structure
 

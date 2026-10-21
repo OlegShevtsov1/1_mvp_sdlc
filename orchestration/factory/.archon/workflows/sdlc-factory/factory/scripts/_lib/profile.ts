@@ -3,11 +3,16 @@ export const MONITORING_MCP_PATH = ".archon/mcp/monitoring.json";
 
 export const MERGE_STRATEGIES = ["squash", "merge", "rebase"] as const;
 export const MONITORING_PROVIDERS = ["sentry", "datadog", "grafana", "none"] as const;
+// Decision 27: pull requests into these bases are merged by the operator, never the factory.
+export const DEFAULT_MANUAL_MERGE_BASES: readonly string[] = ["main"];
 
 export interface Profile {
   version: 1;
   stack: { language: string; framework: string; test_command: string; lint_command: string; build_command: string };
-  repo: { remote: string; base_branch: string; merge_strategy: (typeof MERGE_STRATEGIES)[number] };
+  repo: {
+    remote: string; base_branch: string; merge_strategy: (typeof MERGE_STRATEGIES)[number];
+    manual_merge_bases: string[];
+  };
   deploy: { command: string; health_url: string; wait_seconds: number; rollback_command: string };
   monitoring: { provider: (typeof MONITORING_PROVIDERS)[number]; mcp_config: string; window_minutes: number };
   secrets: string[];
@@ -20,9 +25,11 @@ export interface FlatProfile {
   deploy_command: string; health_url: string; wait_seconds: number; rollback_command: string;
   monitoring_provider: string; window_minutes: number;
   secret_names: string[];
+  manual_merge_bases: string[];
 }
 
 const SECRET_NAME = /^[A-Z_][A-Z0-9_]*$/;
+const BRANCH_NAME = /^[A-Za-z0-9._\/-]+$/;
 
 type Validation = { ok: true; profile: Profile } | { ok: false; errors: string[] };
 
@@ -72,6 +79,7 @@ export function validateProfile(doc: unknown): Validation {
       remote: str(repo, "remote", "repo", errors, true),
       base_branch: str(repo, "base_branch", "repo", errors, true),
       merge_strategy: str(repo, "merge_strategy", "repo", errors, true) as Profile["repo"]["merge_strategy"],
+      manual_merge_bases: [],
     },
     deploy: {
       command: str(deploy, "command", "deploy", errors, true),
@@ -89,6 +97,17 @@ export function validateProfile(doc: unknown): Validation {
 
   if (!MERGE_STRATEGIES.includes(profile.repo.merge_strategy)) {
     errors.push(`repo.merge_strategy must be one of ${MERGE_STRATEGIES.join(", ")}`);
+  }
+  const bases = repo.manual_merge_bases;
+  if (bases === undefined || bases === null) {
+    profile.repo.manual_merge_bases = [...DEFAULT_MANUAL_MERGE_BASES];
+  } else if (!Array.isArray(bases)) {
+    errors.push("repo.manual_merge_bases must be a list of branch names");
+  } else {
+    bases.forEach((b, i) => {
+      if (typeof b !== "string" || !BRANCH_NAME.test(b)) errors.push(`repo.manual_merge_bases[${i}] must be a branch name`);
+      else profile.repo.manual_merge_bases.push(b);
+    });
   }
   if (!MONITORING_PROVIDERS.includes(profile.monitoring.provider)) {
     errors.push(`monitoring.provider must be one of ${MONITORING_PROVIDERS.join(", ")}`);
@@ -124,6 +143,7 @@ export function flattenProfile(p: Profile): FlatProfile {
     wait_seconds: p.deploy.wait_seconds, rollback_command: p.deploy.rollback_command,
     monitoring_provider: p.monitoring.provider, window_minutes: p.monitoring.window_minutes,
     secret_names: [...p.secrets],
+    manual_merge_bases: [...p.repo.manual_merge_bases],
   };
 }
 
@@ -147,6 +167,8 @@ export function profileToYaml(p: Profile): string {
     `  remote: ${q(p.repo.remote)}`,
     `  base_branch: ${q(p.repo.base_branch)}`,
     `  merge_strategy: ${q(p.repo.merge_strategy)}`,
+    // A JSON array is a valid YAML flow sequence, quoted for the same reason as q.
+    `  manual_merge_bases: ${JSON.stringify(p.repo.manual_merge_bases)}`,
     "deploy:",
     `  command: ${q(p.deploy.command)}`,
     `  health_url: ${q(p.deploy.health_url)}`,

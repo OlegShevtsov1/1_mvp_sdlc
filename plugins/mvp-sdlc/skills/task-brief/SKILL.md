@@ -23,5 +23,6 @@ The factory's gate 2 must be approvable without editing the task text, so the te
 3. Print the output unchanged, with no additions, summaries or branch names: the factory opens the pull request
    from its own `archon/task-factory-*` branch (decision 26). The text already carries the pull request title
    `PILOT-<n>: <card title>` and the description lines `Type:`, `SDLC-Task:` and `SDLC-AC:` that
-   `pr-conventions-check` and the squash commit need.
+   `pr-conventions-check` and the squash commit need. The title line is also how the factory finds the card and
+   moves it through the board, so the operator does not move the card by hand once the run starts.
 4. To run it, pass the whole text as the message argument of `archon workflow run factory --cwd <repo>`.

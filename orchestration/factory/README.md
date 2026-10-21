@@ -40,7 +40,8 @@ GitHub CLI, logged in (the workflow opens and merges pull requests as you):
 gh auth login
 ```
 
-Then install from the repository root (not from this directory):
+Then install from the repository root (not from this directory), from `main` for
+production or from `develop` to test a change:
 
 ```bash
 ./install.sh
@@ -115,7 +116,9 @@ A full annotated example with every field is in
   `build_command`. Any of the commands may be empty; `test_command` may be empty
   for a project that has no tests yet.
 - `repo` — `remote`, `base_branch`, `merge_strategy` (`squash` | `merge` |
-  `rebase`).
+  `rebase`), `manual_merge_bases` — the bases whose pull requests the operator
+  merges by hand. Absent means `["main"]`, so a profile whose `base_branch` is
+  `main` needs `manual_merge_bases: []` for the factory to merge.
 - `deploy` — `command`, `health_url`, `wait_seconds`, `rollback_command`.
   Before running `command`, the workflow checks out the merged commit inside
   Archon's own worktree, which leaves that worktree on a detached HEAD — that is
@@ -128,6 +131,11 @@ A full annotated example with every field is in
   machine that runs Archon. An entry that is not a bare variable name fails
   validation, and the deploy and rollback logs replace the value of every listed
   variable with `***`.
+- `trello` (optional) — `lists.ready`, `lists.in_progress`, `lists.review`,
+  `lists.test`, `lists.blocked`: the names of the board lists the factory moves
+  the task's card to; defaults `Ready`, `In Progress`, `Review`, `Test`,
+  `Blocked`. A bad value falls back to its default with a warning. Credentials
+  never go here: they are read at run time from `~/.config/trello/.env`.
 
 ## 5. Monitoring
 
@@ -210,6 +218,20 @@ is not what the checkout holds, it refuses. The merge is skipped and the run end
 and unmerged (`merge-gate.log` in the artifacts shows the checks). A delivery
 that fails before a mergeable pull request also ends `cancelled` with a report.
 
+A pull request whose base is listed in `repo.manual_merge_bases` is not merged
+even when every check is green (decision 27). The factory comments on it
+`ready for the operator: base … is manual`, skips deploy, health and rollback,
+and the run ends `completed` with report status `delivered-pending-operator`.
+The operator merges it by hand.
+
+When the task names a Trello card, the `trello-*` nodes move it: `Blocked`
+while a gate waits, `In Progress` after the plan is approved, `Review` once the
+pull request exists, `Test` when delivered. A run pending the operator leaves
+the card in `Review` with the comment "waits for the operator merge". A run that
+stops at a gate or ends not delivered sends the card back to `Ready` with a
+comment naming the reason; a failed rollback leaves it in `Blocked`. Trello never fails a run: a missing
+credentials file, card or list is a warning in `trello.log` in the artifacts.
+
 On Archon v0.10.1 the `wait-keeper` node keeps a run moving while the deliver
 block waits for the pull request's CI: it resumes the run each time that durable
 wait falls due (`wait-keeper.log` in the artifacts), and is off on v0.11.1.
@@ -246,7 +268,11 @@ From the repository root. Unit tests for the package scripts:
 bash scripts/ci/check.sh factory
 ```
 
-Install, validation, the six dry-run fixtures with trace assertions, and a dry
+The unit tests include the Trello card reference parser, the move for every
+point of the run, and the Trello calls against a stubbed `fetch`.
+
+Install, validation, the eight dry-run fixtures with trace assertions (each
+Trello move at its node, in dry-run mode, with no network), and a dry
 run of every other workflow, on Archon v0.10.1 and v0.11.1 (pinned binaries in
 `.tools/bin`, never installed, always with a throwaway `ARCHON_HOME`; no AI
 spend):

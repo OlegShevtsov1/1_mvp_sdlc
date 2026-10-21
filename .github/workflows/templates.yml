@@ -5,6 +5,8 @@ on:
     paths:
       - templates/**
       - bin/render-template
+      - bin/board-lists
+      - plugins/mvp-sdlc/lib/sdlc_common.py
       - scripts/ci/templates-check.sh
       - scripts/test_templates.py
       - .github/workflows/templates.yml

@@ -17,6 +17,10 @@ const doc = buildReport({
   rolled_back: process.env.INPUTS_ROLLED_BACK ?? "skipped",
   rollback_reason: process.env.INPUTS_ROLLBACK_REASON ?? "",
   merge_refused: process.env.INPUTS_MERGE_REFUSED ?? "",
+  merge_action: process.env.INPUTS_MERGE_ACTION ?? "",
+  merge_base: process.env.INPUTS_MERGE_BASE ?? "",
+  notified: process.env.INPUTS_NOTIFIED ?? "skipped",
+  notify_reason: process.env.INPUTS_NOTIFY_REASON ?? "",
 });
 const artifacts = process.env.ARTIFACTS_DIR;
 if (artifacts) writeFileSync(`${artifacts}/report.json`, JSON.stringify(doc, null, 2) + "\n");

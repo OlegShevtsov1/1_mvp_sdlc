@@ -65,6 +65,24 @@ nodes:
                   path: { type: string, enum: [factory-profile.json] }
                 required: [type, run_id, path]
             required: [summary, assumed, report]
+        - id: trello-profile-gate
+          script: trello-move
+          runtime: bun
+          depends_on: [intake]
+          timeout: 120000
+          with:
+            event: "profile-gate"
+            task: "$INPUTS.task"
+            request: "$ARGUMENTS"
+          output_format: &trello-move-output
+            type: object
+            properties:
+              card: { type: string }
+              target: { type: string }
+              comment: { type: string }
+              status: { type: string, enum: [none, dry-run, done, warning] }
+              warning: { type: string }
+            required: [card, target, comment, status, warning]
         - id: profile-gate
           approval:
             message: |
@@ -80,7 +98,7 @@ nodes:
               - { id: approve, label: Approve }
               - { id: needs-revision, label: Needs revision }
               - { id: abort, label: Abort }
-          depends_on: [intake]
+          depends_on: [intake, trello-profile-gate]
 
   # The loop's output is the gate's output. Whole-output binding on purpose:
   # the dry-run simulator emits the string "approved", a real run emits
@@ -99,9 +117,21 @@ nodes:
         stop_reason: { type: string }
       required: [proceed, decision, stop_reason]
 
+  - id: trello-profile-round
+    script: trello-move
+    runtime: bun
+    depends_on: [profile-round]
+    timeout: 120000
+    with:
+      event: "profile-round"
+      task: "$INPUTS.task"
+      request: "$ARGUMENTS"
+      gate: "$profile-round.output"
+    output_format: *trello-move-output
+
   - id: abort-profile
     cancel: "Stopped at the profile gate: $profile-round.output.stop_reason"
-    depends_on: [profile-round]
+    depends_on: [profile-round, trello-profile-round]
     when: "$profile-round.output.proceed == false"
 
   - id: profile-write
@@ -147,7 +177,10 @@ nodes:
         secret_names:
           type: array
           items: { type: string }
-      required: [language, test_command, remote, base_branch, merge_strategy, deploy_command, health_url, wait_seconds, rollback_command, monitoring_provider, window_minutes, secret_names]
+        manual_merge_bases:
+          type: array
+          items: { type: string }
+      required: [language, test_command, remote, base_branch, merge_strategy, deploy_command, health_url, wait_seconds, rollback_command, monitoring_provider, window_minutes, secret_names, manual_merge_bases]
 
   # ── Plan ───────────────────────────────────────────────────────────────────
   # archon-plan writes $ARTIFACTS_DIR/plan.md and returns {ready, summary, report}.
@@ -179,6 +212,18 @@ nodes:
               $load-profile.output.base_branch. The result will be merged and
               deployed automatically, so the plan must include the checks that
               prove the change is safe to ship.
+        - id: trello-plan-gate
+          script: trello-move
+          runtime: bun
+          depends_on: [plan]
+          timeout: 120000
+          with:
+            event: "plan-gate"
+            task: "$INPUTS.task"
+            request: "$ARGUMENTS"
+            ready: "$plan.output.ready"
+            summary: "$plan.output.summary"
+          output_format: *trello-move-output
         - id: plan-gate
           approval:
             message: |
@@ -196,7 +241,7 @@ nodes:
               - { id: approve, label: Approve }
               - { id: needs-revision, label: Needs revision }
               - { id: abort, label: Abort }
-          depends_on: [plan]
+          depends_on: [plan, trello-plan-gate]
 
   - id: plan-round
     script: gate-round
@@ -212,9 +257,26 @@ nodes:
         stop_reason: { type: string }
       required: [proceed, decision, stop_reason]
 
+  # ── Trello card (decision 53) ──────────────────────────────────────────────
+  # The trello-* nodes move the card the task names; they never fail (a missing
+  # card or credentials file is a warning in trello.log) and in a dry run they
+  # only report the move. Each cancel node depends on its trello node so the
+  # card moves before the run stops.
+  - id: trello-start
+    script: trello-move
+    runtime: bun
+    depends_on: [plan-round]
+    timeout: 120000
+    with:
+      event: "plan-round"
+      task: "$INPUTS.task"
+      request: "$ARGUMENTS"
+      gate: "$plan-round.output"
+    output_format: *trello-move-output
+
   - id: abort-plan
     cancel: "Stopped at the plan gate: $plan-round.output.stop_reason"
-    depends_on: [plan-round]
+    depends_on: [plan-round, trello-start]
     when: "$plan-round.output.proceed == false"
 
   # ── Deliver (bundled block): implement → green gate → draft PR → review →
@@ -271,6 +333,7 @@ nodes:
         pr_url: { type: string }
         read: { type: boolean }
         head: { type: string }
+        base: { type: string }
         state: { type: string }
         is_draft: { type: boolean }
         checkout_is_head: { type: boolean }
@@ -284,7 +347,19 @@ nodes:
               bucket: { type: string }
             required: [name, bucket]
         checks_read: { type: boolean }
-      required: [pr_url, read, head, state, is_draft, checkout_is_head, checkout_clean, checks, checks_read]
+      required: [pr_url, read, head, base, state, is_draft, checkout_is_head, checkout_clean, checks, checks_read]
+
+  - id: trello-review
+    script: trello-move
+    runtime: bun
+    depends_on: [pr-state]
+    when: "$pr-state.output.pr_url != ''"
+    timeout: 120000
+    with:
+      event: "review"
+      task: "$INPUTS.task"
+      request: "$ARGUMENTS"
+    output_format: *trello-move-output
 
   # The factory's own green check before it merges. Archon v0.10.1's deliver
   # block can flip a PR ready after its validation gate failed, and the inner
@@ -292,9 +367,11 @@ nodes:
   # build commands run again on the exact PR head. Lint defers to a passing CI
   # lint check when the PR has one: run locally under the run's .archon/
   # worktree path, RuboCop's excludes miss and it refused a PR whose CI Lint
-  # was green. It refuses (exit 0, green false) on any red command or concluded
+  # was green. It refuses (exit 0, action refuse) on any red command or concluded
   # red CI check, and when pr-state found the PR unreadable, not open and
-  # ready, or not what the checkout holds.
+  # ready, or not what the checkout holds. A green PR whose base is in the
+  # profile's manual_merge_bases gets action notify instead of merge: those
+  # PRs are merged by the operator (decision 27).
   - id: merge-gate
     script: merge-gate
     runtime: bun
@@ -306,14 +383,16 @@ nodes:
       lint_command: "$load-profile.output.lint_command"
       build_command: "$load-profile.output.build_command"
       secret_names: "$load-profile.output.secret_names"
+      manual_merge_bases: "$load-profile.output.manual_merge_bases"
     output_format:
       type: object
       properties:
-        green: { type: boolean }
+        action: { type: string, enum: [merge, notify, refuse] }
         pr_url: { type: string }
         head: { type: string }
+        base: { type: string }
         reason: { type: string }
-      required: [green, pr_url, head, reason]
+      required: [action, pr_url, head, base, reason]
 
   - id: merge
     bash: |
@@ -370,7 +449,7 @@ nodes:
       printf '{"merged":true,"merge_sha":"%s","head":"%s"}' "$MERGE_SHA" "${MERGED_HEAD:-$HEAD_BRANCH}"
     timeout: 300000
     depends_on: [merge-gate]
-    when: "$merge-gate.output.green == true"
+    when: "$merge-gate.output.action == 'merge'"
     output_format:
       type: object
       properties:
@@ -378,6 +457,25 @@ nodes:
         merge_sha: { type: string }
         head: { type: string }
       required: [merged, merge_sha, head]
+
+  # Decision 27: a PR into a manual base is merged by the operator by hand;
+  # this node only tells them on the PR. With `merge` skipped, deploy, health,
+  # monitoring and rollback are skipped too, and the report says why.
+  - id: notify-operator
+    script: notify-operator
+    runtime: bun
+    depends_on: [merge-gate]
+    when: "$merge-gate.output.action == 'notify'"
+    timeout: 120000
+    with:
+      pr_url: "$merge-gate.output.pr_url"
+      base: "$merge-gate.output.base"
+    output_format:
+      type: object
+      properties:
+        notified: { type: boolean }
+        reason: { type: string }
+      required: [notified, reason]
 
   # ── Deploy / health / monitoring ───────────────────────────────────────────
   - id: deploy
@@ -504,7 +602,7 @@ nodes:
   - id: report
     script: report
     runtime: bun
-    depends_on: [merge, deploy, health, monitor, decide-rollback, rollback]
+    depends_on: [merge, notify-operator, deploy, health, monitor, decide-rollback, rollback]
     # all_done: on Archon v0.11.1 a failed delivery cascades skips that block
     # none_failed_min_one_success, and the run would end with no report.
     trigger_rule: all_done
@@ -514,6 +612,10 @@ nodes:
       # the run ended with no report at all.
       pr_url: { from: "$merge-gate.output.pr_url", if_skipped: "" }
       merge_refused: { from: "$merge-gate.output.reason", if_skipped: "" }
+      merge_action: { from: "$merge-gate.output.action", if_skipped: "" }
+      merge_base: { from: "$merge-gate.output.base", if_skipped: "" }
+      notified: { from: "$notify-operator.output.notified", if_skipped: "skipped" }
+      notify_reason: { from: "$notify-operator.output.reason", if_skipped: "" }
       merged: { from: "$merge.output.merged", if_skipped: "skipped" }
       merge_sha: { from: "$merge.output.merge_sha", if_skipped: "" }
       deployed: { from: "$deploy.output.deployed", if_skipped: "skipped" }
@@ -529,6 +631,7 @@ nodes:
     output_format:
       type: object
       properties:
+        status: { type: string, enum: [delivered, delivered-pending-operator, not-delivered] }
         delivered: { type: boolean }
         summary: { type: string }
         pr_url: { type: string }
@@ -537,11 +640,28 @@ nodes:
         health: { type: string }
         monitoring: { type: string }
         rollback: { type: string }
-      required: [delivered, summary, pr_url, merge_sha, deploy_status, health, monitoring, rollback]
+      required: [status, delivered, summary, pr_url, merge_sha, deploy_status, health, monitoring, rollback]
+
+  - id: trello-done
+    script: trello-move
+    runtime: bun
+    depends_on: [report, trello-review]
+    trigger_rule: all_done
+    timeout: 120000
+    with:
+      event: "done"
+      task: "$INPUTS.task"
+      request: "$ARGUMENTS"
+      report: "$report.output"
+    output_format: *trello-move-output
 
   # Archon v0.10.1 rejects `outcome_field` on exec nodes, so a red result ends
-  # the run here with the report's summary as the reason.
+  # the run here with the report's summary as the reason. A run left pending
+  # the operator (decision 27) is not red and ends completed. all_done:
+  # trello-done only orders the card move first; it must never keep the cancel
+  # from firing.
   - id: not-delivered
     cancel: "Run stopped — $report.output.summary"
-    depends_on: [report]
-    when: "$report.output.delivered == false"
+    depends_on: [report, trello-done]
+    trigger_rule: all_done
+    when: "$report.output.status == 'not-delivered'"

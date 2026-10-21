@@ -72,6 +72,13 @@ Beszel: the backend's prod `config/deploy.yml` has a `beszel-agent` accessory (h
 `KEY` from `BESZEL_HUB_KEY`). The frontend has none: it shares the prod host with the backend, and one host runs one
 agent. Dev hosts get their agent from `1_mvp_infra`, not from Kamal.
 
+## New project board
+
+`bin/board-lists` prints the nine lists of a project's Trello board in order (decision 53). `bin/project-add`
+(planned, S5) creates the new project's board with exactly these lists, by calling `bin/board-lists`; until S5 the
+operator creates them by hand in that order. The names come from `BOARD_LISTS` in
+`plugins/mvp-sdlc/lib/sdlc_common.py`, the constant `feature-start` uses.
+
 ## Checks
 
 - **Fast, in CI:** `.github/workflows/templates.yml` runs `bash scripts/ci/check.sh templates` on pull requests that

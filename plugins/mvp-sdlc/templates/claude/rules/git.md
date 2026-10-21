@@ -17,3 +17,6 @@
 - Stage files by name. Never commit `.env*` files, `config/master.key`, `.claude/*.local.md` or build output.
 - When a task is done, set its row in `docs/features/<slug>/tasks/tracker.md` and its `status` in `tasks.json` to
   `done` in the same pull request.
+- Board flow: the factory moves the task's card (In Progress → Review → Test) from the pull request title line
+  `PILOT-<n>: <card title>`; do not move cards by hand. The lists and who moves each:
+  https://github.com/OlegShevtsov1/1_mvp_sdlc/blob/main/docs/sdlc/03-dor-dod.md#board-flow

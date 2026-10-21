@@ -14,8 +14,7 @@ repo:
   merge_strategy: "squash"
   # Decision 27: the factory never merges a pull request whose base is listed here; it notifies the
   # operator, who merges release (develop -> main) and hotfix (hotfix/* -> main) PRs by hand.
-  # develop exists; the factory engine does not read this key yet, the rule holds because factory
-  # PRs target develop.
+  # develop exists; the factory engine reads this key.
   manual_merge_bases: ["main"]
 # The Dev Deploy GitHub workflow is the deployer: it builds and deploys every commit pushed to
 # develop or a hotfix/* branch that Rails Tests and Rails CI passed. A merge into main is not one

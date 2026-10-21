@@ -5,15 +5,41 @@ export interface ReportInput {
   monitor_status: string; monitor_findings: string;
   rollback: string; rolled_back: string; rollback_reason: string;
   merge_refused: string;
+  merge_action: string; merge_base: string; notified: string; notify_reason: string;
 }
 
+export type ReportStatus = "delivered" | "delivered-pending-operator" | "not-delivered";
+
 export interface ReportDoc {
-  delivered: boolean; summary: string;
+  status: ReportStatus; delivered: boolean; summary: string;
   pr_url: string; merge_sha: string; deploy_status: string;
   health: string; monitoring: string; rollback: string;
 }
 
+// Decision 27: merge-gate handed a green pull request into a manual base to
+// the operator, so nothing was merged or deployed. `delivered` keeps meaning
+// "live"; `status` tells this outcome apart from a failure.
+function pendingOperator(i: ReportInput): ReportDoc {
+  const notice = i.notified === "true"
+    ? "The operator was notified on the pull request."
+    : `The notification could not be posted (${i.notify_reason || "notify-operator did not run"}); tell the operator.`;
+  return {
+    status: "delivered-pending-operator",
+    delivered: false,
+    summary:
+      `Delivered, pending the operator: ${i.pr_url} is ready for the operator: base ${i.merge_base} is manual ` +
+      `(decision 27), so the factory did not merge it; deploy, health and rollback were skipped. ${notice}`,
+    pr_url: i.pr_url,
+    merge_sha: "",
+    deploy_status: `skipped (base ${i.merge_base} is merged by the operator)`,
+    health: "skipped",
+    monitoring: "skipped",
+    rollback: "not needed",
+  };
+}
+
 export function buildReport(i: ReportInput): ReportDoc {
+  if (i.merge_action === "notify") return pendingOperator(i);
   const merged = i.merged === "true";
   const deployed = i.deployed === "true";
   const healthy = i.healthy === "true";
@@ -43,5 +69,6 @@ export function buildReport(i: ReportInput): ReportDoc {
     : i.healthy === "skipped" && !rolledBack ? `Not delivered: health check did not run after the deploy. PR ${i.pr_url} merged as ${i.merge_sha}; monitoring ${monitoring}.`
     : `Not delivered: ${i.rollback_reason || "post-deploy checks failed"} (health ${health}; monitoring ${monitoring}). Rollback ${rollback}.`;
 
-  return { delivered, summary, pr_url: i.pr_url, merge_sha: i.merge_sha, deploy_status, health, monitoring, rollback };
+  const status: ReportStatus = delivered ? "delivered" : "not-delivered";
+  return { status, delivered, summary, pr_url: i.pr_url, merge_sha: i.merge_sha, deploy_status, health, monitoring, rollback };
 }

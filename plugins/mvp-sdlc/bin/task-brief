@@ -6,9 +6,10 @@ Reads docs/features/<slug>/{PRD.md, test-plan.md, tasks/tasks.json, tasks/tracke
 .claude/sdlc.local.md and .archon/factory-profile.yaml at run time. Refuses (exit 1) when the task is not ready:
 unknown task, unfinished dependency, larger than one day, an AC missing from PRD section 5 or without a test level,
 no Trello card number (state.json, or .spec-source in the frontend), a task "type" outside PR_TYPES, or no
-.claude/sdlc.local.md. The text carries the pull request title `PILOT-<card number>: <card title>` and the description
-lines Type:, SDLC-Task:, SDLC-AC: that pr-conventions-check and the squash commit need. The text never names a
-branch: the factory opens the PR from its own branch.
+.claude/sdlc.local.md. The text carries the pull request title `PILOT-<card number>: <card title>`, the description
+lines Type:, SDLC-Task:, SDLC-AC: that pr-conventions-check and the squash commit need, and a `- Board:` line naming
+the lists the factory moves the card through (decision 53; renames from `trello.lists` in the factory profile).
+The text never names a branch: the factory opens the PR from its own branch.
 """
 import json
 import re
@@ -22,7 +23,7 @@ feature_state = sdlc_common.load_script("scripts/feature-state.py")
 lint_prd = sdlc_common.load_script("scripts/lint-prd.py")
 
 LOCAL_SETTINGS = Path(".claude") / "sdlc.local.md"
-FACTORY_PROFILE = Path(".archon") / "factory-profile.yaml"
+FACTORY_PROFILE = sdlc_common.FACTORY_PROFILE
 COMMAND_KEYS = (
     ("cmd_test_unit", "unit tests"),
     ("cmd_test_integration", "integration tests"),
@@ -93,12 +94,7 @@ def yaml_sections(text):
             section = top.group(1)
             sections[section] = {}
         elif nested and section:
-            value = nested.group(2).strip()
-            if value.startswith('"'):
-                value = json.loads(value)
-            elif value.startswith("'"):
-                value = value[1:-1].replace("''", "'")
-            sections[section][nested.group(1)] = value
+            sections[section][nested.group(1)] = sdlc_common.yaml_scalar(nested.group(2))
     return sections
 
 
@@ -213,6 +209,9 @@ def brief(root, slug, task_id):
     if card.get("trello_card_id"):
         out.append("- Trello card {} (from {}/{}): tick the checklist item {} when the pull request is "
                    "merged.".format(card["trello_card_id"], rel, card_source, task_id))
+    lists = sdlc_common.board_lists(root)
+    out.append("- Board: the factory moves the card itself ({in_progress} → {review} → {test}; {blocked} while a gate "
+               "waits for the operator); do not move the card by hand.".format(**lists))
     out += [
         "- Pull request title, exactly this line:",
         "  PILOT-{}: {}".format(card["trello_card_id_short"], card["trello_card_title"]),

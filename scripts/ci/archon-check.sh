@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Installs and tests every Archon workflow of this repository on each pinned Archon release:
 # install.sh (which validates), `workflow test factory`, trace assertions per factory fixture (merge-gate
-# executes in every one), a run in which pr-state, merge-gate and merge execute for real against the
-# engine's own deliver output (only gh is faked), a real (not dry) run in which wait-keeper resumes a
-# durable wait, and a stubbed dry run of every orchestration/workflows/*.yaml. Needs the binaries from
-# `tools.sh archon`, bun and uv on PATH. Every Archon call runs with a throwaway ARCHON_HOME: without
-# one a binary reads and writes the operator's live ~/.archon.
+# executes in every one), runs in which pr-state, merge-gate and merge (or, for a pull request into a
+# manual base, notify-operator) execute for real against the engine's own deliver output (only gh is
+# faked), a real (not dry) run in which wait-keeper resumes a durable wait, and a stubbed dry run of
+# every orchestration/workflows/*.yaml. The Trello card nodes run in dry-run mode in every fixture, and
+# the traces assert each move at its node. Needs the binaries from `tools.sh archon`, bun and uv on PATH.
+# Every Archon call runs with a throwaway ARCHON_HOME: without one a binary reads and writes the
+# operator's live ~/.archon.
 set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 cd "${root}"
@@ -15,6 +17,8 @@ fixtures_dir=orchestration/factory/.archon/workflows/sdlc-factory/factory/fixtur
 red_fixture=validation-red-merge-refused
 # The fixture whose validation is red for an environment cause while the PR's CI is green; it must merge.
 env_fixture=validation-environment-ci-green
+# The fixture whose pull request targets a manual base; it must end completed, pending the operator.
+manual_fixture=manual-base-pending-operator
 # The green fixture the unstubbed merge runs start from.
 green_fixture=existing-profile
 
@@ -28,9 +32,57 @@ trap 'rm -rf "${work}"' EXIT
 fail() { echo "FAIL archon $1: $2" >&2; exit 1; }
 without_logs() { grep -v '^{"level"' || true; }
 
+# The JSON output line Archon prints under a node's COMPLETED line.
+node_output() {
+  grep -E -A3 "^COMPLETED +$2 \\(" "$1" | grep -m1 '^  output: ' || true
+}
+
+# Every fixture run is a dry run: the Trello node computes its move and touches nothing.
+expect_move() {
+  local version=$1 name=$2 trace=$3 node=$4 list=$5 out
+  out=$(node_output "${trace}" "${node}")
+  grep -qF '"status":"dry-run"' <<<"${out}" && grep -qF "\"target\":\"${list}\"" <<<"${out}" ||
+    fail "${version} ${name}" "${node} must move the card to ${list} in dry-run mode; output: ${out:-none}"
+}
+
+expect_skipped() {
+  grep -qE "^SKIPPED +$4 \\(" "$3" || fail "$1 $2" "$4 must be skipped"
+}
+
+check_trello_moves() {
+  local version=$1 name=$2 trace=$3 final=Ready done_line cancel_line
+  expect_move "${version}" "${name}" "${trace}" trello-plan-gate Blocked
+  expect_move "${version}" "${name}" "${trace}" trello-start "In Progress"
+  if grep -qE '^SKIPPED +pr-state \(' "${trace}"; then
+    expect_skipped "${version}" "${name}" "${trace}" trello-review
+  else
+    expect_move "${version}" "${name}" "${trace}" trello-review Review
+  fi
+  if grep -qF "profile-check: '{\"exists\":false}'" "${fixtures_dir}/${name}.stubs.yaml"; then
+    expect_move "${version}" "${name}" "${trace}" trello-profile-gate Blocked
+    expect_move "${version}" "${name}" "${trace}" trello-profile-round Ready
+  else
+    # A skipped loop prints no line for the nodes of its body.
+    ! grep -qE '^COMPLETED +trello-profile-gate \(' "${trace}" ||
+      fail "${version} ${name}" "trello-profile-gate ran although the profile exists"
+    expect_skipped "${version}" "${name}" "${trace}" trello-profile-round
+  fi
+  case "${name}" in
+  existing-profile | fresh-profile | "${env_fixture}") final=Test ;;
+  "${manual_fixture}") final=Review ;;
+  esac
+  expect_move "${version}" "${name}" "${trace}" trello-done "${final}"
+  cancel_line=$(grep -nE '^COMPLETED +not-delivered' "${trace}" | cut -d: -f1 || true)
+  [ -n "${cancel_line}" ] || return 0
+  done_line=$(grep -nE '^COMPLETED +trello-done \(' "${trace}" | cut -d: -f1)
+  [ "${done_line}" -lt "${cancel_line}" ] ||
+    fail "${version} ${name}" "trello-done must move the card before not-delivered cancels the run"
+}
+
 check_fixture_trace() {
   local version=$1 name=$2 trace=$3
-  local gate_lines state_lines
+  local gate_lines state_lines notify_lines
+  check_trello_moves "${version}" "${name}" "${trace}"
   gate_lines=$(grep -E '^[A-Z]+ +merge-gate \(' "${trace}" || true)
   [ -n "${gate_lines}" ] || fail "${version} ${name}" "no merge-gate line in the trace"
   ! grep -vE '^(COMPLETED|SKIPPED) ' <<<"${gate_lines}" >/dev/null ||
@@ -42,6 +94,21 @@ check_fixture_trace() {
     fail "${version} ${name}" "pr-state must be stubbed or skipped in a test: ${state_lines}"
   grep -qE '^COMPLETED +wait-keeper \(' "${trace}" && grep -q '"keeper":"off"' "${trace}" ||
     fail "${version} ${name}" "wait-keeper must execute and report itself off in a dry run"
+  # notify-operator comments on GitHub; a fixture must never reach it either.
+  notify_lines=$(grep -E '^[A-Z]+ +notify-operator \(' "${trace}" || true)
+  [ -n "${notify_lines}" ] || fail "${version} ${name}" "no notify-operator line in the trace"
+  ! grep -vE '^(STUBBED|SKIPPED) ' <<<"${notify_lines}" >/dev/null ||
+    fail "${version} ${name}" "notify-operator must be stubbed or skipped in a test: ${notify_lines}"
+  if [ "${name}" = "${manual_fixture}" ]; then
+    local want
+    for want in 'COMPLETED +merge-gate' 'SKIPPED +merge' 'STUBBED +notify-operator' 'SKIPPED +deploy' 'SKIPPED +health' \
+      'SKIPPED +rollback' 'COMPLETED +report' 'SKIPPED +not-delivered'; do
+      grep -qE "^${want} \\(" "${trace}" || fail "${version} ${name}" "trace lacks ${want}: $(grep -E '^[A-Z]+ ' "${trace}" | tail -40)"
+    done
+    grep -q 'delivered-pending-operator' "${trace}" || fail "${version} ${name}" "the report is not delivered-pending-operator"
+  else
+    grep -qE '^SKIPPED +notify-operator \(' "${trace}" || fail "${version} ${name}" "notify-operator ran for a base that is not manual"
+  fi
   if [ "${name}" = "${env_fixture}" ]; then
     grep -qE '^COMPLETED +deliver__gate-validated \(' "${trace}" ||
       fail "${version} ${name}" "the bundled gate-validated did not pass the environment red"
@@ -80,10 +147,12 @@ mkdir -p "${work}/fake-bin"
 cat >"${work}/fake-bin/gh" <<'GH'
 #!/usr/bin/env bash
 case "$*" in
-  "pr view "*" --json headRefOid,headRefName,isDraft,state")
-    printf '{"headRefOid":"%s","headRefName":"fixture-branch","isDraft":false,"state":"OPEN"}\n' "${FAKE_GH_HEAD_OID}" ;;
+  "pr view "*" --json headRefOid,headRefName,isDraft,state,baseRefName")
+    printf '{"headRefOid":"%s","headRefName":"fixture-branch","isDraft":false,"state":"OPEN","baseRefName":"%s"}\n' \
+      "${FAKE_GH_HEAD_OID}" "${FAKE_GH_BASE:-develop}" ;;
   "pr checks "*" --json name,bucket") printf '%s\n' "${FAKE_GH_CHECKS:-[]}" ;;
   "pr merge "*) ;;
+  "pr comment "*) printf '%s\n' "$*" >>"${FAKE_GH_COMMENTS}" ;;
   *"--json state --jq .state") echo MERGED ;;
   *"--json mergeCommit "*) printf '%s\n' "${FAKE_GH_MERGE_COMMIT}" ;;
   *"--json headRefName --jq .headRefName") echo fixture-branch ;;
@@ -91,15 +160,16 @@ case "$*" in
 esac
 GH
 chmod +x "${work}/fake-bin/gh"
-export FAKE_GH_HEAD_OID
+export FAKE_GH_HEAD_OID FAKE_GH_COMMENTS="${work}/gh-comments"
 FAKE_GH_HEAD_OID=$(git -C "${scratch}" rev-parse HEAD)
 sed -e '/^pr-state:/d' -e '/^merge:/d' -e '/^exec-code:/,$d' \
   "${fixtures_dir}/${green_fixture}.stubs.yaml" >"${work}/unstubbed-merge.stubs.yaml"
 
-# Runs the factory with pr-state, merge-gate and merge unstubbed; the trace goes to trace.out.
+# Runs the factory with pr-state, merge-gate, merge and notify-operator unstubbed against a pull
+# request into base (default develop); the trace goes to trace.out.
 run_unstubbed_merge() {
-  local archon_bin=$1 merge_commit=$2
-  PATH="${work}/fake-bin:${PATH}" FAKE_GH_MERGE_COMMIT="${merge_commit}" \
+  local archon_bin=$1 merge_commit=$2 base=${3:-develop}
+  PATH="${work}/fake-bin:${PATH}" FAKE_GH_MERGE_COMMIT="${merge_commit}" FAKE_GH_BASE="${base}" \
     "${archon_bin}" workflow run factory --cwd "${scratch}" --dry-run --stubs "${work}/unstubbed-merge.stubs.yaml" \
     --exec-code --input task=fixture 2>&1 | without_logs >"${work}/trace.out" || true
 }
@@ -118,8 +188,12 @@ check_unstubbed_merge() {
   expect_trace "${label}" '^COMPLETED +pr-state \('
   expect_trace "${label}" '^COMPLETED +merge-gate \('
   expect_trace "${label}" '^COMPLETED +merge \('
+  expect_trace "${label}" '^SKIPPED +notify-operator \('
   expect_trace "${label}" '^STUBBED +deploy \('
   expect_trace "${label}" '^SKIPPED +not-delivered \('
+  # The task names no card, so no Trello node may act.
+  grep -qF '"status":"none"' <<<"$(node_output "${work}/trace.out" trello-start)" ||
+    fail "${label}" "trello-start must report no card: $(node_output "${work}/trace.out" trello-start)"
 
   # GitHub has not published the merge commit yet: the merge is real, so the run must still
   # report it, and nothing may be deployed from an unknown commit.
@@ -127,10 +201,26 @@ check_unstubbed_merge() {
   run_unstubbed_merge "${archon_bin}" ""
   ! grep -q '^FAILED' "${work}/trace.out" || fail "${label}" "unexpected failure: $(grep '^FAILED' "${work}/trace.out")"
   expect_trace "${label}" '^COMPLETED +merge \('
+  expect_trace "${label}" '^SKIPPED +notify-operator \('
   expect_trace "${label}" '^SKIPPED +deploy \('
   expect_trace "${label}" '^COMPLETED +report \('
   expect_trace "${label}" '^COMPLETED +not-delivered'
   expect_trace "${label}" 'merge commit could not be read'
+
+  # Decision 27: a green pull request into main is left to the operator, who is told on the PR.
+  label="${version} unstubbed manual base"
+  rm -f "${FAKE_GH_COMMENTS}"
+  run_unstubbed_merge "${archon_bin}" 0123456789abcdef0123456789abcdef01234567 main
+  ! grep -q '^FAILED' "${work}/trace.out" || fail "${label}" "unexpected failure: $(grep '^FAILED' "${work}/trace.out")"
+  expect_trace "${label}" '^COMPLETED +pr-state \('
+  expect_trace "${label}" '^COMPLETED +merge-gate \('
+  expect_trace "${label}" '^SKIPPED +merge \('
+  expect_trace "${label}" '^COMPLETED +notify-operator \('
+  expect_trace "${label}" '^SKIPPED +deploy \('
+  expect_trace "${label}" '^COMPLETED +report \('
+  expect_trace "${label}" '^SKIPPED +not-delivered'
+  grep -q 'ready for the operator: base main is manual' "${FAKE_GH_COMMENTS}" 2>/dev/null ||
+    fail "${label}" "no operator comment was posted on the pull request"
 }
 
 # A probe workflow shaped like the bundled deliver's await-checks: the first CI probe reads pending and
@@ -252,7 +342,7 @@ for version in "${versions[@]}"; do
     grep -q '^exec-code:' "${fixture}" || fail "${version} ${name}" "fixture has no exec-code: line"
     sed '/^exec-code:/,$d' "${fixture}" >"${work}/stubs.yaml"
     "${archon_bin}" workflow run factory --cwd "${root}" --dry-run --stubs "${work}/stubs.yaml" --exec-code \
-      --input task=fixture 2>&1 | without_logs >"${work}/trace.out" || true
+      --input task='PILOT-7: fixture' 2>&1 | without_logs >"${work}/trace.out" || true
     check_fixture_trace "${version}" "${name}" "${work}/trace.out"
   done
   check_unstubbed_merge "${version}" "${archon_bin}"

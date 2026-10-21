@@ -1,6 +1,6 @@
 {
   "name": "mvp-sdlc",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "MVP adaptations beside the course sdlc plugin: Rails/ActiveRecord data model, two-repository spec sync, Trello-card feature start, factory task briefs, app-repo .claude/ bootstrap, and deterministic guards (phase gate, PRD lint, script-only state.json, git and secret hooks).",
   "author": {
     "name": "OlegShevtsov1"

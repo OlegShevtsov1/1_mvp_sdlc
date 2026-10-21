@@ -10,8 +10,12 @@ stack:
   build_command: ""
 repo:
   remote: "origin"
-  base_branch: "main"
+  base_branch: "develop"
   merge_strategy: "squash"
+  # Factory PRs go into develop and are merged by the factory. A PR whose base is listed here
+  # (the release develop -> main, a hotfix into main) is never merged by the factory: it comments
+  # for the operator (decisions 27, 54).
+  manual_merge_bases: ["main"]
 deploy:
   command: "echo \"1_mvp_sdlc: no deploy target (toolkit repository; workflows are installed with install.sh)\""
   health_url: "http://mvp.up.km.ua/health"

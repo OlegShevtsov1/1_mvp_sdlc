@@ -19,7 +19,7 @@ load-profile:
   lint_command: ""
   build_command: ""
   remote: origin
-  base_branch: main
+  base_branch: develop
   merge_strategy: squash
   deploy_command: "echo deploy"
   health_url: "https://app.example.com/health"
@@ -28,6 +28,7 @@ load-profile:
   monitoring_provider: none
   window_minutes: 10
   secret_names: []
+  manual_merge_bases: ["main"]
 
 plan__plan:
   ready: true
@@ -104,7 +105,7 @@ deliver__ci-attention-route: { attention: false, red_cause: "" }
 # the refusal must come from merge-gate's own test run. merge, deploy and
 # health are stubbed green so that a factory without the refusal visibly merges
 # and completes: the run must end cancelled with merge skipped instead.
-pr-state: { pr_url: "https://github.com/example/repo/pull/3", read: true, head: "fixture-branch", state: "OPEN", is_draft: false, checkout_is_head: true, checkout_clean: true, checks: [{ name: "Tests", bucket: "pass" }], checks_read: true }
+pr-state: { pr_url: "https://github.com/example/repo/pull/3", read: true, head: "fixture-branch", base: "develop", state: "OPEN", is_draft: false, checkout_is_head: true, checkout_clean: true, checks: [{ name: "Tests", bucket: "pass" }], checks_read: true }
 merge: { merged: true, merge_sha: "abc1234", head: "fixture-branch" }
 deploy: { deployed: true, exit_code: 0, deployed_at: "2026-09-20T10:00:00Z", log: "deploy.log" }
 health: { healthy: true, last_status: "200", elapsed_seconds: 4 }

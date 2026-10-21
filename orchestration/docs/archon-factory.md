@@ -36,6 +36,9 @@ git checkout main && git pull --ff-only
 ./install.sh
 ```
 
+That installs the released factory. To test a change before it is released, use
+`git checkout develop && git pull --ff-only` instead, and reinstall from `main` afterwards.
+
 `install.sh` checks the tools above, then:
 
 1. copies whatever it is about to replace — `~/.archon/workflows/sdlc-factory/factory/` and every
@@ -116,6 +119,12 @@ Rollback: switch to the previous release and restart compose.
 
 Too big: "build a shop website" is a dozen tasks. One task is one pull request.
 
+**The task's Trello card.** When the task text names a card — its card link (the card's full URL), or the
+`PILOT-<n>: <card title>` line `task-brief` writes — the factory moves that card through the board
+([Board flow](../../docs/sdlc/03-dor-dod.md#board-flow)). `PILOT-0` means "no card". The factory reads
+`TRELLO_API_KEY`, `TRELLO_TOKEN` and `TRELLO_BOARD_ID` at run time from `~/.config/trello/.env` on the Archon host;
+without that file, or when the card is not on that board, it only logs a warning and delivers as usual.
+
 ## 6. Running and the two gates
 
 In the foreground (the task may also come from a file: `"$(cat task.md)"`):
@@ -166,6 +175,7 @@ archon workflow abandon <run-id>                  # close a stuck run
 | Status | Meaning | What to do |
 |---|---|---|
 | `completed`, report `delivered: true` | merged to `main`, deployed, health 200, monitoring not red | nothing; `git pull` your checkout |
+| `completed`, report `status: delivered-pending-operator` | the PR's base is in the profile's `manual_merge_bases` (default `main`, decision 27). Every check was green, but the factory did **not** merge, deploy or check health; it commented `ready for the operator: …` on the PR | review and merge the PR yourself, then deploy as usual. If the summary says the notification could not be posted, the comment is missing but the PR is still waiting |
 | `cancelled`, summary `merge refused (…)` | the factory's merge gate found a red check, or the PR was not open and ready, or the checkout was not the PR head. The PR is open (on Archon v0.10.1 it may already be ready for review) and was **not** merged | fix the cause and start a new run, or close the PR. `resume` does not work for `cancelled` |
 | `cancelled`, summary `… is merged, but its merge commit could not be read …` | the PR **is** merged; GitHub had not published the merge commit yet, so nothing was deployed | deploy the merge commit the way the profile's deploy command does, or start a new run once `gh pr view <url> --json mergeCommit` shows it |
 | `cancelled`, any other "Not delivered: …" | delivery stopped before a mergeable PR, or the deploy, health or monitoring was red (rolled back when needed) | fix the cause and start a new run |
@@ -173,7 +183,12 @@ archon workflow abandon <run-id>                  # close a stuck run
 | `failed` | a node broke and the run ended without the report's verdict | `archon workflow get <run-id>` names the node; fix it; `archon workflow resume <run-id>` |
 
 Run artifacts: `~/.archon/workspaces/<owner>/<repo>/artifacts/runs/<run-id>/` — `report.json`, `plan.md`,
-`implementation.md`, `review/report.md`, `merge-gate.log`, `wait-keeper.log`, `deploy.log`, `rollback.log`.
+`implementation.md`, `review/report.md`, `merge-gate.log`, `wait-keeper.log`, `trello.log`, `deploy.log`,
+`rollback.log`.
+
+Where the task's card ends: `Test` when delivered; `Review` with "waits for the operator merge" when the PR's base is
+merged by hand; `Blocked` after a failed rollback; `Ready`, with the reason as a comment, for every other stop.
+`trello.log` has one line per move, with the warning when Trello could not be reached.
 
 ## 8. Troubleshooting
 

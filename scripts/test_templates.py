@@ -6,6 +6,7 @@ which `bash scripts/ci/check.sh templates` provides. Forbidden strings are assem
 this file passes the checks it tests.
 """
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -16,6 +17,18 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 RENDERER = REPO / "bin" / "render-template"
 FAST_CHECK = REPO / "scripts" / "ci" / "templates-check.sh"
+BOARD_LISTS = REPO / "bin" / "board-lists"
+BOARD_FLOW = (
+    "Backlog",
+    "Ready",
+    "In Progress",
+    "Review",
+    "Test",
+    "Blocked",
+    "Ready to Release",
+    "Test after Release",
+    "Done",
+)
 
 PROJECT_WORD = "pi" + "lot"
 GH_EXPR = "$" + "{{ github.sha }}"
@@ -305,6 +318,34 @@ class TemplatesTest(unittest.TestCase):
         for kind in ("be", "fe"):
             path = REPO / "templates" / "project-{}".format(kind) / "CLAUDE.md"
             self.assertLessEqual(len(path.read_text().splitlines()), 200, path)
+
+    def test_board_lists_prints_the_nine_lists_in_order(self):
+        result = run([str(BOARD_LISTS)])
+        self.assertExit(result, 0)
+        self.assertEqual(result.stdout.splitlines(), list(BOARD_FLOW))
+        result = run([str(BOARD_LISTS), "extra"])
+        self.assertExit(result, 2)
+        self.assertIn("usage: bin/board-lists", result.stderr)
+
+    def test_rendered_readme_has_the_board_flow(self):
+        link = re.compile(
+            r"https://github\.com/OlegShevtsov1/1_mvp_sdlc/blob/[0-9a-f]{12}/docs/sdlc/03-dor-dod\.md#board-flow"
+        )
+        for kind in ("be", "fe"):
+            with self.subTest(kind=kind):
+                dest = self.tmp / "render-{}".format(kind)
+                self.assertExit(run([str(RENDERER), kind, "tplcheck", str(dest)]), 0)
+                text = (dest / "README.md").read_text(encoding="utf-8")
+                self.assertIn("## Board flow", text.splitlines())
+                section = text.split("## Board flow", 1)[1].split("\n## ", 1)[0]
+                positions = [section.find("`{}`".format(name)) for name in BOARD_FLOW]
+                self.assertNotIn(-1, positions, section)
+                self.assertEqual(positions, sorted(positions))
+                self.assertRegex(section, link)
+
+
+def run(args):
+    return subprocess.run(args, cwd=str(REPO), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
 
 
 if __name__ == "__main__":

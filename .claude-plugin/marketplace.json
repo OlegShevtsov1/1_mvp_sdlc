@@ -19,7 +19,7 @@
     {
       "name": "mvp-sdlc",
       "source": "./plugins/mvp-sdlc",
-      "version": "0.1.2",
+      "version": "0.2.0",
       "description": "MVP adaptations of the sdlc plugin: Rails/ActiveRecord data model, be/fe spec sync, Trello-card feature start, factory task briefs, app-repo .claude/ bootstrap, and deterministic hooks (phase gate, PRD lint, script-only state.json, protected main, secrets, published tags).",
       "author": {
         "name": "OlegShevtsov1"

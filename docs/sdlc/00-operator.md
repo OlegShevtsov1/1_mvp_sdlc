@@ -38,8 +38,8 @@ Done by runs, not by you; you answer questions and approve their pull requests. 
 | `docs/architecture-map.md` in each app repository, written by `/sdlc:map-architecture` | the map of existing code every later phase reads | read it, approve the PR; rerun after large code changes |
 | `config/project.env` with `PROJECT_NAME` and `PROJECT_ZONE` only (R-A11) | one place for the project name | approve the PR |
 | `tdd-check.yml` in each app repository and the PR template from `templates/github/pull_request_template.md` | CI enforces the TDD commit order; the task Definition of Done as a checklist | approve the PR |
-| The develop model in each app repository: the branch `develop`, `pr-conventions-check.yml`, `develop-guard.yml` and `main-guard.yml` (decisions 24–29, [05-git-pr-review.md](05-git-pr-review.md)) | branch names, the `PILOT-<n>: <card title>` title and the `Type:` line are checked on every pull request; direct pushes are reported | done; merge the release and hotfix PRs into `main` yourself |
-| Trello board `PILOT`, Notion page `PILOT`, the Telegram bots | already there | make sure the board has the lists `Backlog`, `Ready`, `In Progress`, `Review`, `Blocked`, `Done` and the labels `feature`, `task`, `hotfix`, `run` (R-C11) |
+| The develop model in each app repository and in `1_mvp_sdlc` (decision 54): the branch `develop`, `pr-conventions-check.yml`, `develop-guard.yml` and `main-guard.yml` (decisions 24–29, [05-git-pr-review.md](05-git-pr-review.md)) | branch names, the `PILOT-<n>: <card title>` title and the `Type:` line are checked on every pull request; direct pushes are reported | done in the app repositories; in `1_mvp_sdlc` first create `develop` from `main` and finish the after-merge steps of the decision-54 PR; then merge the release and hotfix PRs into `main` yourself |
+| Trello board `PILOT`, Notion page `PILOT`, the Telegram bots | already there | make sure the board has the lists of decision 53 — `Backlog`, `Ready`, `In Progress`, `Review`, `Test`, `Blocked`, `Ready to Release`, `Test after Release`, `Done` ([Board flow](03-dor-dod.md#board-flow)) — and the labels `feature`, `task`, `hotfix`, `run` (R-C11) |
 
 Also once, on the operator machine:
 
@@ -47,7 +47,8 @@ Also once, on the operator machine:
   menu; `feature-start` also accepts the 24-character card id.
 - Trello credentials for `feature-start` in `~/.config/trello/.env`: `TRELLO_API_KEY`, `TRELLO_TOKEN` and the board
   id as `TRELLO_BOARD_ID_PILOT` (the project name from `config/project.env`, upper case) or `TRELLO_BOARD_ID`. The
-  command passes them to `curl` on stdin and never prints them.
+  command passes them to `curl` on stdin and never prints them. The factory reads the same file on the Archon host
+  (only `TRELLO_BOARD_ID`) to move the task's card; without it the factory still delivers and only logs a warning.
 - The plugins are installed at **project scope only**, through the committed `.claude/settings.json`. The first time
   you open Claude Code in an app repository, accept the `mvp` marketplace when it asks.
 - Known limitation: an unattended Archon run does **not** see a project-scope plugin (plugin probe, 2026-10-14:
@@ -188,7 +189,8 @@ frontend, sync the spec copy now (section 4). Check the Definition of Ready: the
 SAD and an Accepted ADR merged, every task in `tasks/tasks.json` with criteria from PRD section 5 and a test level
 for each, no task over a day, CI green on `main`, and `task-brief` prints the text for each task without refusing
 (details: [03-dor-dod.md](03-dor-dod.md)). Then you add the checklist `T1…Tn` to the card (one item per task ID)
-and move the card to `Ready`; until a script does it, these card moves are yours.
+and move the card to `Ready`. From `Ready` on, the factory moves the card ([Board flow](03-dor-dod.md#board-flow)):
+you only read its comments.
 
 **Step 6. Code, through the factory.** For each task, in the repository that owns it:
 
@@ -211,12 +213,16 @@ and move the card to `Ready`; until a script does it, these card moves are yours
    `abort`), with the same `archon workflow respond` command.
 6. Without you: three commits on the PR branch — `test(...)` (the test fails) → `feat(...)` (it passes) →
    `refactor(...)`; review by several lenses; CI; **merge into `develop` as one squash commit**; deploy to **dev**;
-   health check. If health is red, the factory rolls dev back and reports.
+   health check. If health is red, the factory rolls dev back and reports. Meanwhile the factory moves the card
+   the task text names: `Blocked` while gate 1 or gate 2 waits for you, `In Progress` once you approve the plan,
+   `Review` when the PR is open, `Test` when the run is delivered. A PR into a base you merge by hand stays in
+   `Review` with the comment "waits for the operator merge" until you merge it.
 7. The agent ticks the task on the card's checklist; `archon workflow get <run-id>` shows the result.
-8. **If the run stopped** (a red check, a `BLOCKED` question, a failed deploy): move the card to `Blocked`, read the
-   reason with `archon workflow get <run-id>`, and answer or fix it. Then either
+8. **If the run stopped** (a red check, a `BLOCKED` question, a failed deploy): the factory moves the card back to
+   `Ready` with a comment naming the reason (after a failed rollback it leaves the card in `Blocked`: dev needs you).
+   Read the comment or `archon workflow get <run-id>`, and answer or fix it. Then either
    `archon workflow resume <run-id>` (continues from the completed nodes) or, if the task itself had to change,
-   start a new run with the new `task-brief` text. Move the card back when the run passes. A run that ends
+   start a new run with the new `task-brief` text; the new run moves the card again. A run that ends
    `cancelled` with `merge refused` cannot be resumed — see [the factory guide](../../orchestration/docs/archon-factory.md).
 
 Self-correction rule (RULE-LOOP): if review misses a serious (P0/P1) problem twice in a row, tasks labelled
@@ -256,8 +262,8 @@ GlitchTip issues for 10 minutes and reports to Telegram. **Rollback is never aut
 
 **Step 9. After the release.** Monitoring (Gatus, Beszel, GlitchTip) and Telegram alerts stay as in the pilot plan
 ([08-observability.md](08-observability.md)). Metrics once per release: section 6. If the brief's success metric
-did not come true, that is a new idea: back to step 0. You move the card to `Done` and comment the links to the
-prod deploy runs and the merged PRs (with C4: to the GitHub Release).
+did not come true, that is a new idea: back to step 0. The card ends in `Done` through the release runs (planned,
+C4); until then you move it from `Test` on and comment the links to the prod deploy runs and the merged PRs.
 
 ### Your time per feature (size M)
 
@@ -330,8 +336,9 @@ Course basis: deterministic guards over instructions (M5.4), untrusted agent inp
   encodes a wrong acceptance criterion, the agent stops and asks you.
 - **Secrets reach neither the repository nor the agent**: gitleaks in CI, deny rules in `.claude/settings.json`, the
   `block-env` hook.
-- **No direct pushes to `main` or `develop`**: the hooks and deny rules block the dangerous commands for `main`, and
-  the `main-guard` and `develop-guard` workflows report any direct push to Telegram (R-C4, decision 27).
+- **No direct pushes to `main` or `develop`**: every change in every repository goes through a pull request
+  (decision 54); the hooks and deny rules block the dangerous commands for `main`, and the `main-guard` and
+  `develop-guard` workflows report any direct push to Telegram (R-C4, decision 27).
 - **`state.json` is moved only by scripts**, never by you or the agent by hand.
 - **Feature documents are never deleted after merge.** They are the history of the decisions.
 - **DNS delegation and destroying anything: only from your console or with your OK.**
@@ -364,3 +371,4 @@ The `/sdlc-<skill>` form (for example `/sdlc-write-prd`) works too; these docume
    labels) and who sets them; until decided, you note the risk in the task's PR description.
 5. **Aligning the card moves with the agreed flow**: `feature-start` moves the card to `In Progress` at step 1, the
    agreed flow keeps it in `Backlog` until `Ready` ([00-model.md](00-model.md#phases-and-gates-for-the-pilot)).
+   From `Ready` on, the factory already follows decision 53 ([Board flow](03-dor-dod.md#board-flow)).

@@ -39,9 +39,11 @@ factory runs that legitimately force-push their own branches. To switch it off i
 
 - `sdlc-gate <phase> [<slug>]` — the phase gate. Exit 0 when the phase may start, 2 with every reason otherwise.
   Called by the `sdlc-gate-hook` hook; can be run by hand.
-- `feature-start <card link | card id | slug>` — validates the card (on the project's board, not archived, not In Progress or
-  Done, named `<slug>: <title>`, feature not started yet) before writing anything, then creates
-  `docs/features/<slug>/state.json`, moves the card to In Progress and comments the feature folder link. Trello
+- `feature-start <card link | card id | slug>` — validates the card (on the project's board, not archived, not past
+  Ready: not in In Progress, Review, Test, Blocked, Ready to Release, Test after Release or Done; named
+  `<slug>: <title>`, feature not started yet) before writing anything, then creates
+  `docs/features/<slug>/state.json`, moves the card to In Progress and comments the feature folder link. List names
+  follow `trello.lists` in `.archon/factory-profile.yaml`, defaults from decision 53. Trello
   credentials (`TRELLO_API_KEY`, `TRELLO_TOKEN`) and the board id (`TRELLO_BOARD_ID_<PROJECT_NAME>` when
   `config/project.env` names the project, else `TRELLO_BOARD_ID`) come from the environment or from
   `TRELLO_ENV_FILE` (default `~/.config/trello/.env`); they reach `curl` on stdin only and are never printed. The
@@ -56,7 +58,7 @@ factory runs that legitimately force-push their own branches. To switch it off i
   `.claude/sdlc.local.md`, the tracker row and Trello checklist item to close), B deploy, C health check,
   D rollback (from `.archon/factory-profile.yaml`, or a note that the factory's profile gate will ask), plus the
   pull request title `PILOT-<n>: <card title>` and the description lines `Type:` (from the task's optional `type`,
-  default `feat`), `SDLC-Task:` and `SDLC-AC:`. Refuses tasks that are not ready, and features without a card
+  default `feat`), `SDLC-Task:` and `SDLC-AC:`, and the `- Board:` line. Refuses tasks that are not ready, and features without a card
   number. Never names a branch.
 - `bootstrap-project <be|fe> [--target DIR] [--overwrite PATH]...` — installs `CLAUDE.md`,
   `.claude/settings.json`, `.claude/rules/*.md`, `.claude/sdlc.local.md` and the `.gitignore` line
@@ -140,6 +142,8 @@ The eval cases, the verdict rule and how to run them: [evals/README.md](evals/RE
 
 Changes:
 
+- 0.2.0 — the SDLC board flow (#22): feature-start and task-brief follow the board, templates carry the
+  flow; eval/results/0.1.2.json (full run, PASS).
 - 0.1.2 — C1b: briefs carry the PILOT title and Type line; card number in state.json
 - 0.1.1 — the `check-branch-name` hook (S3b). Bumped without a `make eval` run, as a recorded operator exception
   to the rule above; the last full run is `eval/results/0.1.0.json`.

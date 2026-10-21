@@ -1,8 +1,15 @@
 {
   "repo": "1_mvp_sdlc",
   "source_ref": "origin/main",
-  "source_sha": "2c02880f718d131eb4938a81887f2c4b300d371a",
-  "mirror_sha": "0909fcea541072924db84db05717b8bf00346306",
-  "synced_at": "2026-10-20T13:04:13Z",
-  "tags": []
+  "source_sha": "896c613fbe112e7abaa93960919794606a7ac19f",
+  "mirror_sha": "07642a2f40c29f453a9e9567bf76e4c0406ccc9d",
+  "synced_at": "2026-10-21T04:35:52Z",
+  "tags": [
+    {
+      "tag": "v0.2.0",
+      "primary_sha": "31d6e0789642ae47b7852ffcd4336adda007c02e",
+      "mirror_sha": "07642a2f40c29f453a9e9567bf76e4c0406ccc9d",
+      "synced_at": "2026-10-21T04:35:52Z"
+    }
+  ]
 }

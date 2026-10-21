@@ -15,8 +15,7 @@ repo:
   merge_strategy: "squash"
   # Decision 27: the factory never merges a pull request whose base is listed here; it notifies the
   # operator, who merges release (develop -> main) and hotfix (hotfix/* -> main) PRs by hand.
-  # develop exists; the factory engine does not read this key yet, the rule holds because factory
-  # PRs target develop.
+  # develop exists; the factory engine reads this key.
   manual_merge_bases: ["main"]
 # deploy.command waits for the automatic Dev Deploy of the merge commit (it never dispatches one).
 deploy:

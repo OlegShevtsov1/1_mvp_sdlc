@@ -51,3 +51,28 @@ Checked before a factory run starts.
 - The metrics (R-C7) are recorded ([09-metrics.md](09-metrics.md)). Repeated review findings become a rule
   (RULE-LOOP, M9.7): if review misses a P0/P1 finding twice in a row (found later), tasks labelled `migration`,
   `auth` or `security` switch to manual merge (R-C1, variant c); the case is recorded in the C9 retrospective.
+
+## Board flow
+
+Decision 53 sets the lists of every project board and makes moving the cards the harness's job, not the operator's:
+`Backlog → Ready → In Progress → Review → Test → (Blocked) → Ready to Release → Test after Release → Done`.
+
+| List | Meaning | Who moves the card there |
+|---|---|---|
+| `Backlog` | the card exists | the operator; for a feature, see "Not decided yet" item 5 in [00-operator.md](00-operator.md#not-decided-yet) |
+| `Ready` | the Definition of Ready is met and the task brief is ready | the operator; the factory moves the card back here, with a comment naming why, when a run stops at a gate or ends not delivered |
+| `In Progress` | the factory started (the plan is approved) | the factory, when gate 2 is approved |
+| `Review` | the pull request is open: the factory's review and CI | the factory, when delivery returns the pull request; a pull request into a base the operator merges by hand stays here with the comment "waits for the operator merge" |
+| `Test` | merged into `develop` (`env/dev` in the infrastructure repository), deployed to dev, the post-merge check on dev runs | the factory, when the run is delivered (merged, deployed, health 200, monitoring not red) |
+| `Blocked` | waits for the operator or for something external; back to the previous list once unblocked | the factory, while a run waits at gate 1 or gate 2 (including a plan that is not ready to build) and after a failed rollback; the operator, for anything external |
+| `Ready to Release` | checked on dev, waits for the release (`develop` → `main` and a tag) | post-merge, after the dev check (run H3 of the private ops repository; until then the operator) |
+| `Test after Release` | on prod, the release watch and prod checks run | the release runs (planned, C4; until then the operator) |
+| `Done` | released and checked on prod | the release runs after the prod check; for repositories without releases (this one, the infrastructure and the prompt repositories) post-merge right after a successful post-merge |
+
+How the factory finds the card: the task text names it with a card link (the card's full URL) or with the pull
+request title line `PILOT-<n>: <card title>` that `task-brief` writes; `PILOT-0` means "no card" and moves nothing.
+The card must be on the board `TRELLO_BOARD_ID` names. The factory reads `TRELLO_API_KEY`, `TRELLO_TOKEN` and
+`TRELLO_BOARD_ID` at run time from `~/.config/trello/.env`, the same file `feature-start` and post-merge use; the list
+names default to the ones above and can be renamed under `trello.lists` in `.archon/factory-profile.yaml`. A missing
+file, card or list never fails a delivery: the factory writes a warning to `trello.log` in the run's artifacts and
+continues.

@@ -11,6 +11,9 @@ repo:
   remote: origin
   base_branch: main
   merge_strategy: squash               # squash | merge | rebase
+  manual_merge_bases: []               # the factory never merges a PR into a listed base; it comments
+                                       # for the operator instead. Absent means ["main"], so a profile
+                                       # whose base_branch is main needs [] to auto-merge.
 deploy:
   command: "ssh deploy@vps 'cd /srv/app && git pull && docker compose up -d --build'"
   health_url: "https://app.example.com/health"
@@ -20,6 +23,13 @@ monitoring:
   provider: sentry                     # sentry | datadog | grafana | none
   mcp_config: .archon/mcp/monitoring.json   # informational; the workflow uses this fixed path
   window_minutes: 10                   # how long after deploy to look for new errors
+trello:                                # optional; these are the defaults; credentials never go here
+  lists:
+    ready: "Ready"
+    in_progress: "In Progress"
+    review: "Review"
+    test: "Test"
+    blocked: "Blocked"
 secrets:                               # NAMES only. Values come from the environment of the
   - DEPLOY_SSH_KEY_PATH                # machine that runs Archon. Never values.
   - SENTRY_AUTH_TOKEN

@@ -16,7 +16,7 @@ load-profile:
   lint_command: "exit 1"
   build_command: ""
   remote: origin
-  base_branch: main
+  base_branch: develop
   merge_strategy: squash
   deploy_command: "echo deploy"
   health_url: "https://app.example.com/health"
@@ -25,6 +25,7 @@ load-profile:
   monitoring_provider: none
   window_minutes: 10
   secret_names: []
+  manual_merge_bases: ["main"]
 
 # Plan loop, the bundled archon-deliver block and the merge. The deliver
 # include arrives with its own `with:` values, which the simulation does not
@@ -86,7 +87,7 @@ deliver__ci-attention-route: { attention: false, red_cause: "" }
 # pr-state talks to GitHub, so it is stubbed; merge-gate executes for real
 # against it in the scratch worktree of HEAD, where the profile's test
 # command is `true`. The PR's CI has a passing "Lint" check.
-pr-state: { pr_url: "https://github.com/example/repo/pull/3", read: true, head: "fixture-branch", state: "OPEN", is_draft: false, checkout_is_head: true, checkout_clean: true, checks: [{ name: "Lint", bucket: "pass" }, { name: "Tests", bucket: "pass" }], checks_read: true }
+pr-state: { pr_url: "https://github.com/example/repo/pull/3", read: true, head: "fixture-branch", base: "develop", state: "OPEN", is_draft: false, checkout_is_head: true, checkout_clean: true, checks: [{ name: "Lint", bucket: "pass" }, { name: "Tests", bucket: "pass" }], checks_read: true }
 merge: { merged: true, merge_sha: "abc1234", head: "fixture-branch" }
 
 # Deploy and health are stubbed (the scratch worktree has nothing to deploy

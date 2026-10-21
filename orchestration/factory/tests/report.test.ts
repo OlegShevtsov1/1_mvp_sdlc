@@ -6,18 +6,27 @@ const base = {
   deployed: "true", deploy_exit: "0", healthy: "true", last_status: "200",
   health_url: "https://app.example.com/health", monitor_status: "healthy", monitor_findings: "",
   rollback: "false", rolled_back: "skipped", rollback_reason: "", merge_refused: "",
+  merge_action: "merge", merge_base: "develop", notified: "skipped", notify_reason: "",
+};
+
+const pendingOperator = {
+  ...base, merge_action: "notify", merge_base: "main", notified: "true",
+  merged: "skipped", merge_sha: "", deployed: "skipped", deploy_exit: "", healthy: "skipped", last_status: "",
+  monitor_status: "skipped", rollback: "false",
 };
 
 describe("buildReport", () => {
   test("green path is delivered", () => {
     const r = buildReport(base);
     expect(r.delivered).toBe(true);
+    expect(r.status).toBe("delivered");
     expect(r.summary).toContain("https://github.com/o/r/pull/7");
     expect(r.rollback).toBe("not needed");
   });
   test("a refused merge is not delivered and names the refusal", () => {
     const r = buildReport({ ...base, merged: "skipped", merge_sha: "", deployed: "skipped", healthy: "skipped", monitor_status: "skipped", merge_refused: "test command exited 1 on the pull request head; see merge-gate.log" });
     expect(r.delivered).toBe(false);
+    expect(r.status).toBe("not-delivered");
     expect(r.summary).toContain("merge refused");
     expect(r.summary).toContain("test command exited 1");
     expect(r.summary).toContain("https://github.com/o/r/pull/7");
@@ -33,12 +42,14 @@ describe("buildReport", () => {
   test("red health with rollback is not delivered and names the cause", () => {
     const r = buildReport({ ...base, healthy: "false", last_status: "503", monitor_status: "skipped", rollback: "true", rolled_back: "true", rollback_reason: "health check returned 503" });
     expect(r.delivered).toBe(false);
+    expect(r.status).toBe("not-delivered");
     expect(r.summary).toContain("503");
     expect(r.rollback).toBe("done");
   });
   test("failed deploy command is not delivered", () => {
     const r = buildReport({ ...base, deployed: "false", deploy_exit: "2", healthy: "skipped", monitor_status: "skipped" });
     expect(r.delivered).toBe(false);
+    expect(r.status).toBe("not-delivered");
     expect(r.deploy_status).toBe("failed (exit 2)");
   });
   test("a deploy whose health check did not run is not delivered", () => {
@@ -55,5 +66,26 @@ describe("buildReport", () => {
     const r = buildReport({ ...base, monitor_status: "unavailable", monitor_findings: "MCP server not reachable" });
     expect(r.delivered).toBe(true);
     expect(r.monitoring).toContain("unavailable");
+  });
+  test("a green PR into a manual base is delivered pending the operator", () => {
+    const r = buildReport(pendingOperator);
+    expect(r.status).toBe("delivered-pending-operator");
+    expect(r.delivered).toBe(false);
+    expect(r.summary).toContain("https://github.com/o/r/pull/7");
+    expect(r.summary).toContain("ready for the operator");
+    expect(r.summary).toContain("base main is manual");
+    expect(r.summary).toContain("deploy, health and rollback were skipped");
+    expect(r.summary).toContain("The operator was notified on the pull request.");
+    expect(r.merge_sha).toBe("");
+    expect(r.deploy_status).toContain("skipped");
+    expect(r.health).toBe("skipped");
+    expect(r.monitoring).toBe("skipped");
+    expect(r.rollback).toBe("not needed");
+  });
+  test("a pending-operator run whose comment failed says so and stays pending", () => {
+    const r = buildReport({ ...pendingOperator, notified: "false", notify_reason: "gh pr comment failed: HTTP 403" });
+    expect(r.status).toBe("delivered-pending-operator");
+    expect(r.summary).toContain("could not be posted");
+    expect(r.summary).toContain("gh pr comment failed: HTTP 403");
   });
 });

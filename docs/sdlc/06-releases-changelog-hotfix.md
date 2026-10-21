@@ -35,6 +35,17 @@ Delivered by C4 (backend) and C5 (frontend); everything in this section is plann
 - After a prod deploy `release-watch` (planned, C4) checks health and new GlitchTip issues for 10 minutes and posts
   the result to the project's prod topic. **No automatic rollback**: the decision is the operator's.
 
+## This repository (1_mvp_sdlc)
+
+- There is no deploy target. A release is the pull request `develop` → `main`, merged by the operator with a merge
+  commit (decision 54), followed by an annotated tag `vX.Y.Z` on `main`.
+- The number is the `mvp-sdlc` plugin version in `plugins/mvp-sdlc/.claude-plugin/plugin.json`, bumped in a pull
+  request into `develop` after `make eval`.
+- Consumers get the release from `main`: the marketplace `mvp` and `install.sh`.
+- A hotfix is a branch `hotfix/PILOT-<n>-<slug>` from `main` → a pull request into `main` (merged by the operator) and
+  the back-merge pull request into `develop`.
+- The public mirror is synced from the released `main` (decision 55).
+
 ## Hotfix
 
 1. If prod is burning, roll back first: `kamal-manage.yml` `action=rollback` with `confirm=prod`, or

@@ -84,6 +84,29 @@ class TaskBriefTest(TempTestCase):
         self.assertEqual(len(types), 1, types)
         self.assertRegex(types[0], r"^Type: (feat|fix|chore|docs|refactor|test|ci)$")
 
+    def test_brief_names_its_card_once_for_the_factory(self):
+        cards = [line for line in self.brief().stdout.splitlines() if re.match(r"^\s*PILOT-[1-9][0-9]{0,5}:", line)]
+        self.assertEqual(cards, ["  PILOT-42: demo: Monthly order export"])
+
+    def board_line(self, out):
+        lines = [line for line in out.splitlines() if line.startswith("- Board:")]
+        self.assertEqual(len(lines), 1, out)
+        return lines[0]
+
+    def test_brief_states_the_board_flow(self):
+        line = self.board_line(self.brief().stdout)
+        positions = [line.index(name) for name in ("In Progress", "Review", "Test")]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("Blocked", line)
+        self.assertIn("do not move the card by hand", line)
+
+    def test_board_line_uses_renamed_lists(self):
+        profile = self.repo.read(".archon/factory-profile.yaml")
+        self.repo.write(".archon/factory-profile.yaml", profile + 'trello:\n  lists:\n    review: "Code Review"\n')
+        out = self.brief().stdout
+        self.assertIn("Code Review", self.board_line(out))
+        self.assertIn("bin/deploy production", out)
+
     def test_task_type_comes_from_tasks_json(self):
         self.edit_tasks(lambda tasks: tasks["T1"].update(type="fix"))
         self.assertIn("  Type: fix\n", self.brief().stdout)

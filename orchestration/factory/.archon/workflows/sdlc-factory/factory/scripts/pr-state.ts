@@ -9,6 +9,7 @@ interface PrState {
   pr_url: string;
   read: boolean;
   head: string;
+  base: string;
   state: string;
   is_draft: boolean;
   checkout_is_head: boolean;
@@ -49,6 +50,7 @@ function read(): PrState {
     pr_url: PR_URL.test(url) ? url : "",
     read: false,
     head: "",
+    base: "",
     state: "",
     is_draft: false,
     checkout_is_head: false,
@@ -59,9 +61,11 @@ function read(): PrState {
   if (!PR_URL.test(url)) return unread;
 
   // The URL is the selector, so gh infers no repository from the checkout.
-  const view = capture(["gh", "pr", "view", url, "--json", "headRefOid,headRefName,isDraft,state"]);
+  const view = capture(["gh", "pr", "view", url, "--json", "headRefOid,headRefName,isDraft,state,baseRefName"]);
   const pr = view.ok ? parseJsonObject(view.out) : null;
-  if (!pr || typeof pr.headRefOid !== "string" || typeof pr.headRefName !== "string") return unread;
+  if (!pr || typeof pr.headRefOid !== "string" || typeof pr.headRefName !== "string" || typeof pr.baseRefName !== "string") {
+    return unread;
+  }
 
   const checkout = capture(["git", "rev-parse", "HEAD"]);
   // Untracked files are ignored: Archon scaffolds an untracked .archon/ in every run.
@@ -70,6 +74,7 @@ function read(): PrState {
     pr_url: url,
     read: true,
     head: pr.headRefName,
+    base: pr.baseRefName,
     state: String(pr.state),
     is_draft: pr.isDraft !== false,
     checkout_is_head: checkout.ok && checkout.out === pr.headRefOid,

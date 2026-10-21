@@ -6,9 +6,23 @@ Course basis: GitHub Flow (M9.1), pull requests (M9.4), code review (M9.5).
 
 Two models, by repository (decisions 24–29):
 
-- **The develop model**: `1_mvp_pilot_be`, `1_mvp_pilot_fe` and every project made from the S4 templates.
-- **GitHub Flow** (R-C8.1): `1_mvp_sdlc`, `1_mvp_infra`, `1_mvp_prompt`. A branch `feat/...` or `fix/...` (docs PRs:
+- **The develop model**: `1_mvp_pilot_be`, `1_mvp_pilot_fe`, every project made from the S4 templates, and
+  `1_mvp_sdlc` (decision 54).
+- **GitHub Flow** (R-C8.1): `1_mvp_infra`, `1_mvp_prompt`. A branch `feat/...` or `fix/...` (docs PRs:
   `docs/...`) → pull request → squash merge into `main`. The develop-model conventions below do not apply there.
+
+### Every change via a pull request
+
+Decision 54: every change in every repository goes through a pull request; there are no direct pushes to a working
+or release branch. That covers `develop`, `main` and `env/dev` of the primary repositories; `develop` and `main` of
+the public mirrors (decision 51: the sync goes mirror `develop` → PR → mirror `main`; the one sync commit on mirror
+`develop` is the documented exception, which is why `develop-guard` is off there); `env/dev` and `env/prod` of the
+infrastructure mirror; and `main` of the planning repository. An agent's manual fix is a commit on the branch of an
+open pull request.
+
+Not a change, so allowed without a pull request: creating a branch from an existing commit (for example `develop`
+itself), the first commit of an empty new repository (with the operator's OK, see "Protection of `main`" below), and
+pushing an annotated release tag.
 
 ### The develop model
 
@@ -41,6 +55,18 @@ Two models, by repository (decisions 24–29):
   ([00-operator.md](00-operator.md), step 8); only from an annotated tag on `main` once the release workflow ships
   (planned, C4 and C5).
 
+### In this repository (1_mvp_sdlc)
+
+- Factory branches `archon/task-factory-*` and human branches `feature/PILOT-<n>-<slug>` or
+  `hotfix/PILOT-<n>-<slug>` go into `develop`.
+- `main` is what the marketplace `mvp` and `install.sh` users read; it stays the default branch.
+- A release is a pull request `develop` → `main` (title `PILOT-<n>: …`, `Type: chore`, head `develop`) that the
+  operator merges with a merge commit, then the annotated tag `vX.Y.Z` equal to the `mvp-sdlc` version
+  ([06-releases-changelog-hotfix.md](06-releases-changelog-hotfix.md)).
+- No deploy, no Dev Deploy and no `tdd-check.yml` here. The checks are `ci.yml`, `pr-conventions-check.yml`
+  (`scripts/ci/pr-conventions.sh`), `develop-guard.yml` and `main-guard.yml` (`scripts/ci/main-guard.sh`, alerts to
+  `MVP_VPN_ALERTS`).
+
 ### The checks that enforce it
 
 - `pr-conventions-check.yml` (decision 29), the authoritative gate, on every pull request into `develop` or `main`:
@@ -48,7 +74,8 @@ Two models, by repository (decisions 24–29):
   when the base is `main`; (2) the title matches `^PILOT-[0-9]+: .+$`; (3) the body has exactly one line starting
   with `Type:` and its value is one of the seven types.
 - `develop-guard.yml`: the twin of `main-guard.yml` for `develop` (decision 27); every commit pushed to `develop`
-  must come from a merged pull request, else a Telegram alert.
+  must come from a merged pull request, else a Telegram alert. Skipped where the repository variable `MIRROR` is
+  `true` (the public mirrors, decision 51).
 - `main-guard.yml`: the same for `main` (see "Protection of `main`" below).
 - `tdd-check.yml`: the order of the TDD commits and RED on the test commit (R-C3). Decision 27 needs it on
   feature/hotfix → `develop` and hotfix → `main`, not on the release pull request; today it runs on every pull
@@ -77,11 +104,12 @@ it with their brownfield start (C2, C3) and new projects from the templates in
 - **Task PRs (code)**: the factory merges automatically after the operator approved the task plan (gate 2), CI is
   green and its review passed; in the app repositories they go into `develop`. Only the dev deploy follows
   automatically; prod always needs a typed confirm and a ref check (R-C1).
-- **PRs with base `main` in the app repositories** (the release `develop` → `main`, a hotfix into `main`) and the
+- **PRs with base `main` in the develop-model repositories, `1_mvp_sdlc` included** (the release `develop` → `main`, a hotfix into `main`) and the
   hotfix back-merge into `develop`: the operator merges by hand; a pull request with base `main` is never merged
-  automatically (decision 27). This holds because the factory profile's `base_branch` is `develop` and these pull
-  requests are opened by people. `repo.manual_merge_bases: ["main"]` in `.archon/factory-profile.yaml` of the app
-  repositories records the rule, but the factory engine does not read that key yet.
+  automatically (decision 27). The factory enforces it through `repo.manual_merge_bases: ["main"]` in
+  `.archon/factory-profile.yaml` of the develop-model repositories (an absent key means `["main"]`): a green pull request into
+  a listed base is not merged, the factory comments on it for the operator, and the run ends
+  `delivered-pending-operator`.
 - **Docs PRs (feature artifacts)**: the operator merges by hand; that merge is part of the gate (R-C8.9).
 - **RULE-LOOP**: if the auto-review misses a P0/P1 finding twice in a row (found later), tasks labelled `migration`,
   `auth` or `security` switch to manual merge (R-C1, variant c) and their review to the large model (R-C12); the
@@ -106,11 +134,10 @@ Until publication there is no GitHub branch protection (private repositories); `
 2. the same commands in `permissions.deny` of the committed `.claude/settings.json`;
 3. the `main-guard.yml` workflow: on every push to `main` it checks through the GitHub API that the commit came from
    a merged pull request, and alerts a Telegram topic otherwise (after the fact: a push cannot be blocked
-   technically this way). It runs in this repository and in both app repositories; there `develop-guard.yml` does
-   the same for `develop`;
-4. after PUB, for `1_mvp_sdlc`, `1_mvp_pilot_be` and `1_mvp_pilot_fe`: real branch protection on `main`, and in the
-   app repositories also on `develop` (required checks, no direct pushes; linear history on `main` only in
-   `1_mvp_sdlc`, since the release pull request is a merge commit) on top of layers 1–3.
+   technically this way). It runs in this repository and in both app repositories, and `develop-guard.yml` does
+   the same for `develop` in all three;
+4. after PUB, for `1_mvp_sdlc`, `1_mvp_pilot_be` and `1_mvp_pilot_fe`: real branch protection on `main` and on
+   `develop` (required checks, no direct pushes) on top of layers 1–3.
 
 The one exception is the first commit of an empty new repository: a direct push, with the operator's explicit OK.
 Stop-hooks that run the tests are not used (an anti-pattern, M5.4); the quality gate is blocking CI (R-C8.12).

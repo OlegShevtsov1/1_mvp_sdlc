@@ -56,7 +56,7 @@ function run(repo: string, env: Record<string, string>): Result {
 }
 
 function prJson(head: string, extra: Record<string, unknown> = {}): string {
-  return JSON.stringify({ headRefOid: head, headRefName: "feature-x", isDraft: false, state: "OPEN", ...extra });
+  return JSON.stringify({ headRefOid: head, headRefName: "feature-x", isDraft: false, state: "OPEN", baseRefName: "develop", ...extra });
 }
 
 const DELIVERY = JSON.stringify({ pr_url: PR_URL });
@@ -74,6 +74,7 @@ describe("pr-state", () => {
       pr_url: PR_URL,
       read: true,
       head: "feature-x",
+      base: "develop",
       state: "OPEN",
       is_draft: false,
       checkout_is_head: true,
@@ -82,14 +83,14 @@ describe("pr-state", () => {
       checks_read: true,
     });
     const args = readFileSync(join(r.bin, "gh.args"), "utf8");
-    expect(args).toContain(`pr view ${PR_URL} --json headRefOid,headRefName,isDraft,state`);
+    expect(args).toContain(`pr view ${PR_URL} --json headRefOid,headRefName,isDraft,state,baseRefName`);
     expect(args).toContain(`pr checks ${PR_URL} --json name,bucket`);
   });
 
   test("Archon v0.11.1 delivery ({pr_url}) reads the PR", () => {
     const { repo, head } = newRepo();
     const r = run(repo, { INPUTS_DELIVERY: DELIVERY, FAKE_GH_JSON: prJson(head) });
-    expect(r.doc).toMatchObject({ pr_url: PR_URL, read: true, head: "feature-x" });
+    expect(r.doc).toMatchObject({ pr_url: PR_URL, read: true, head: "feature-x", base: "develop" });
   });
 
   test("a delivery with no GitHub pull request URL never calls gh", () => {
@@ -104,7 +105,13 @@ describe("pr-state", () => {
   test("an unreadable pull request is reported unread", () => {
     const { repo, head } = newRepo();
     const r = run(repo, { INPUTS_DELIVERY: DELIVERY, FAKE_GH_JSON: prJson(head), FAKE_GH_EXIT: "1" });
-    expect(r.doc).toMatchObject({ pr_url: PR_URL, read: false, head: "" });
+    expect(r.doc).toMatchObject({ pr_url: PR_URL, read: false, head: "", base: "" });
+  });
+
+  test("a pull request whose base branch is missing is reported unread", () => {
+    const { repo, head } = newRepo();
+    const r = run(repo, { INPUTS_DELIVERY: DELIVERY, FAKE_GH_JSON: prJson(head, { baseRefName: undefined }) });
+    expect(r.doc).toMatchObject({ pr_url: PR_URL, read: false, head: "", base: "" });
   });
 
   test("a draft or not-open pull request is reported as such", () => {

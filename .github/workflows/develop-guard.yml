@@ -1,0 +1,40 @@
+name: develop-guard
+
+# The twin of main-guard.yml for develop (decisions 27, 54): every commit on develop must come
+# from a merged pull request (scripts/ci/main-guard.sh, which alerts Telegram otherwise). Off in
+# the public mirrors, where the repository variable MIRROR is true: the mirror sync commit lands
+# on mirror develop directly (decision 51).
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "commit on develop to check; default = the pushed commit"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  guard:
+    name: Commit on develop came from a merged PR
+    if: vars.MIRROR != 'true'
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the commit's pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ inputs.sha || github.sha }}
+          BRANCH: develop
+          TELEGRAM_MVP_VPN_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_MVP_VPN_ALERTS_BOT_TOKEN }}
+          TELEGRAM_MVP_VPN_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_MVP_VPN_ALERTS_CHAT_ID }}
+          TELEGRAM_MVP_VPN_ALERTS_THREAD_ID: ${{ secrets.TELEGRAM_MVP_VPN_ALERTS_THREAD_ID }}
+        run: bash scripts/ci/main-guard.sh

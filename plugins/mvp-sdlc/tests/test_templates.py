@@ -2,10 +2,14 @@
 import json
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
 from support import PLUGIN
+
+sys.path.insert(0, str(PLUGIN / "lib"))
+import sdlc_common  # noqa: E402
 
 TEMPLATES = PLUGIN / "templates" / "claude"
 KINDS = ("be", "fe")
@@ -37,7 +41,14 @@ FILE_DENY = {
         "Write(docs/features/*/state.json)",
     ),
 }
+BOARD_FLOW_ANCHOR = "03-dor-dod.md#board-flow"
+BOARD_NAMES = dict(sdlc_common.BOARD_LISTS)
 BASH_HOOKS = ("block-main-push", "block-destructive-git", "block-env", "block-state-edit")
+
+
+def arrow_flow(text):
+    """The list names of an `A → B → (C) → D` flow written in prose, in order."""
+    return [name.strip(" ()`") for name in " ".join(text.split()).split("→")]
 
 
 def settings(kind):
@@ -59,6 +70,19 @@ class TemplatesTest(unittest.TestCase):
                 for bullet in bullets:
                     self.assertRegex(bullet, r"(?m)^\s+Why: \S", bullet)
                 self.assertNotRegex(text, r"\{\{|TODO|TBD")
+                self.assertIn("## Board flow", lines)
+                section = text.split("## Board flow", 1)[1].split("\n## ", 1)[0]
+                self.assertIn(BOARD_FLOW_ANCHOR, section)
+                flow = re.search(r"`([^`]*→[^`]*)`", section)
+                self.assertIsNotNone(flow, section)
+                self.assertEqual(arrow_flow(flow.group(1)), list(BOARD_NAMES.values()))
+        git_rules = (TEMPLATES / "rules" / "git.md").read_text(encoding="utf-8")
+        board = re.search(r"(?ms)^- Board flow:.*?(?=^- |\Z)", git_rules)
+        self.assertIsNotNone(board, git_rules)
+        self.assertIn(BOARD_FLOW_ANCHOR, board.group(0))
+        moves = re.search(r"\(([^)]*→[^)]*)\)", board.group(0))
+        self.assertIsNotNone(moves, board.group(0))
+        self.assertEqual(arrow_flow(moves.group(1)), [BOARD_NAMES[key] for key in ("in_progress", "review", "test")])
 
     def test_settings_templates(self):
         for kind in KINDS:

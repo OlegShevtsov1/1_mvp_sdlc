@@ -116,6 +116,15 @@ Checks on pull requests: Front CI, `tdd-check` (the first commit of a code chang
 `test(...)`), `pr-conventions-check`, `changelog-check` and, when enabled, `ai-review`.
 `main-guard` and `develop-guard` check that every commit on `main`/`develop` came from a merged PR.
 
+## Board flow
+
+The project's Trello board has nine lists, in this order: `Backlog`, `Ready`, `In Progress`, `Review`, `Test`,
+`Blocked`, `Ready to Release`, `Test after Release`, `Done`. The operator moves a card to `Ready` once the
+Definition of Ready is met; from there the harness moves it (the factory to `In Progress`, `Review` and `Test`;
+post-merge and the release runs onward); `Blocked` holds a card that waits for the operator or something
+external. A renamed list goes under `trello.lists` in `.archon/factory-profile.yaml`. Who moves the card at each
+step: [Board flow](https://github.com/OlegShevtsov1/1_mvp_sdlc/blob/{{SDLC_VERSION}}/docs/sdlc/03-dor-dod.md#board-flow).
+
 ## Deploy
 
 - Dev: Dev Deploy ([`.github/workflows/dev-deploy.yml`](.github/workflows/dev-deploy.yml)) builds

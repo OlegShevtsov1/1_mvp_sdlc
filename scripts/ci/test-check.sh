@@ -13,6 +13,10 @@ while read -r c; do
 done <<<"${checks}"
 echo "PASS the workflows run every check.sh check"
 
+[ "$(grep -cxF '    branches: [develop, main]' "${workflows}/ci.yml")" -eq 2 ] \
+  || fail "ci.yml" "must run on pull requests into and pushes to develop and main"
+echo "PASS CI runs on pull requests into and pushes to develop and main"
+
 rc=0
 bash "${here}/check.sh" no-such-check 2>/dev/null || rc=$?
 [ "${rc}" -eq 2 ] || fail "unknown check" "exit ${rc}, want 2"

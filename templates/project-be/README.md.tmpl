@@ -70,6 +70,15 @@ Short version; the rules are in `CLAUDE.md` ("Conventions", "Hard Rules").
   then back-merged into `develop` with a merge commit.
 - Published `v*` tags are never moved or deleted (`.githooks/pre-push`).
 
+## Board flow
+
+The project's Trello board has nine lists, in this order: `Backlog`, `Ready`, `In Progress`, `Review`, `Test`,
+`Blocked`, `Ready to Release`, `Test after Release`, `Done`. The operator moves a card to `Ready` once the
+Definition of Ready is met; from there the harness moves it (the factory to `In Progress`, `Review` and `Test`;
+post-merge and the release runs onward); `Blocked` holds a card that waits for the operator or something
+external. A renamed list goes under `trello.lists` in `.archon/factory-profile.yaml`. Who moves the card at each
+step: [Board flow](https://github.com/OlegShevtsov1/1_mvp_sdlc/blob/{{SDLC_VERSION}}/docs/sdlc/03-dor-dod.md#board-flow).
+
 ## Beszel agent (prod host monitoring)
 
 `config/deploy.yml` has the accessory `beszel-agent` (`henrygd/beszel-agent:0.21.0`, host network, listens on

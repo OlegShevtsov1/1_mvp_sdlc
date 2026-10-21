@@ -6,7 +6,7 @@ Course lessons are cited in the Source column (M<n>.<n>).
 
 | # | Contradiction | Decision | Source |
 |---|---|---|---|
-| 1 | GitHub Flow or trunk-based | **GitHub Flow**: branch `feat/...` or `fix/...` → PR → merge; changed by decision 24 for the app repositories: see [05-git-pr-review.md](05-git-pr-review.md) (GitHub Flow stays for the other repositories) | M9.1 |
+| 1 | GitHub Flow or trunk-based | **GitHub Flow**: branch `feat/...` or `fix/...` → PR → merge; changed by decision 24 for the app repositories: see [05-git-pr-review.md](05-git-pr-review.md) (GitHub Flow stays for `1_mvp_infra` and `1_mvp_prompt`; `1_mvp_sdlc` moved to the develop model by decision 54) | M9.1 |
 | 2 | Merge strategy | **Squash** (see R-C3); changed by decisions 24 and 25 for the app repositories: the release PR `develop` → `main` is a merge commit and the squash subject is `PILOT-<n>: <card title>`, see [05-git-pr-review.md](05-git-pr-review.md) | M9.1, M9.4 |
 | 3 | `/sdlc:<skill>` or `/sdlc-<skill>` | the docs write `/sdlc:<skill>` (plugin namespace); the `/sdlc-...` trigger phrases work too | M5.5 |
 | 4 | Size of `CLAUDE.md` | at most 200 lines, ideally 100–150 | M4.4 |
@@ -40,7 +40,7 @@ Where each one is applied:
 | R-C7 | process metrics | [09-metrics.md](09-metrics.md) |
 | R-C9 | versions, releases, hotfix | [06-releases-changelog-hotfix.md](06-releases-changelog-hotfix.md) |
 | R-C10 | the pilot feature: **deferred**, chosen right before C7; blocks only C7–C9 | [00-operator.md](00-operator.md#not-decided-yet) |
-| R-C11 | Trello flow: one board per project, six lists, labels, one card per feature | [00-model.md](00-model.md#phases-and-gates-for-the-pilot) |
+| R-C11 | Trello flow: one board per project, nine lists since decision 53, labels, one card per feature | [00-model.md](00-model.md#phases-and-gates-for-the-pilot) |
 | R-C12 | model tiers | [11-models.md](11-models.md) |
 | R-C13 | publication: three repositories public after C9 (PUB), two private | [README.md](README.md#publication-and-language) |
 | R-C14 | no internal IPs, hostnames or IDs committed, from the first commit | [README.md](README.md#publication-and-language) |

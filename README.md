@@ -61,6 +61,7 @@ This repository is the Claude Code plugin marketplace `mvp` (`.claude-plugin/mar
   rollback → report), imported with its history; its own [README](orchestration/factory/README.md) describes it.
 - `orchestration/workflows/` holds the single-file workflows `plan-review` and `plugin-probe`.
 - `./install.sh` installs all of them into `~/.archon/workflows`, backing up what it replaces, and validates them.
+  Install from `main` for production, from `develop` to test a change.
 - The operator guide — requirements, install and rollback, tasks, gates, results, troubleshooting — is
   [orchestration/docs/archon-factory.md](orchestration/docs/archon-factory.md).
 - The `mvp-ops` post-merge pack (operator steps after a merge) is versioned in a private planning repository.
@@ -77,6 +78,19 @@ bin/render-template <be|fe> <name> <dest>
 
 which fills in the project name and the values derived from it. Sources, placeholders, checks, the differences from
 the pilot workflows and the update procedure: [templates/README.md](templates/README.md).
+
+## Branches and releases
+
+- `develop` is the working branch: factory and task PRs merge there, and changes are tested from it (`install.sh`,
+  `make eval`).
+- `main` is the released plugins and factory. It stays the default branch, which marketplace consumers read; install
+  the factory from `main`.
+- A release is a PR `develop → main` that the operator merges with a merge commit, followed by an annotated tag
+  `vX.Y.Z` equal to the `mvp-sdlc` version in `plugins/mvp-sdlc/.claude-plugin/plugin.json`.
+- Every change goes through a PR, no direct pushes (decision 54). `pr-conventions-check.yml` checks the branch name,
+  the `PILOT-<n>: …` title and the single `Type:` line of every PR into `develop` and `main`.
+
+Details: [docs/sdlc/05-git-pr-review.md](docs/sdlc/05-git-pr-review.md).
 
 ## Checks
 
@@ -116,11 +130,13 @@ there, and the backend `Gemfile`, `Gemfile.lock` and `config/brakeman.ignore` ma
 in CI. It needs Claude Code (logged in), `bwrap`, `socat` and `make`. Details:
 [plugins/mvp-sdlc/evals/README.md](plugins/mvp-sdlc/evals/README.md).
 
-## main-guard
+## main-guard and develop-guard
 
 `.github/workflows/main-guard.yml` runs on every push to `main` and checks, through the GitHub API, that the commit
 came from a merged pull request. If not, the run fails and an alert goes to the `MVP_VPN_ALERTS` Telegram topic.
-Check any commit by hand with `gh workflow run main-guard.yml -f sha=<commit>`.
+Check any commit by hand with `gh workflow run main-guard.yml -f sha=<commit>`. `.github/workflows/develop-guard.yml`
+does the same for `develop` (`gh workflow run develop-guard.yml -f sha=<commit>`); it is skipped in a repository whose
+variable `MIRROR` is `true` (the public mirrors, decision 51).
 
 Without the repository secrets `TELEGRAM_MVP_VPN_ALERTS_BOT_TOKEN`, `TELEGRAM_MVP_VPN_ALERTS_CHAT_ID` and
 `TELEGRAM_MVP_VPN_ALERTS_THREAD_ID` the Telegram alert is skipped and a violation only shows up as a failed run.
@@ -128,8 +144,15 @@ Without the repository secrets `TELEGRAM_MVP_VPN_ALERTS_BOT_TOKEN`, `TELEGRAM_MV
 ## Public mirrors
 
 The public mirrors `OlegShevtsov1/1_mvp_sdlc`, `OlegShevtsov1/1_mvp_pilot_be` and `OlegShevtsov1/1_mvp_pilot_fe` are
-refreshed by `scripts/publish-mirror.sh`, run by hand from the operator host: one commit per sync, no primary history,
-no Dependabot config. Details: [scripts/publish-mirror.README.md](scripts/publish-mirror.README.md).
+refreshed by `scripts/publish-mirror.sh`, run by hand from the operator host: one commit per sync on the mirror's
+`develop`, merged into `main` through a PR, release tags carried, no primary history, no Dependabot config. Details: [scripts/publish-mirror.README.md](scripts/publish-mirror.README.md). All three mirrors (`1_mvp_sdlc`, `1_mvp_pilot_be`, `1_mvp_pilot_fe`) have a `develop` branch and the repository
+variable `MIRROR=true`, which switches `develop-guard` off on the mirror (decisions 51, 55).
+
+## Prod infra copy
+
+`scripts/publish-prod-infra.sh` proposes the pilot prod Terraform root from the primary infra repo's `env/dev` to
+`OlegShevtsov1/1_mvp_infra` `env/prod` as a PR, which the operator merges after reviewing a plan (decision 46). It is
+run by hand from the operator host. Details: [scripts/publish-prod-infra.README.md](scripts/publish-prod-infra.README.md).
 
 ## License
 

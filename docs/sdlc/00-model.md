@@ -17,7 +17,7 @@
   committed before the code, tests do not change after that, roles are isolated, the gate is deterministic, "done" is
   not decided by the implementer, and iteration and cost limits are hard (M7.1, M7.7).
 - **Git**: GitHub Flow, Conventional Commits with `Co-Authored-By`, small PRs, a human merges; the app repositories
-  use the develop model instead of GitHub Flow (decision 24, [05-git-pr-review.md](05-git-pr-review.md)). AI review does not
+  and `1_mvp_sdlc` use the develop model instead of GitHub Flow (decisions 24, 54, [05-git-pr-review.md](05-git-pr-review.md)). AI review does not
   block a merge; findings are P0/P1/P2. For releases a script decides the version number, the agent explains, a
   human confirms (M9.1, M9.7).
 - **Agents in production**: least-privilege tools, evals as tests of the agent configuration, every agent input is
@@ -50,9 +50,12 @@ Course phase, feature size, who does what, the artifact and where it lives, the 
 | 4. Contracts | S, M+ | `/mvp-sdlc:rails-data-model`, `/sdlc:api-forge`, `/sdlc:break-tasks` (M+), `/sdlc:plan-tests` | be: `data-model.md`, `migrations/*.rb` (staged), `contracts/openapi.yaml` (checked against `swagger/v1`), `tasks/tasks.json` and `tasks/tracker.md`, `test-plan.md`; fe: `/mvp-sdlc:sync-spec` + the frontend's own `tasks/` | **DoR** ([03-dor-dod.md](03-dor-dod.md)) met; PR merged | `Ready` |
 | 5. Code | all | factory, one task per run: `archon workflow run factory --cwd <repo> "<task-brief output>"` | code, tests, `tracker.md` row → `done`, in the same PR | factory gate 2: plan approved; then automatic merge (R-C1) | `In Progress` |
 | 6. Review | all; M+ also per feature | factory review (lenses) on every PR; at the end of the feature `/sdlc:review-feature` | `_review/review-<date>.md` | PASS, no P0/P1 | `Review` |
-| 7. QA | all | CI (rspec, rubocop, brakeman, bundler-audit, gitleaks; fe: lint, build) + deploy to dev + `project-e2e.sh` | E2E report, CI logs | deterministic: everything green | `Review` |
-| 8. Docs and deploy | release | `/sdlc:ship-feature` (CHANGELOG + PR body; never merges), tag `vX.Y.Z` by a human, prod: `kamal-deploy.yml` with a typed confirm | `CHANGELOG.md`, draft Release, `docs/` | **DoD** ([03-dor-dod.md](03-dor-dod.md)) | `Done` |
+| 7. QA | all | CI (rspec, rubocop, brakeman, bundler-audit, gitleaks; fe: lint, build) + deploy to dev + `project-e2e.sh` | E2E report, CI logs | deterministic: everything green | `Test` |
+| 8. Docs and deploy | release | `/sdlc:ship-feature` (CHANGELOG + PR body; never merges), tag `vX.Y.Z` by a human, prod: `kamal-deploy.yml` with a typed confirm | `CHANGELOG.md`, draft Release, `docs/` | **DoD** ([03-dor-dod.md](03-dor-dod.md)) | `Ready to Release` → `Test after Release` → `Done` |
 | 9. Monitoring | release | `release-watch` (10 min; planned, C4), Gatus, GlitchTip → Telegram | release execution log, metrics (R-C7) | no new prod issues in the window; otherwise a hotfix | a new `hotfix` or `feature` card |
+
+The lists follow decision 53 (`Blocked` at any phase while the work waits for the operator); who moves the card
+at each step is in [the Board flow](03-dor-dod.md#board-flow).
 
 **XS** (a small change, config, text): a card with acceptance criteria in GWT and the DoD → straight to phase 5
 (R-C8.7).

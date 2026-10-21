@@ -7,6 +7,7 @@
 # a validation error exits 1.
 # Knobs: ARCHON_HOME (default ~/.archon), ARCHON_BIN (default archon),
 # INSTALL_SKIP_RUNTIME_TOOLS=1 skips the gh/claude checks (needed to run workflows, not to install them).
+# Install from `main` for production; check out `develop` to test a change before it is released.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARCHON_HOME="${ARCHON_HOME:-${HOME}/.archon}"

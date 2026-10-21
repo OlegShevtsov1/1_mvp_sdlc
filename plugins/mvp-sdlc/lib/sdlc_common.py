@@ -1,6 +1,7 @@
 """Shared helpers of the mvp-sdlc scripts, bin commands and hooks. Stdlib only, Python >= 3.8."""
 import importlib.machinery
 import importlib.util
+import json
 import re
 import subprocess
 import sys
@@ -28,6 +29,23 @@ STAGES = (
 STAGE_RANK = {stage: rank for rank, group in enumerate(STAGES) for stage in group}
 
 FEATURES_DIR = Path("docs") / "features"
+FACTORY_PROFILE = Path(".archon") / "factory-profile.yaml"
+
+# Decision 53: the board lists in flow order; a project renames them under `trello.lists` in the factory profile,
+# with the keys the factory reads.
+BOARD_LISTS = (
+    ("backlog", "Backlog"),
+    ("ready", "Ready"),
+    ("in_progress", "In Progress"),
+    ("review", "Review"),
+    ("test", "Test"),
+    ("blocked", "Blocked"),
+    ("ready_to_release", "Ready to Release"),
+    ("test_after_release", "Test after Release"),
+    ("done", "Done"),
+)
+BOARD_KEYS = tuple(key for key, _ in BOARD_LISTS)
+PAST_READY = BOARD_KEYS[BOARD_KEYS.index("ready") + 1:]
 
 
 def valid_slug(value):
@@ -67,6 +85,55 @@ def frontmatter(text):
                 value = value[1:-1]
             meta[match.group(1)] = value
     return meta
+
+
+def yaml_scalar(value):
+    """A YAML block-style scalar: double-quoted (JSON escapes), single-quoted, or plain with a `# ...` comment."""
+    value = value.strip()
+    if value.startswith('"'):
+        return json.loads(value[:value.rindex('"') + 1])
+    if value.startswith("'"):
+        return value[1:value.rindex("'")].replace("''", "'")
+    return re.sub(r"\s+#.*$", "", value).strip()
+
+
+def yaml_block(lines, header):
+    """The lines indented under the first line matching `header`, up to the next line at its indentation or less."""
+    for index, line in enumerate(lines):
+        match = re.match(header, line)
+        if match:
+            indent = len(match.group(1))
+            block = []
+            for inner in lines[index + 1:]:
+                if not inner.strip() or inner.lstrip().startswith("#"):
+                    continue
+                if len(inner) - len(inner.lstrip()) <= indent:
+                    break
+                block.append(inner)
+            return block
+    return []
+
+
+def board_lists(root):
+    """{key: list name} of BOARD_LISTS with the renames under `trello.lists` in the repo's factory profile.
+    A missing or unreadable profile, an unknown key, an empty value or a flow-style map keeps the default."""
+    lists = dict(BOARD_LISTS)
+    try:
+        lines = (Path(root) / FACTORY_PROFILE).read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return lists
+    trello = yaml_block(lines, r"^()trello:\s*(#.*)?$")
+    for line in yaml_block(trello, r"^(\s+)lists:\s*(#.*)?$"):
+        match = re.match(r"^\s+([a-z_]+):\s*(.*)$", line)
+        if not match or match.group(1) not in lists:
+            continue
+        try:
+            name = yaml_scalar(match.group(2)).strip()
+        except ValueError:
+            continue
+        if name:
+            lists[match.group(1)] = name
+    return lists
 
 
 def run(args, cwd=None, input_text=None):

@@ -15,3 +15,7 @@
 # placeholder that keeps `archon validate` able to resolve the factory's `monitor` node.
 /.archon/mcp/*
 !/.archon/mcp/monitoring.json
+
+# Python bytecode (Archon v0.12.1 refuses untracked files a read-only review node leaves behind)
+__pycache__/
+*.pyc

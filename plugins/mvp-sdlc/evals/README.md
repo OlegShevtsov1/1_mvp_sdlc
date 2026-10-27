@@ -20,10 +20,12 @@ case, so one pair proves both that the plugin works and that the graders see the
 | `rails-data-model-no-sql` | skill `rails-data-model` | the skill is SQL-first throughout (rule, steps, template; no migrations rule installed): `schema.sql` instead of staged migrations |
 | `rails-data-model-expand-contract` | skill `rails-data-model` | existing tables change in one migration throughout (rules, steps, template; no migrations rule installed): no backfill or contract step |
 | `task-brief-ac` | skill `task-brief`, `bin/task-brief` | the three-commit rule and the commit trailers are dropped from the brief |
-| `task-brief-split-large` | skill `task-brief`, `bin/task-brief` | the size check is skipped: a task estimated `L` gets a brief |
+| `task-brief-split-large` | skill `task-brief`, `bin/task-brief` | the size check is skipped: a task estimated `XL` gets a brief |
+| `task-brief-consults-rag` | skill `task-brief`, server `mvp-rag` | the mvp-rag step is removed: no search call, no cited source |
 | `sync-spec-stale` | skill `sync-spec`, `bin/sync-spec` | `--check` no longer reports a changed source file, so the stale copy stays |
 | `bootstrap-project-idempotent` | skill `bootstrap-project`, `bin/bootstrap-project` | a differing file is overwritten without `--overwrite`: the team's `CLAUDE.md` is lost (the team's `CLAUDE.md` is untracked, so git cannot restore it) |
 | `feature-start` (no case) | skill `feature-start`, `bin/feature-start` | covered deterministically by `tests/test_feature_start.py` (foreign board, unknown or archived card, card in progress or done, untrusted block); the LLM prompt-injection case needs a Trello stub — not in C6 |
+| `task-cards` (no case) | skill `task-cards`, `bin/task-cards` | covered deterministically by `tests/test_task_cards.py` (create, adopt, never duplicate, partial failure, dry run, refusals, untrusted card text never printed); needs a Trello stub — no LLM case |
 
 The `sdlc-gate-blocks-unapproved` prompt starts with the operator-typed `/sdlc:write-prd demo`, gated on
 `UserPromptSubmit` before any model turn; the course plugin is not loaded. Its first instruction creates
@@ -46,6 +48,12 @@ model-invoked `Skill` path is covered by `tests/test_sdlc_gate.py`.
 - Pushes cannot be graded directly, so the hook cases use **ledger files**: a server-side `update` hook in the
   scaffolded `origin.git` appends every updated ref (`push-log.txt`) or every deleted or rewritten ref
   (`rewrite-log.txt`) to a file in the workspace.
+- **Mocks.** An MCP server the plugin declares (`.mcp.json`) never runs in an eval: the CLI answers each of its
+  tools from `mocks/<server>/<tool>.md` (frontmatter `type: fixed`, the body is the answer) and lists the tools from
+  `mocks/<server>/_tools.json`. The mocks are shared by every case; a case can call a tool only where its
+  `allowed_tools` grants it. The CLI records each run's calls of mocked tools (`mocks.calls`), which is how
+  `task-brief-consults-rag` proves the skill searched (see Running the evals). The CLI ignores an `.mcp.json` the
+  scaffold writes into the workspace.
 - `<case>/states/green.sh` and `<case>/states/red.sh` — the end state a working and a broken configuration leave.
   The CLI ignores them; the deterministic tests run them to prove the graders pass GREEN and fail RED. They may
   call the plugin's commands through `EVAL_PLUGIN` (the plugin root).
@@ -82,15 +90,17 @@ make eval EVAL_JOBS=4 EVAL_MAX_COST_USD=20
 
 `make eval` runs `scripts/evals.py run`: one GREEN invocation over all cases on a copy of the plugin, then one RED
 invocation per case on a patched copy, with `--ablation none --no-publish --trust-plugin --scaffold --allow-tools
-Bash Write Edit --threshold 1`. `EVAL_MAX_COST_USD` (default 40) is the budget for the whole run; when it runs out
-the remaining invocations are skipped and the results are incomplete. A full run is about 60 agent runs. Raw
-output stays in `.eval-runs/<version>/` (gitignored: it holds local paths and traces).
+Bash Write Edit mcp__plugin_mvp-sdlc_mvp-rag__search --threshold 1`. `EVAL_MAX_COST_USD` (default 40) is the budget
+for the whole run; when it runs out the remaining invocations are skipped and the results are incomplete. A full run
+is about 66 agent runs. Raw output stays in `.eval-runs/<version>/` (gitignored: it holds local paths and traces).
 
 `eval/results/<version>.json` holds, per case, the GREEN and RED run counts, passes, errors, turns, duration and
 cost, and the verdict. A case is PASS only when GREEN passed 3 of 3 and RED failed 3 of 3, **every run without an
 error**: a run that errored (sandbox refusal, timeout) never counts as passed, even when the CLI scored it 1. A RED
-run that passes even once means the case does not discriminate: FAIL. The overall verdict is PASS when every
-included case is PASS and every invocation produced a result.
+run that passes even once means the case does not discriminate: FAIL. A case in `TOOL_CALL_CASES` of
+`scripts/evals.py` (`task-brief-consults-rag`) also asserts the tool-call log: a run counts as passed only when it
+called a mocked tool at least once without an error (`mocks.calls.total` ≥ 1, `mocks.calls.errors` 0). The overall
+verdict is PASS when every included case is PASS and every invocation produced a result.
 
 ## Rules
 

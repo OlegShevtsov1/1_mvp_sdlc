@@ -2,9 +2,10 @@
 name: bootstrap-project
 description: >-
   Use when an application repository (Rails backend or npm frontend) needs the mvp-sdlc Claude Code setup: CLAUDE.md
-  with hard rules, .claude/settings.json enabling the sdlc and mvp-sdlc plugins with deny rules, .claude/rules/,
-  .claude/sdlc.local.md and the .gitignore line for local settings. Safe to re-run. Triggers:
-  "/mvp-sdlc:bootstrap-project", "bootstrap claude setup", "set up .claude for this repo".
+  with hard rules, .claude/settings.json enabling the sdlc and mvp-sdlc plugins (mvp-sdlc brings the project
+  knowledge server mvp-rag) with deny rules, .claude/rules/, .claude/sdlc.local.md and the .gitignore line for local
+  settings. Safe to re-run. Triggers: "/mvp-sdlc:bootstrap-project", "bootstrap claude setup", "set up .claude for
+  this repo".
 ---
 
 # bootstrap-project
@@ -24,4 +25,7 @@ picks the kind and asks before anything is overwritten.
    `bootstrap-project <kind> --overwrite <path>` for it. **Never overwrite `CLAUDE.md` without an explicit yes**;
    if the user does not answer, keep it.
 4. Report the final per-file result. Remind the user to commit `CLAUDE.md`, `.claude/settings.json`,
-   `.claude/rules/` and `.gitignore` in a pull request; `.claude/sdlc.local.md` stays uncommitted.
+   `.claude/rules/` and `.gitignore` in a pull request; `.claude/sdlc.local.md` stays uncommitted. The settings
+   enable `mvp-sdlc`, which brings the project knowledge server `mvp-rag`: tell the user to set `RAG_MCP_URL` and
+   `RAG_MCP_TOKEN` in their environment, never in a file of the repository. Without them the skills that search it
+   say it is unavailable and carry on.

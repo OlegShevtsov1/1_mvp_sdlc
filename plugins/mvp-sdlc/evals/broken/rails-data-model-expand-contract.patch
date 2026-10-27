@@ -1,8 +1,8 @@
 diff --git a/skills/rails-data-model/SKILL.md b/skills/rails-data-model/SKILL.md
-index 731e17d..51c45f1 100644
+index 94bc10e..f438963 100644
 --- a/skills/rails-data-model/SKILL.md
 +++ b/skills/rails-data-model/SKILL.md
-@@ -34,7 +34,7 @@ the live schema.
+@@ -44,7 +44,7 @@ continue; never stop or retry because of it.
  
  - Never create, edit or delete `db/schema.rb`, `db/structure.sql` or anything under `db/migrate/`.
  - Never write `.sql` files. Migrations are Ruby ActiveRecord migrations only.
@@ -11,7 +11,7 @@ index 731e17d..51c45f1 100644
  - **Ambiguity means a question, never a guess.** If the conventions conflict (for example two tables use different
    soft-delete columns and the new table relates to both), or the request leaves a decision open that changes the
    schema (which tables a record belongs to, whether it is soft-deleted, a uniqueness rule), ask with
-@@ -42,11 +42,9 @@ the live schema.
+@@ -52,11 +52,9 @@ continue; never stop or retry because of it.
    file and line that shows it. Write no file until every question is answered. If `AskUserQuestion` is not
    available (for example in a headless run), end your turn with the question and its options as your final answer
    and write nothing.
@@ -26,7 +26,7 @@ index 731e17d..51c45f1 100644
  
  ## Steps
  
-@@ -56,17 +54,14 @@ the live schema.
+@@ -66,17 +64,14 @@ continue; never stop or retry because of it.
     soft-delete column and whether it is indexed, foreign key style, and index naming.
  3. **Check for ambiguity** (Hard rules). Ask now if anything is open; stop until answered.
  4. **Design the model.** New tables, columns with types and null constraints, associations, indexes, foreign keys

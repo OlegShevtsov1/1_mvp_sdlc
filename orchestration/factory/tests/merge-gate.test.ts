@@ -25,6 +25,10 @@ function prState(extra: Record<string, unknown> = {}): string {
   });
 }
 
+function bodySync(action: string, reason = ""): string {
+  return JSON.stringify({ pr_url: PR_URL, action, source: "pr-body.md", reason });
+}
+
 // An undefined value removes that variable from the gate's environment.
 function run(env: Record<string, string | undefined>): Result {
   const artifacts = mkdtempSync(join(tmpdir(), "factory-merge-gate-art-"));
@@ -32,6 +36,7 @@ function run(env: Record<string, string | undefined>): Result {
     ...process.env,
     ARTIFACTS_DIR: artifacts,
     INPUTS_PR: prState(),
+    INPUTS_BODY_SYNC: bodySync("unchanged"),
     INPUTS_TEST_COMMAND: "true",
     INPUTS_LINT_COMMAND: "true",
     INPUTS_BUILD_COMMAND: "true",
@@ -102,6 +107,45 @@ describe("merge-gate", () => {
       expectOneLine(r);
       expect(r.doc).toMatchObject({ action: "refuse", pr_url: PR_URL, reason });
       expect(existsSync(join(marks, "test"))).toBe(false);
+    }
+  });
+
+  test("a description pr-body-sync could not republish refuses before any command runs", () => {
+    const cases: Array<[string | undefined, string]> = [
+      [bodySync("failed", "gh pr edit exited 1: HTTP 502"), "gh pr edit exited 1: HTTP 502"],
+      [undefined, "no pr-body-sync result"],
+      ["not json", "no pr-body-sync result"],
+    ];
+    for (const [binding, detail] of cases) {
+      const { marks, env } = markerCommands();
+      const r = run({ ...env, INPUTS_BODY_SYNC: binding });
+      expectOneLine(r);
+      expect(r.doc).toEqual({ action: "refuse", pr_url: PR_URL, head: "feature-x", base: "develop", reason: `the pull request description could not be republished: ${detail}` });
+      for (const mark of ["test", "lint", "build"]) expect(existsSync(join(marks, mark))).toBe(false);
+    }
+  });
+
+  test("an updated or skipped description does not refuse", () => {
+    for (const action of ["updated", "skipped"]) {
+      const r = run({ INPUTS_BODY_SYNC: bodySync(action) });
+      expectOneLine(r);
+      expect(r.doc).toMatchObject({ action: "merge", reason: "" });
+    }
+  });
+
+  test("a pull request that conflicts with its base refuses before any command runs", () => {
+    const { marks, env } = markerCommands();
+    const r = run({ ...env, INPUTS_PR: prState({ mergeable: "CONFLICTING" }) });
+    expectOneLine(r);
+    expect(r.doc).toEqual({ action: "refuse", pr_url: PR_URL, head: "feature-x", base: "develop", reason: "the pull request is not mergeable: it conflicts with develop" });
+    expect(existsSync(join(marks, "test"))).toBe(false);
+  });
+
+  test("mergeable UNKNOWN or absent does not refuse", () => {
+    for (const pr of [prState({ mergeable: "UNKNOWN" }), prState()]) {
+      const r = run({ INPUTS_PR: pr });
+      expectOneLine(r);
+      expect(r.doc).toMatchObject({ action: "merge", reason: "" });
     }
   });
 

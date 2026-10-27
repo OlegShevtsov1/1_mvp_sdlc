@@ -6,6 +6,7 @@
 #   2. The title, which becomes the squash subject, is <KEY>-<n>: <card title>.
 #   3. The body, which becomes the squash body, has exactly one line starting with Type:, and its value
 #      is feat, fix, chore, docs, refactor, test or ci.
+#   4. A release PR or release-prep PR is titled with the release's own card, never <KEY>-0 (decision 91).
 # <KEY> is the ticket key: PROJECT_NAME from config/project.env in capitals (the Trello board name).
 # Env: HEAD_REF, BASE_REF, PR_TITLE, PR_BODY.
 # Exit 0: every condition holds. Exit 1: at least one failed; each failure is printed.
@@ -56,6 +57,11 @@ else
   type_line=$(grep '^Type:' <<< "${body}" | sed 's/[[:space:]]*$//')
   [[ "${type_line}" =~ ^Type:\ (feat|fix|chore|docs|refactor|test|ci)$ ]] ||
     fail 3 "the Type: line '${type_line}' has an invalid value, expected one of feat, fix, chore, docs, refactor, test, ci"
+fi
+
+no_card_release="^${key}-0[0-9]*: Release "
+if [[ "${title}" =~ ${no_card_release} ]]; then
+  fail 4 "a release PR is titled ${key}-<n>: Release vX.Y.Z (release-prep: ${key}-<n>: Release X.Y.Z changelog) with the release's own card, never ${key}-0 (decision 91: every release has its own card; ${key}-0 is only for card-less chores)"
 fi
 
 (( failed == 0 )) || exit 1

@@ -14,8 +14,8 @@ scripts/publish-prod-infra.sh [<ref>] [--dry-run]
 ```
 
 `<ref>` is anything `git rev-parse` resolves in a fresh clone of the primary (default `origin/env/dev`). `--dry-run`
-builds the commit but pushes nothing and makes no API call (no `GH_TOKEN` needed); the temporary clone is kept and
-its path is printed on stderr.
+builds the commit but pushes nothing and makes no API call (no `GH_TOKEN` needed); the PR body is printed on stderr,
+and the temporary clone is kept and its path is printed on stderr.
 
 Every GitHub API call goes through `gh` with the caller's `GH_TOKEN`, which must belong to `OlegShevtsov1`. The script
 never runs `gh auth` and never switches the active gh account; do not run `gh auth switch` for it either.
@@ -32,7 +32,7 @@ Progress and refusals always go to stderr.
 | Exit | Meaning |
 | --- | --- |
 | 0 | PR opened, nothing to sync, already proposed, or dry run built |
-| 1 | cloning, resolving the ref, pushing or a `gh` call failed (PR creation: the branch is pushed, rerun to retry) |
+| 1 | cloning, resolving the ref, pushing or a `gh` call failed (PR creation: the branch is pushed, rerun to retry), or listing the commits since the last promotion failed |
 | 2 | refused: `pilot-prod root not found`, required paths missing, module source unresolvable or outside the repo, unexported workflow reference, `GH_TOKEN` of another account |
 | 64 | usage, including a missing `GH_TOKEN` on a real run |
 
@@ -53,7 +53,7 @@ Progress and refusals always go to stderr.
 9. Unless `--dry-run`: when the sync branch for this primary commit already exists, prints the open PR from it, or
    opens that PR, and exits 0.
 10. Writes `INFRA_PROD_SOURCE.json` and commits as the author below.
-11. With `--dry-run`, prints the file list and stops. Otherwise creates `env/prod` at the target `env/dev` commit
+11. With `--dry-run`, prints the file list, writes the PR body to stderr and stops. Otherwise creates `env/prod` at the target `env/dev` commit
     when it does not exist, pushes the sync branch and opens the PR into `env/prod`.
 
 Every refusal happens before the first remote write. Nothing is ever force-pushed, `env/prod` is never pushed to
@@ -92,7 +92,12 @@ Nothing is sanitized or rewritten: both infra repos are private (decision 46).
 - Sync branch: `sync/prod-infra-<7-char primary sha>`, pushed as a new branch.
 - Commit message: `Sync prod infra from <branch> (<short sha>)`, `<branch>` being `<ref>` without `origin/`.
 - PR into `env/prod`, title `PILOT-0: Sync prod infra from <branch> (<short sha>)`, body with the source ref and
-  sha, the exported file count and the line `Type: chore`.
+  sha, the exported file count, `## Changes since the last promotion` and the line `Type: chore`.
+- `## Changes since the last promotion` (decision 64) lists the first-parent subjects of the primary `env/dev` (the
+  titles of its merged PRs) after the `primary_sha` in `env/prod`'s `INFRA_PROD_SOURCE.json`, up to the synced commit,
+  oldest first. The ` (#n)` suffix is dropped: those are primary PR numbers, which would link to unrelated PRs on the
+  target. Without a recorded `primary_sha` the section says this is the first promotion; a `primary_sha` the primary
+  does not have leaves the changes unlisted and says so. The body is written before the push.
 - No auto-merge, ever: the operator merges after reviewing a terraform plan of `infra/projects/pilot-prod`
   (decision 46). The script never calls a merge or review API.
 

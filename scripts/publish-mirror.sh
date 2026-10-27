@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Publishes one primary repo to its public mirror as a single commit without history, pushed to the mirror's develop
 # and merged into main through a PR (scripts/publish-mirror.README.md).
-# Usage: publish-mirror.sh <repo> [<ref>] [--dry-run] [--subject <text>]
+# Usage: publish-mirror.sh <repo> [<ref>] [--dry-run] [--subject <text>] [--card PILOT-<n>]
 # Env: MIRROR_AUTHOR_NAME, MIRROR_AUTHOR_EMAIL (mirror author, committer and tagger);
 #      MIRROR_PRIMARY_URL, MIRROR_TARGET_URL (override the SSH URLs, e.g. with local paths);
 #      MIRROR_CHECKS_TIMEOUT, MIRROR_CHECKS_INTERVAL (seconds to wait for the PR checks, default 1800 and 30).
 # Exit 0: synced (stdout is the mirror main sha) or nothing to sync. Exit 1: clone, fetch, push or API call failed,
-# the mirror main has changes not on develop, or the merge or a tag target did not verify.
-# Exit 2: refused to publish (primary owner left over or the scan for it failed, public-repo check or gitleaks
-# failed). Exit 3: the PR checks failed or timed out; the PR stays open and its URL is on stdout. Exit 64: usage.
+# the mirror main has changes not on develop, no card number for a carried release tag, the CHANGELOG.md at a carried
+# release tag has no section with an entry for it, or the merge or a tag target did not verify.
+# Exit 2: refused to publish (primary owner left over in the tree, a tag message or the tag's changelog section, or
+# the scan for it failed, public-repo check or gitleaks failed). Exit 3: the PR checks failed or timed out; the PR
+# stays open and its URL is on stdout. Exit 64: usage.
 # The primary owner strings are assembled from parts: this repo is mirrored by this script, and plain literals
 # would be rewritten in the mirror's copy.
 set -euo pipefail
@@ -20,13 +22,13 @@ dst_owner="OlegShevtsov1"
 dst_name="Oleg Shevtsov"
 
 usage() {
-  echo "usage: publish-mirror.sh <1_mvp_sdlc|1_mvp_pilot_be|1_mvp_pilot_fe> [<ref>] [--dry-run] [--subject <text>]" >&2
+  echo "usage: publish-mirror.sh <1_mvp_sdlc|1_mvp_pilot_be|1_mvp_pilot_fe> [<ref>] [--dry-run] [--subject <text>] [--card PILOT-<n>]" >&2
   exit 64
 }
 log() { echo "publish-mirror: $*" >&2; }
 die() { local rc=$1; shift; log "$*"; exit "${rc}"; }
 
-repo="" ref="origin/main" subject="" dry_run=false
+repo="" ref="origin/main" subject="" card="" dry_run=false
 parse_args() {
   [ $# -gt 0 ] || usage
   repo=$1
@@ -40,6 +42,7 @@ parse_args() {
     case "$1" in
       --dry-run) dry_run=true ;;
       --subject) [ $# -ge 2 ] || usage; subject=$2; shift ;;
+      --card) [ $# -ge 2 ] && [[ $2 =~ ^PILOT-[1-9][0-9]*$ ]] || usage; card=$2; shift ;;
       -*) usage ;;
       *) ! "${ref_given}" || usage; ref=$1; ref_given=true ;;
     esac
@@ -270,25 +273,86 @@ mirror_api() {
   GH_TOKEN="${mirror_token}" gh api -X "${method}" "${path}" "$@"
 }
 
+# card_in <ERE> <rev>: PILOT-<n> from the newest commit message line reachable from <rev> that matches <ERE>; fails
+# when there is none.
+card_in() {
+  local line
+  line=$(git -C "${tmp}/primary" log -1 -E --grep="$1" --format=%B "$2") || return 1
+  line=$(grep -E "$1" <<<"${line}") || return 1
+  line=${line%%$'\n'*}
+  echo "${line%%:*}"
+}
+
+# release_card <tag>: the Trello card of the release <tag> on the primary (decision 58): the release-prep squash
+# commit "PILOT-<n>: Release X.Y.Z changelog" reachable from the tag, else the release PR "PILOT-<n>: Release vX.Y.Z"
+# (squash subject or merge commit body line) reachable from the synced commit. PILOT-0 does not count.
+release_card() {
+  local ver=${1#v}
+  ver=${ver//./\\.}
+  card_in "^PILOT-[1-9][0-9]*: Release ${ver} changelog( \(#[0-9]+\))?$" "refs/tags/$1^{commit}" ||
+    card_in "^PILOT-[1-9][0-9]*: Release v${ver}( \(#[0-9]+\))?$" "${src_sha}"
+}
+
+# changelog_section <X.Y.Z> < CHANGELOG.md: the section's text without its heading and the blank lines around it, as
+# the app repos' release notes print it; exit 1 when there is no section.
+changelog_section() {
+  awk -v heading="## [$1]" '
+    index($0, "## ") == 1 { if (found) exit; if ($0 == heading || index($0, heading " ") == 1) { found = 1; next } }
+    found { lines[++n] = $0 }
+    END {
+      if (!found) exit 1
+      first = 1; while (first <= n && lines[first] ~ /^[[:space:]]*$/) first++
+      last = n; while (last >= first && lines[last] ~ /^[[:space:]]*$/) last--
+      for (i = first; i <= last; i++) print lines[i]
+    }'
+}
+
+# changelog_block <tag>: appends the sentence "Changelog of <tag>:" and the heading "## Changelog" with the tag's
+# CHANGELOG.md section, read from the primary at the tagged commit, to pr_body (decision 64). The pilots'
+# pr-conventions condition 4 wants that exact heading followed by exactly what release-notes.sh prints, and reads only
+# the first such block, so a body has one: the title's tag. No block when that commit has no CHANGELOG.md; refuses a
+# CHANGELOG.md without an entry for the tag. Not for $(...): its die must end the script.
+changelog_block() {
+  local file="refs/tags/$1^{commit}:CHANGELOG.md" section
+  if ! git -C "${tmp}/primary" cat-file -e "${file}" 2>/dev/null; then
+    log "no CHANGELOG.md at $1 in the primary — no changelog in the PR body"
+    return 0
+  fi
+  section=$(git -C "${tmp}/primary" show "${file}" | changelog_section "${1#v}") || section=""
+  grep -qE '^[[:space:]]*[-*+][[:space:]]+[^[:space:]]' <<<"${section}" ||
+    die 1 "CHANGELOG.md at $1 has no section ## [${1#v}] with an entry; a release sync carries its changelog (decision 64)"
+  section=$(sed "${replace_exprs[@]}" <<<"${section}")
+  ! grep -qi -e "${src_owner}" <<<"${section}" ||
+    die 2 "refusing to publish: the changelog section of $1 still contains the primary owner"
+  pr_body+=$'\n\n'"Changelog of $1:"$'\n\n'"## Changelog"$'\n\n'"${section}"
+}
+
+# The title of a sync that carries a release tag names the release's card (decision 58).
 pr_number="" pr_url="" pr_title="" pr_body=""
 pr_title_and_body() {
-  local new_tags
+  local new_tags tag pr_card
   new_tags=$(comm -23 <(git -C "${mirror}" show "${sync_sha}:MIRROR_SOURCE.json" | tag_names | sort) \
     <({ git -C "${mirror}" show "${main_sha}:MIRROR_SOURCE.json" 2>/dev/null || true; } | tag_names | sort) | sort -V)
   pr_body="Sync of ${repo} from ${branch} at ${short_sha}."
   if [ -n "${new_tags}" ]; then
-    pr_title="PILOT-0: Release $(tail -n 1 <<<"${new_tags}")"
+    tag=$(tail -n 1 <<<"${new_tags}")
+    pr_card=${card}
+    [ -n "${pr_card}" ] || pr_card=$(release_card "${tag}") ||
+      die 1 "no card number for release ${tag}: no commit \"PILOT-<n>: Release ${tag#v} changelog\" reachable from the tag and no release PR \"PILOT-<n>: Release ${tag}\" in the primary; rerun with --card PILOT-<n>"
+    pr_title="${pr_card}: Release ${tag}"
     pr_body+=$'\n'"Tags: $(paste -sd ' ' <<<"${new_tags}")"
+    changelog_block "${tag}"
   else
+    [ -z "${card}" ] || log "--card ignored: the sync carries no release tag"
     pr_title="PILOT-0: Sync ${branch} (${short_sha})"
   fi
   pr_body+=$'\n\nType: chore'
+  log "PR title: ${pr_title}"
 }
 
 # An open develop → main PR left by an earlier run is updated and reused.
 open_pr() {
   local open created
-  pr_title_and_body
   open=$(mirror_api GET pulls -f head="${dst_owner}:develop" -f base=main -f state=open) ||
     die 1 "listing the PRs of the mirror ${repo} failed"
   read -r pr_number pr_url < <(python3 -c '
@@ -414,10 +478,12 @@ main() {
     write_source_json
     run_public_checks
     commit_mirror
+    pr_title_and_body
     push_develop
   elif develop_pending; then
     log "the mirror develop is ahead of main: resuming its PR"
     sync_sha=$(git -C "${mirror}" rev-parse origin/develop)
+    pr_title_and_body
   else
     create_missing_tags
     echo "nothing to sync (mirror main ${main_sha:0:7})"

@@ -51,6 +51,10 @@ def arrow_flow(text):
     return [name.strip(" ()`") for name in " ".join(text.split()).split("→")]
 
 
+# The read-only tools of the mvp-rag server the plugin declares; reindex writes the index, so it stays unallowed.
+RAG_ALLOW = ["mcp__plugin_mvp-sdlc_mvp-rag__search", "mcp__plugin_mvp-sdlc_mvp-rag__get"]
+
+
 def settings(kind):
     return json.loads((TEMPLATES / "settings.{}.json".format(kind)).read_text(encoding="utf-8"))
 
@@ -93,6 +97,7 @@ class TemplatesTest(unittest.TestCase):
                     data["extraKnownMarketplaces"]["mvp"]["source"], {"source": "github", "repo": "OlegShevtsov1/1_mvp_sdlc"}
                 )
                 self.assertEqual(data["enabledPlugins"], {"sdlc@mvp": True, "mvp-sdlc@mvp": True})
+                self.assertEqual(data["permissions"]["allow"], RAG_ALLOW)
                 deny = data["permissions"]["deny"]
                 for rule in BASH_DENY + FILE_DENY[kind]:
                     self.assertIn(rule, deny)

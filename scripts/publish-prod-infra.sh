@@ -6,8 +6,9 @@
 #      INFRA_PROD_AUTHOR_NAME, INFRA_PROD_AUTHOR_EMAIL (author and committer);
 #      INFRA_PROD_PRIMARY_URL, INFRA_PROD_TARGET_URL (override the SSH URLs, e.g. with local paths).
 # Exit 0: PR opened (stdout is its URL), nothing to sync, already proposed, or dry run built.
-# Exit 1: clone, ref resolution, push or gh call failed. Exit 2: refused (pilot-prod root not found, required paths
-# missing, module source unresolvable, unexported workflow reference, token of another account). Exit 64: usage.
+# Exit 1: clone, ref resolution, push or gh call failed, or listing the commits since the last promotion failed.
+# Exit 2: refused (pilot-prod root not found, required paths missing, module source unresolvable, unexported workflow
+# reference, token of another account). Exit 64: usage.
 # The primary login is assembled from parts: this repo is mirrored by publish-mirror.sh, and a plain literal
 # would be rewritten in the mirror's copy.
 set -euo pipefail
@@ -182,11 +183,47 @@ nothing_to_sync() {
     git -C "${target}" diff --cached --quiet HEAD -- . ":(exclude)${marker}"
 }
 
+# changes_since_promotion: writes to changes.md the first-parent subjects of the primary ${branch} from the
+# primary_sha that env/prod records up to the synced commit, oldest first (decision 64). The marker is read at
+# base_sha: on a fresh sync HEAD already holds the new one. The " (#n)" suffix is dropped: those are primary PR
+# numbers, which on the target would link to unrelated PRs.
+changes_since_promotion() {
+  local prev
+  prev=$(git -C "${target}" show "${base_sha}:${marker}" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    sha = json.load(sys.stdin).get("primary_sha")
+except ValueError:
+    sha = None
+print(sha if isinstance(sha, str) else "")') || prev=""
+  if [ -z "${prev}" ]; then
+    echo "First promotion: env/prod records no earlier primary commit (no ${marker} with primary_sha)." > "${tmp}/changes.md"
+    return 0
+  fi
+  if ! git -C "${tmp}/primary" cat-file -e "${prev}^{commit}" 2>/dev/null; then
+    echo "Not listed: env/prod records ${prev:0:7}, which is not a commit of the primary." > "${tmp}/changes.md"
+    return 0
+  fi
+  git -C "${tmp}/primary" log --first-parent --reverse --format='%s' "${prev}..${src_sha}" > "${tmp}/subjects" ||
+    die 1 "cannot list the ${branch} commits since the last promotion ${prev:0:7}"
+  if [ -s "${tmp}/subjects" ]; then
+    { printf 'Merged into %s since the last promotion (%s), up to %s:\n\n' "${branch}" "${prev:0:7}" "${short_sha}"
+      sed -E 's/ \(#[0-9]+\)$//; s/^/- /' "${tmp}/subjects"; } > "${tmp}/changes.md"
+  else
+    echo "No pull requests merged into ${branch} since the last promotion (${prev:0:7})." > "${tmp}/changes.md"
+  fi
+}
+
 pr_title=""
 write_pr_body() {
   pr_title="PILOT-0: Sync prod infra from ${branch} (${short_sha})"
+  changes_since_promotion
   cat > "${tmp}/pr-body.md" <<EOF
 Sync of the prod infra root from ${src_owner}/1_mvp_infra ${ref} at ${src_sha}: $(wc -l < "${tmp}/files") files.
+
+## Changes since the last promotion
+
+$(cat "${tmp}/changes.md")
 
 Not auto-merged: the operator merges after reviewing a terraform plan of ${prod_root} (decision 46).
 
@@ -195,7 +232,6 @@ EOF
 }
 
 open_pr() {
-  write_pr_body
   gh pr create -R "${dst_slug}" --base env/prod --head "${sync_branch}" --title "${pr_title}" \
     --body-file "${tmp}/pr-body.md" || die 1 "PR creation failed; branch ${sync_branch} is pushed — rerun to retry"
 }
@@ -210,6 +246,7 @@ already_proposed() {
   if [ -n "${url}" ]; then
     echo "already proposed: ${url}"
   else
+    write_pr_body
     open_pr
   fi
 }
@@ -268,9 +305,12 @@ main() {
   fi
   write_source_json
   commit_target
+  write_pr_body
   if "${dry_run}"; then
     keep_tmp=true
     git -C "${target}" ls-tree -r --name-only HEAD
+    log "dry run: PR body:"
+    cat "${tmp}/pr-body.md" >&2
     echo "dry run: not pushed; inspect ${target}" >&2
     exit 0
   fi

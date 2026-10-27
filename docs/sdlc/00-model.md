@@ -47,7 +47,7 @@ Course phase, feature size, who does what, the artifact and where it lives, the 
 | 1. Idea | S, M+ | `/mvp-sdlc:feature-start <card link>` → `/sdlc:interview <slug>` (S: `--depth=easy`), `/sdlc:classify-size` | be: `docs/features/<slug>/` with `idea-brief.md`, `CONTEXT.md`, `.size` | operator: brief `status: Confirmed` | `Backlog` |
 | 2. Requirements | S, M+ | `/sdlc:write-prd` → `/sdlc:clarify-prd` | be: `PRD.md` (acceptance criteria in GWT, no technical tokens) | operator: `status: Approved` + merged PR (R-C8.9) | `Backlog` |
 | 3. Architecture | M+ (S: an ADR only if needed) | `/sdlc:architecture-design`, `/sdlc:decide-adr` | be: `sad.md`, `adr/NNNN-*.md` (Accepted) | operator: ADR `Accepted`, merged PR | `Backlog` |
-| 4. Contracts | S, M+ | `/mvp-sdlc:rails-data-model`, `/sdlc:api-forge`, `/sdlc:break-tasks` (M+), `/sdlc:plan-tests` | be: `data-model.md`, `migrations/*.rb` (staged), `contracts/openapi.yaml` (checked against `swagger/v1`), `tasks/tasks.json` and `tasks/tracker.md`, `test-plan.md`; fe: `/mvp-sdlc:sync-spec` + the frontend's own `tasks/` | **DoR** ([03-dor-dod.md](03-dor-dod.md)) met; PR merged | `Ready` |
+| 4. Contracts | S, M+ | `/mvp-sdlc:rails-data-model`, `/sdlc:api-forge`, `/sdlc:break-tasks` (M+), `/sdlc:plan-tests` | be: `data-model.md`, `migrations/*.rb` (staged), `contracts/openapi.yaml` (checked against `swagger/v1`), `tasks/tasks.json` and `tasks/tracker.md`, `test-plan.md`; fe: `/mvp-sdlc:sync-spec` (frontend tasks stay in the backend `tasks/tasks.json`) | **DoR** ([03-dor-dod.md](03-dor-dod.md)) met; PR merged | `Ready` |
 | 5. Code | all | factory, one task per run: `archon workflow run factory --cwd <repo> "<task-brief output>"` | code, tests, `tracker.md` row → `done`, in the same PR | factory gate 2: plan approved; then automatic merge (R-C1) | `In Progress` |
 | 6. Review | all; M+ also per feature | factory review (lenses) on every PR; at the end of the feature `/sdlc:review-feature` | `_review/review-<date>.md` | PASS, no P0/P1 | `Review` |
 | 7. QA | all | CI (rspec, rubocop, brakeman, bundler-audit, gitleaks; fe: lint, build) + deploy to dev + `project-e2e.sh` | E2E report, CI logs | deterministic: everything green | `Test` |
@@ -78,9 +78,12 @@ Where shipped tooling differs from this agreed table, the tooling wins and the d
    through `AskUserQuestion`, which the unattended factory cannot do, so these phases **never** go through the
    factory. Each phase ends with a docs PR that a human merges; the PR link goes onto the card. For the frontend:
    `sync-spec` → a docs PR in the frontend.
-3. **Tasks**: `tasks.json` (format B, R-C2) → the card checklist `T1…Tn`. The card moves to `Ready` when the DoR
-   holds.
-4. **Execution**: for each `Tn` one factory run with the text from `task-brief`. The factory: gate 2 (human) →
+3. **Tasks**: `tasks.json` (format B, R-C2) → one Trello card per task `Tn` (decision 78, label `task`, in `Ready`)
+   made by `task-cards`, which records the card in `tasks.json` and adds `Tn` with a link to the task card to the
+   feature card's checklist `T1…Tn` (an item added by hand gets the link appended). The feature card moves to
+   `Ready` when the DoR holds.
+4. **Execution**: for each `Tn` one factory run with the text from `task-brief`, titled by the task's card, which
+   moves through the board with its PR; the feature card follows the feature's state. The factory: gate 2 (human) →
    deliver (TDD per the task text, review, CI) → merge → deploy (the profile waits for Dev Deploy of the merge
    commit) → dev health → monitor → `report.json`. The agent ticks `Tn` on the card through the Trello REST API.
 5. **Feature review and release** (phases 6–9): `review-feature` → `ship-feature` → release → prod →

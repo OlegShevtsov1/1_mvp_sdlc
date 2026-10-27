@@ -41,6 +41,9 @@ RSpec.describe 'the committed Claude Code setup' do
     settings = JSON.parse(Rails.root.join('.claude/settings.json').read)
 
     expect(settings.fetch('enabledPlugins')).to include('sdlc@mvp' => true, 'mvp-sdlc@mvp' => true)
+    expect(settings.fetch('permissions').fetch('allow')).to eq(
+      %w[mcp__plugin_mvp-sdlc_mvp-rag__search mcp__plugin_mvp-sdlc_mvp-rag__get]
+    )
     expect(settings.fetch('permissions').fetch('deny')).to include(
       'Bash(git push --force*)', 'Bash(git push -f*)', 'Bash(git reset --hard*)',
       'Read(**/.env*)', 'Read(config/master.key)', 'Edit(config/credentials*)'

@@ -72,13 +72,13 @@ check "internal hostname (bonfir[e])"  -iE -e 'bonfir[e]'
 check_except plugins/sdlc/skills/generate-data-model/SKILL.md \
   "AWS account ID (12 digits)"         -E  -e '(^|[^0-9])[0-9]{12}([^0-9]|$)'
 check "Route53 hosted zone ID"         -E  -e '(^|[^A-Za-z0-9+/])Z[A-Z0-9]{12,}([^A-Za-z0-9+/=]|$)'
-# feature-start has to call the Trello API; card and board links are still banned everywhere else.
-check_except plugins/mvp-sdlc/bin/feature-start \
-  "Trello link"                        -iE -e 'trello\.com'
+# feature-start and project-add have to call the Trello API; card and board links are still banned everywhere else.
+scan "Trello link" -iE -e 'trello\.com' -- . \
+  ':(exclude)plugins/mvp-sdlc/bin/feature-start' ':(exclude)bin/project-add'
 check "Notion link or page ID"         -iE -e 'notion\.(so|site)' -e '(^|[^0-9a-f])[0-9a-f]{32}([^0-9a-f]|$)'
-# The notifier has to name the Bot API host; chat IDs and links are still banned everywhere else.
-check_except scripts/ci/notify-telegram.sh \
-  "Telegram link, API or chat ID"      -iE -e 't\.me/' -e 'api\.telegram\.org' -e '-100[0-9]{9,}'
+# The notifier and project-add have to name the Bot API host; chat IDs and links are still banned everywhere else.
+scan "Telegram link, API or chat ID" -iE -e 't\.me/' -e 'api\.telegram\.org' -e '-100[0-9]{9,}' -- . \
+  ':(exclude)scripts/ci/notify-telegram.sh' ':(exclude)bin/project-add'
 check "local home path"                -E  -e '/home/de[v]'
 
 if [ "${status}" -eq 0 ]; then

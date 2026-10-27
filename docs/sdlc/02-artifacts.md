@@ -8,7 +8,8 @@ instead of asking again (M6.1). The depth of each artifact grows with the featur
 - **Backend repository** owns every feature artifact: `docs/features/<slug>/` (R-B2).
 - **Frontend repository** holds a read-only copy of `PRD.md`, `sad.md`, `adr/`, `contracts/`, `CONTEXT.md` and
   `test-plan.md` (whichever exist, so an S feature without `sad.md` is fine), made by `sync-spec`, each file marked
-  "do not edit", with the source commit recorded in `docs/features/<slug>/.spec-source`. The frontend's own `tasks/` live in the frontend repository.
+  "do not edit", with the source commit recorded in `docs/features/<slug>/.spec-source`. `tasks/` is not copied: frontend tasks in
+  the backend `tasks/tasks.json` are briefed in the frontend with `task-brief <slug> T<n> --from <be checkout>`.
 - **Repository level**: `docs/architecture-map.md` (from `map-architecture`, with the commit it reflects), the root
   `CONTEXT.md`, `CLAUDE.md`, `.claude/`, `CHANGELOG.md` (planned, C4 backend, C5 frontend).
 - All of it is English (R-C14, R-C8.5).
@@ -39,10 +40,11 @@ task text is written from them (R-C8.7).
 ## The size S known gap
 
 `task-brief` needs `tasks/tasks.json` (contract R-C2: `id`, `title`, `layer`, `deps`, `acs`, `dod`, `files_hint`,
-`owner`, `estimate`, `status`, plus the optional `type` of the pull request, default `feat`), PRD section 5 for every referenced criterion and a test level for each. The course
+`owner`, `estimate`, `status`, plus the optional `type` of the pull request, default `feat`, and the optional
+`trello_card_id` and `trello_card_id_short` of the task's own card, written only by `task-cards`), PRD section 5 for every referenced criterion and a test level for each. The course
 `break-tasks` refuses without `sad.md` and an Accepted ADR, and S runs neither (R-C8.10). So for S the operator's
 interactive session writes `tasks/tasks.json` with one task and one `tasks/tracker.md` row in the contracts docs PR,
-and `task-brief <slug> T1` validates them. A helper that writes these two files is a candidate follow-up.
+then `task-cards <slug>` gives the task its card and `task-brief <slug> T1` validates them. A helper that writes these two files is a candidate follow-up.
 
 ## Machine state
 

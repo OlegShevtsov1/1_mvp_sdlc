@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Feature demo with tasks: T1 is ready (size S), T3 is estimated L.
+# Feature demo with tasks: T1 is ready (size S), T3 is estimated XL.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 

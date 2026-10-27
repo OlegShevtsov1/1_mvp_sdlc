@@ -289,13 +289,17 @@ fake_prs | python3 -c 'import json, sys; assert [p["state"] for p in json.load(s
   fail "red checks" "PR is not left open"
 publish 1_mvp_pilot_be
 [ "${rc}" -eq 0 ] || fail "resume" "exit ${rc}: ${err}"
+src_sha=$(git -C "${tmp}/primary" rev-parse main)
 calls | python3 -c '
 import json, sys
+short = sys.argv[1]
 api = [c for c in map(json.loads, sys.stdin) if c["argv"][0] == "api"]
 assert [c["method"] for c in api if c["method"] in ("POST", "PATCH", "PUT")] == ["POST", "PATCH", "PUT"], api
-assert [c for c in api if c["method"] == "PATCH"][0]["path"].endswith("/pulls/1"), api
+patch = [c for c in api if c["method"] == "PATCH"][0]
+assert patch["path"].endswith("/pulls/1"), api
+assert patch["fields"]["title"] == f"PILOT-0: Sync main ({short})", patch
 assert [c for c in api if c["method"] == "PUT"][0]["path"].endswith("/pulls/1/merge"), api
-' || fail "resume" "calls are wrong: $(calls)"
+' "${src_sha:0:7}" || fail "resume" "calls are wrong: $(calls)"
 [ "$(git -C "${tmp}/mirror.git" rev-parse main^2)" = "$(mirror_develop)" ] || fail "resume" "main is not the merge of develop"
 echo "PASS merge only on green; a re-run resumes the open PR"
 
@@ -310,10 +314,12 @@ grep -qF "timed out" <<<"${err}" || fail "timeout" "stderr: ${err}"
 if calls | grep -qF '"PUT"'; then fail "timeout" "merge was called"; fi
 echo "PASS pending checks time out without a merge"
 
-# release_tag_fixture: an annotated v0.2.0 on the primary main whose message has the primary login, and as
-# negatives a lightweight v0.3.0 on main and an annotated v9.9.9 on develop, which main does not contain.
+# release_tag_fixture: an annotated v0.2.0 on the primary main whose message has the primary login, on the
+# release-prep commit of card PILOT-165, and as negatives a lightweight v0.3.0 on main and an annotated v9.9.9 on
+# develop, which main does not contain.
 release_tag_fixture() {
   new_fixture
+  g -C "${tmp}/primary" commit -q --allow-empty -m "PILOT-165: Release 0.2.0 changelog (#52)"
   g -C "${tmp}/primary" tag -a v0.2.0 -m "Release v0.2.0 by ${src_login}"
   g -C "${tmp}/primary" tag v0.3.0
   g -C "${tmp}/primary" tag -a v9.9.9 -m "not released" develop
@@ -329,7 +335,7 @@ m="${tmp}/mirror.git"
 calls | python3 -c '
 import json, sys
 post = [c for c in map(json.loads, sys.stdin) if c["argv"][0] == "api" and c["method"] == "POST"][0]["fields"]
-assert post["title"] == "PILOT-0: Release v0.2.0", post
+assert post["title"] == "PILOT-165: Release v0.2.0", post
 lines = post["body"].splitlines()
 assert "Tags: v0.2.0" in lines and [l for l in lines if l.startswith("Type:")] == ["Type: chore"], post
 ' || fail "release tag" "PR is wrong: $(calls)"
@@ -432,7 +438,7 @@ release_history_fixture() {
   g -C "${p}" merge -q --no-ff --no-edit main
   echo "release" > "${p}/release.txt"
   g -C "${p}" add -A
-  g -C "${p}" commit -q -m "release work"
+  g -C "${p}" commit -q -m "PILOT-165: Release 0.2.0 changelog"
   g -C "${p}" tag -a v0.2.0 -m "Release v0.2.0"
   g -C "${p}" checkout -q main
   g -C "${p}" merge -q --no-ff --no-edit develop
@@ -462,7 +468,7 @@ publish 1_mvp_pilot_be
 calls | python3 -c '
 import json, sys
 post = [c for c in map(json.loads, sys.stdin) if c["argv"][0] == "api" and c["method"] == "POST"][0]["fields"]
-assert post["title"] == "PILOT-0: Release v0.2.0", post
+assert post["title"] == "PILOT-165: Release v0.2.0", post
 assert [l for l in post["body"].splitlines() if l.startswith("Tags:")] == ["Tags: v0.2.0"], post
 ' || fail "release history" "PR is wrong: $(calls)"
 m="${tmp}/mirror.git"
@@ -495,9 +501,39 @@ g -C "${p}" commit -q -m "hotfix (squash)"
 g -C "${p}" tag -a v0.2.1 -m "Release v0.2.1"
 squash_commit=$(git -C "${p}" rev-parse HEAD)
 head=$(mirror_head)
+develop=$(mirror_develop)
 tag_obj=$(git -C "${m}" rev-parse v0.2.0)
+before=$(calls)
 publish 1_mvp_pilot_be
+[ "${rc}" -eq 1 ] || fail "hotfix tag, no card" "exit ${rc}, want 1: ${err}"
+grep -qF "no card number for release v0.2.1" <<<"${err}" || fail "hotfix tag, no card" "stderr: ${err}"
+grep -qF -- "--card PILOT-<n>" <<<"${err}" || fail "hotfix tag, no card" "stderr does not name --card: ${err}"
+[ "$(mirror_head)" = "${head}" ] || fail "hotfix tag, no card" "mirror main moved"
+[ "$(mirror_develop)" = "${develop}" ] || fail "hotfix tag, no card" "develop was pushed"
+[ "$(calls)" = "${before}" ] || fail "hotfix tag, no card" "gh was called"
+echo "PASS a release tag without a findable card is refused before the push"
+
+FAKE_GH_CHECKS=pending publish 1_mvp_pilot_be --card PILOT-121
+[ "${rc}" -eq 3 ] || fail "hotfix tag, pending" "exit ${rc}, want 3: ${err}"
+develop=$(mirror_develop)
+before=$(calls)
+publish 1_mvp_pilot_be
+[ "${rc}" -eq 1 ] || fail "resume, no card" "exit ${rc}, want 1: ${err}"
+grep -qF "resuming its PR" <<<"${err}" || fail "resume, no card" "the resume path did not run: ${err}"
+grep -qF -- "--card PILOT-<n>" <<<"${err}" || fail "resume, no card" "stderr does not name --card: ${err}"
+[ "$(mirror_head)" = "${head}" ] || fail "resume, no card" "mirror main moved"
+[ "$(mirror_develop)" = "${develop}" ] || fail "resume, no card" "develop moved"
+[ "$(calls)" = "${before}" ] || fail "resume, no card" "gh was called"
+echo "PASS a resumed release sync without a findable card is refused before any gh call"
+
+publish 1_mvp_pilot_be --card PILOT-121
 [ "${rc}" -eq 0 ] || fail "hotfix tag" "exit ${rc}: ${err}"
+grep -qF "resuming its PR" <<<"${err}" || fail "hotfix tag" "the open PR was not resumed: ${err}"
+calls | python3 -c '
+import json, sys
+posts = [c for c in map(json.loads, sys.stdin) if c["argv"][0] == "api" and c["method"] == "POST"]
+assert posts[-1]["fields"]["title"] == "PILOT-121: Release v0.2.1", posts[-1]
+' || fail "hotfix tag" "PR title is wrong: $(calls)"
 if grep -qF "tag v0.2.0 not carried" <<<"${err}"; then fail "hotfix tag" "a recorded tag is logged as not carried: ${err}"; fi
 [ "$(git -C "${m}" cat-file -t v0.2.1)" = tag ] || fail "hotfix tag" "v0.2.1 is not annotated"
 [ "$(git -C "${m}" rev-parse 'v0.2.1^{commit}')" = "$(mirror_head)" ] || fail "hotfix tag" "v0.2.1 is not on the merge commit"
@@ -646,6 +682,13 @@ kept=$(sed -n 's/^dry run: not pushed; inspect //p' <<<"${err}")
 [ -d "${kept}" ] || fail "dry run" "kept directory not named: ${err}"
 [ "$(git -C "${kept}" rev-parse HEAD)" = "${out}" ] || fail "dry run" "kept clone HEAD is not the printed sha"
 rm -rf "$(dirname "${kept}")"
+publish 1_mvp_pilot_be --dry-run --card PILOT-5
+[ "${rc}" -eq 0 ] || fail "dry run, card without tag" "exit ${rc}: ${err}"
+grep -qF -- "--card ignored: the sync carries no release tag" <<<"${err}" ||
+  fail "dry run, card without tag" "ignored --card not logged: ${err}"
+grep -qE "^dry run: gh api -X POST .*title=PILOT-0: Sync main" <<<"${err}" ||
+  fail "dry run, card without tag" "title is not the sync title: ${err}"
+rm -rf "$(dirname "$(sed -n 's/^dry run: not pushed; inspect //p' <<<"${err}")")"
 echo "PASS dry run"
 
 release_tag_fixture
@@ -656,6 +699,132 @@ if git -C "${tmp}/mirror.git" rev-parse -q --verify refs/tags/v0.2.0 >/dev/null;
 [ -z "$(calls)" ] || fail "dry run tag" "gh was called: $(calls)"
 rm -rf "$(dirname "$(sed -n 's/^dry run: not pushed; inspect //p' <<<"${err}")")"
 echo "PASS dry run with a release tag"
+
+# --- release card from the release PR when the changelog commit has no card
+new_fixture
+p="${tmp}/primary"
+g -C "${p}" checkout -q develop
+g -C "${p}" commit -q --allow-empty -m "PILOT-0: Release 0.2.0 changelog (#52)"
+g -C "${p}" tag -a v0.2.0 -m "Release v0.2.0"
+g -C "${p}" checkout -q main
+g -C "${p}" merge -q --no-ff develop -m "Merge pull request #53 from someone/develop" -m "PILOT-170: Release v0.2.0"
+publish 1_mvp_pilot_be --dry-run
+[ "${rc}" -eq 0 ] || fail "card from release PR" "exit ${rc}: ${err}"
+grep -qxF "publish-mirror: PR title: PILOT-170: Release v0.2.0" <<<"${err}" || fail "card from release PR" "title not logged: ${err}"
+grep -qE "^dry run: gh api -X POST .*title=PILOT-170: Release v0.2.0" <<<"${err}" ||
+  fail "card from release PR" "PR call not printed: ${err}"
+[ -z "$(calls)" ] || fail "card from release PR" "gh was called: $(calls)"
+rm -rf "$(dirname "$(sed -n 's/^dry run: not pushed; inspect //p' <<<"${err}")")"
+echo "PASS release card from the release PR when the changelog commit has no card"
+
+# --- a release sync carries the tag's changelog section
+new_fixture
+p="${tmp}/primary"
+primary_commit CHANGELOG.md "# Changelog\n\n## [Unreleased]\n\n### Added\n\n## [0.2.0] - 2026-10-21\n\n### Added\n\n- Mirror release by ${src_login}\n\n## [0.1.0] - 2026-10-16\n\n- Old entry\n"
+publish 1_mvp_pilot_be
+[ "${rc}" -eq 0 ] || fail "changelog, no tag" "exit ${rc}: ${err}"
+last_post() {
+  calls | python3 -c '
+import json, sys
+posts = [c for c in map(json.loads, sys.stdin) if c["argv"][0] == "api" and c["method"] == "POST"]
+print(posts[-1]["fields"]["'"$1"'"], end="")'
+}
+want="Sync of 1_mvp_pilot_be from main at $(git -C "${p}" rev-parse --short=7 main)."$'\n\nType: chore'
+[ "$(last_post body)" = "${want}" ] || fail "changelog, no tag" "a sync without a tag has a changed body: $(last_post body)"
+g -C "${p}" commit -q --allow-empty -m "PILOT-165: Release 0.2.0 changelog"
+g -C "${p}" tag -a v0.2.0 -m "Release v0.2.0"
+publish 1_mvp_pilot_be --dry-run
+[ "${rc}" -eq 0 ] || fail "changelog, dry run" "exit ${rc}: ${err}"
+grep -qxF "Changelog of v0.2.0:" <<<"${err}" || fail "changelog, dry run" "version sentence not printed: ${err}"
+grep -qxF "## Changelog" <<<"${err}" || fail "changelog, dry run" "changelog not printed: ${err}"
+rm -rf "$(dirname "$(sed -n 's/^dry run: not pushed; inspect //p' <<<"${err}")")"
+publish 1_mvp_pilot_be
+[ "${rc}" -eq 0 ] || fail "changelog" "exit ${rc}: ${err}"
+body=$(last_post body)
+[ "$(grep -cxF "## Changelog" <<<"${body}")" -eq 1 ] || fail "changelog" "not one exact ## Changelog heading: ${body}"
+! grep -qF "## Changelog (" <<<"${body}" || fail "changelog" "the heading names the version: ${body}"
+grep -xF -e "Changelog of v0.2.0:" -e "## Changelog" <<<"${body}" | head -n 1 | grep -qxF "Changelog of v0.2.0:" ||
+  fail "changelog" "no version sentence above the heading: ${body}"
+# The pilots' pr-conventions condition 4 compares this block with release-notes.sh output.
+block=$(awk '$0 == "## Changelog" { found = 1; next } found && /^Type:/ { exit } found' <<<"${body}")
+[ "${block}" = $'\n### Added\n\n- Mirror release by OlegShevtsov1' ] || fail "changelog" "block is not exactly the section: ${block}"
+grep -qxF -- "- Mirror release by OlegShevtsov1" <<<"${body}" || fail "changelog" "entry missing or owner not replaced: ${body}"
+! grep -qF -e "Old entry" -e "[Unreleased]" -e "## [0.2.0]" <<<"${body}" || fail "changelog" "not exactly the section: ${body}"
+[ "$(tail -n 1 <<<"${body}")" = "Type: chore" ] || fail "changelog" "Type line is not last: ${body}"
+[ "$(last_post title)" = "PILOT-165: Release v0.2.0" ] || fail "changelog" "title is $(last_post title)"
+# The sdlc mirror runs pr-conventions.sh on this PR: the block must pass it.
+mkdir -p "${tmp}/conventions-gh"
+printf '#!/bin/sh\necho 1\n' > "${tmp}/conventions-gh/gh"
+chmod +x "${tmp}/conventions-gh/gh"
+git -C "${tmp}/mirror.git" show main:CHANGELOG.md > "${tmp}/mirror-changelog.md"
+CHANGELOG_FILE="${tmp}/mirror-changelog.md" PATH="${tmp}/conventions-gh:${PATH}" REPO=o/r BASE_REF=main HEAD_REF=develop PR_TITLE="$(last_post title)" \
+  PR_BODY="${body}" bash "$(dirname "${src}")/ci/pr-conventions.sh" >/dev/null ||
+  fail "changelog" "the release PR body fails pr-conventions.sh"
+echo "PASS a release sync carries the tag's changelog section, which passes pr-conventions"
+
+# Two tags in one sync: the title names the higher one, and condition 4 reads the first bare ## Changelog block.
+new_fixture
+p="${tmp}/primary"
+primary_commit CHANGELOG.md "# Changelog\n\n## [0.2.1] - 2026-10-22\n\n- Hotfix entry\n\n## [0.2.0] - 2026-10-21\n\n- Release entry\n"
+g -C "${p}" commit -q --allow-empty -m "PILOT-166: Release 0.2.1 changelog"
+g -C "${p}" tag -a v0.2.0 -m "Release v0.2.0"
+g -C "${p}" tag -a v0.2.1 -m "Release v0.2.1"
+publish 1_mvp_pilot_be
+[ "${rc}" -eq 0 ] || fail "changelog, two tags" "exit ${rc}: ${err}"
+body=$(last_post body)
+[ "$(last_post title)" = "PILOT-166: Release v0.2.1" ] || fail "changelog, two tags" "title is $(last_post title)"
+grep -qxF "Tags: v0.2.0 v0.2.1" <<<"${body}" || fail "changelog, two tags" "Tags line is wrong: ${body}"
+[ "$(grep -cxF "## Changelog" <<<"${body}")" -eq 1 ] || fail "changelog, two tags" "not one exact ## Changelog heading: ${body}"
+grep -qxF "Changelog of v0.2.1:" <<<"${body}" || fail "changelog, two tags" "no sentence naming the title's tag: ${body}"
+block=$(awk '$0 == "## Changelog" { found = 1; next } found && /^Type:/ { exit } found' <<<"${body}")
+[ "${block}" = $'\n- Hotfix entry' ] || fail "changelog, two tags" "block is not the title tag's section: ${block}"
+git -C "${tmp}/mirror.git" show main:CHANGELOG.md > "${tmp}/mirror-changelog.md"
+CHANGELOG_FILE="${tmp}/mirror-changelog.md" PATH="${tmp}/conventions-gh:${PATH}" REPO=o/r BASE_REF=main HEAD_REF=develop PR_TITLE="$(last_post title)" \
+  PR_BODY="${body}" bash "$(dirname "${src}")/ci/pr-conventions.sh" >/dev/null ||
+  fail "changelog, two tags" "the release PR body fails pr-conventions.sh"
+echo "PASS a sync carrying two tags has one ## Changelog block, the title tag's, which passes pr-conventions"
+
+for cl in "# Changelog\n\n## [Unreleased]\n\n## [0.1.0] - 2026-10-16\n\n- Old entry\n" \
+  "# Changelog\n\n## [0.2.0] - 2026-10-21\n\n### Added\n\n### Fixed\n\n## [0.1.0] - 2026-10-16\n\n- Old entry\n"; do
+  new_fixture
+  primary_commit CHANGELOG.md "${cl}"
+  g -C "${tmp}/primary" commit -q --allow-empty -m "PILOT-165: Release 0.2.0 changelog"
+  g -C "${tmp}/primary" tag -a v0.2.0 -m "Release v0.2.0"
+  seed=$(mirror_head)
+  publish 1_mvp_pilot_be
+  [ "${rc}" -eq 1 ] || fail "changelog refusal" "exit ${rc}, want 1: ${err}"
+  grep -qF "CHANGELOG.md at v0.2.0 has no section ## [0.2.0] with an entry" <<<"${err}" ||
+    fail "changelog refusal" "reason not named: ${err}"
+  [ "$(mirror_head)" = "${seed}" ] || fail "changelog refusal" "mirror main moved"
+  [ -z "$(mirror_develop)" ] || fail "changelog refusal" "develop was pushed"
+  [ -z "$(calls)" ] || fail "changelog refusal" "gh was called: $(calls)"
+done
+echo "PASS a release whose CHANGELOG.md has no entry for the tag is refused before any write"
+
+# The synced tree is scanned for the owner; the section is read at the tag, which a resumed sync takes as it is now.
+new_fixture
+p="${tmp}/primary"
+primary_commit CHANGELOG.md "# Changelog\n\n## [0.2.0] - 2026-10-21\n\n- Fixed\n"
+g -C "${p}" commit -q --allow-empty -m "PILOT-165: Release 0.2.0 changelog"
+g -C "${p}" tag -a v0.2.0 -m "Release v0.2.0"
+FAKE_GH_CHECKS=pending publish 1_mvp_pilot_be
+[ "${rc}" -eq 3 ] || fail "leftover in the changelog section" "first run: exit ${rc}, want 3: ${err}"
+g -C "${p}" checkout -q -b retag
+primary_commit CHANGELOG.md "# Changelog\n\n## [0.2.0] - 2026-10-21\n\n- Fixed by ${src_login^^}\n"
+g -C "${p}" tag -f -a v0.2.0 -m "Release v0.2.0" >/dev/null
+g -C "${p}" checkout -q main
+head=$(mirror_head)
+develop=$(mirror_develop)
+before=$(calls)
+publish 1_mvp_pilot_be
+[ "${rc}" -eq 2 ] || fail "leftover in the changelog section" "exit ${rc}, want 2: ${err}"
+grep -qF "resuming its PR" <<<"${err}" || fail "leftover in the changelog section" "the resume path did not run: ${err}"
+grep -qF "the changelog section of v0.2.0 still contains the primary owner" <<<"${err}" ||
+  fail "leftover in the changelog section" "reason not named: ${err}"
+[ "$(mirror_head)" = "${head}" ] || fail "leftover in the changelog section" "mirror main moved"
+[ "$(mirror_develop)" = "${develop}" ] || fail "leftover in the changelog section" "develop moved"
+[ "$(calls)" = "${before}" ] || fail "leftover in the changelog section" "gh was called"
+echo "PASS refusal on a leftover in the tag's changelog section"
 
 # --- the default ref of every repo is origin/main
 for r in 1_mvp_sdlc 1_mvp_pilot_fe; do
@@ -675,4 +844,8 @@ publish 1_mvp_infra
 [ "${rc}" -eq 64 ] || fail "usage" "exit ${rc}, want 64"
 publish
 [ "${rc}" -eq 64 ] || fail "usage" "no repo: exit ${rc}, want 64"
+for card in "" PILOT-0 165; do
+  publish 1_mvp_pilot_be --card ${card:+"${card}"}
+  [ "${rc}" -eq 64 ] || fail "usage" "--card '${card}': exit ${rc}, want 64"
+done
 echo "PASS repos outside the allowlist are rejected"

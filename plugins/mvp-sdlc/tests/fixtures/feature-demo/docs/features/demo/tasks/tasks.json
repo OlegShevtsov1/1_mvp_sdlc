@@ -34,7 +34,7 @@
       "dod": ["integration test for the refusal passes", "lint + vet clean"],
       "files_hint": ["app/policies/order_export_policy.rb"],
       "owner": "Backend lead",
-      "estimate": "L",
+      "estimate": "XL",
       "status": "todo"
     }
   ]

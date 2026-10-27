@@ -41,13 +41,19 @@ pushing an annotated release tag.
   `docs`, `refactor`, `test`, `ci`, always, also for the types that do not change the version. A
   `BREAKING CHANGE: <what>` footer marks a MAJOR change (R-C9, unchanged). `next-version.sh` (planned, C4) reads the
   `Type:` line, not a subject prefix: `feat` → MINOR, `fix` → PATCH, the rest no bump.
+- **Release titles** (decision 91): every release, interim ones included, has its own Trello card. The release-prep
+  pull request is `PILOT-<card>: Release X.Y.Z changelog`; the release pull request `develop` → `main` and the mirror
+  sync pull request are `PILOT-<card>: Release vX.Y.Z`. `PILOT-0` is only for card-less chores, never for a release;
+  how the release card moves is in [Board flow](03-dor-dod.md#board-flow).
 - **Commits inside the branch**: Conventional Commits with `Co-Authored-By` when an agent wrote the change: `test(`,
   `feat(`, `fix(`, `refactor(`, `docs(`, `ci(`, `chore(`. Task commits are the three TDD commits (R-C3) with the
   `SDLC-Task` and `SDLC-AC` trailers ([04-tdd-execution.md](04-tdd-execution.md)); they disappear in the squash.
-- **Factory pull request text**: `/mvp-sdlc:task-brief` puts the title `PILOT-<idShort>: <card title>` and the
-  description lines `Type:` (the task's optional `type` in `tasks/tasks.json`, default `feat`), `SDLC-Task` and
-  `SDLC-AC` into the factory task. The card number and title come from `state.json`, written by
-  `/mvp-sdlc:feature-start` (in the frontend: from the `.spec-source` record of `/mvp-sdlc:sync-spec`). A factory task
+- **Factory pull request text**: `/mvp-sdlc:task-brief` puts the title `PILOT-<task card idShort>: <task title>` and
+  the description lines `Type:` (the task's optional `type` in `tasks/tasks.json`, default `feat`), `SDLC-Task` and
+  `SDLC-AC` into the factory task. The task card number comes from `tasks/tasks.json`, written by
+  `/mvp-sdlc:task-cards` (decision 78); a task without a card falls back, with a warning, to the feature card's
+  `PILOT-<n>: <card title>` from `state.json`, written by `/mvp-sdlc:feature-start` (in the frontend: from the
+  `.spec-source` record of `/mvp-sdlc:sync-spec`). Frontend tasks are briefed with `--from <be checkout>`. A factory task
   written by hand for an app repository must carry the same lines.
 - **Deploy triggers** (decision 28): Dev Deploy (`dev-deploy.yml`) runs on pushes to `develop` and to `hotfix/*`
   branches only; the release pull request deploys nothing by itself, and a `main` commit reaches dev only by a
@@ -60,9 +66,10 @@ pushing an annotated release tag.
 - Factory branches `archon/task-factory-*` and human branches `feature/PILOT-<n>-<slug>` or
   `hotfix/PILOT-<n>-<slug>` go into `develop`.
 - `main` is what the marketplace `mvp` and `install.sh` users read; it stays the default branch.
-- A release is a pull request `develop` → `main` (title `PILOT-<n>: …`, `Type: chore`, head `develop`) that the
-  operator merges with a merge commit, then the annotated tag `vX.Y.Z` equal to the `mvp-sdlc` version
-  ([06-releases-changelog-hotfix.md](06-releases-changelog-hotfix.md)).
+- A release is a pull request `develop` → `main` (title `PILOT-<n>: Release vX.Y.Z` (decisions 58, 91: the
+  release's own card), `Type: chore`, head `develop`, and a body that carries `## Changelog` with the version's
+  `CHANGELOG.md` section) that the operator merges with a merge commit, then the annotated tag `vX.Y.Z` equal to
+  the `mvp-sdlc` version ([06-releases-changelog-hotfix.md](06-releases-changelog-hotfix.md)).
 - No deploy, no Dev Deploy and no `tdd-check.yml` here. The checks are `ci.yml`, `pr-conventions-check.yml`
   (`scripts/ci/pr-conventions.sh`), `develop-guard.yml` and `main-guard.yml` (`scripts/ci/main-guard.sh`, alerts to
   `MVP_VPN_ALERTS`).
@@ -72,7 +79,10 @@ pushing an annotated release tag.
 - `pr-conventions-check.yml` (decision 29), the authoritative gate, on every pull request into `develop` or `main`:
   (1) the head branch is `feature/PILOT-<n>-<slug>`, `hotfix/PILOT-<n>-<slug>`, `archon/task-factory-*`, or `develop`
   when the base is `main`; (2) the title matches `^PILOT-[0-9]+: .+$`; (3) the body has exactly one line starting
-  with `Type:` and its value is one of the seven types.
+  with `Type:` and its value is one of the seven types; (4) a release pull request `PILOT-<n>: Release vX.Y.Z`
+  carries a non-empty `## Changelog` section for the version (decision 64; in this repository); (5) a title
+  `PILOT-0…: Release …` fails, into any base (decision 91; in every develop-model repository, condition 4 of the
+  be/fe templates).
 - `develop-guard.yml`: the twin of `main-guard.yml` for `develop` (decision 27); every commit pushed to `develop`
   must come from a merged pull request, else a Telegram alert. Skipped where the repository variable `MIRROR` is
   `true` (the public mirrors, decision 51).

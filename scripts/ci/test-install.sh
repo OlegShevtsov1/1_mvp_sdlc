@@ -38,7 +38,11 @@ install() {
 
 install
 [ "${rc}" -eq 0 ] || fail "fresh install" "exit ${rc}: ${out}"
-diff -r "${factory_src}" "${factory_dst}" >/dev/null || fail "fresh install" "installed factory differs from the repository"
+diff -r -x notify-telegram.sh "${factory_src}" "${factory_dst}" >/dev/null ||
+  fail "fresh install" "installed factory differs from the repository"
+helper="${factory_dst}/scripts/_lib/notify-telegram.sh"
+cmp -s "${root}/scripts/ci/notify-telegram.sh" "${helper}" && [ -x "${helper}" ] ||
+  fail "fresh install" "the notify helper is not installed into the pack"
 for y in "${root}"/orchestration/workflows/*.yaml; do
   cmp -s "${y}" "${home}/workflows/$(basename "${y}")" || fail "fresh install" "$(basename "${y}") differs or is missing"
 done

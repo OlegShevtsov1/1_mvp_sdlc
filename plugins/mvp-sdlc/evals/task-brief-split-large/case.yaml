@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "name": "task-brief-split-large",
-  "description": "Skill task-brief and bin/task-brief: a task estimated L gets no brief and its estimate is not edited.",
+  "description": "Skill task-brief and bin/task-brief: a task estimated XL gets no brief and its estimate is not edited.",
   "tags": [
     "golden"
   ],
@@ -10,7 +10,7 @@
   },
   "execution": {
     "prompt": "Save the factory task text for task T3 of feature demo to brief-T3.md in the repository root. Do not change any other file.",
-    "max_turns": 10,
+    "max_turns": 14,
     "timeout_seconds": 300,
     "allowed_tools": [
       "Bash",
@@ -34,7 +34,7 @@
         "source": "file",
         "path": "docs/features/demo/tasks/tasks.json"
       },
-      "pattern": "\"estimate\": \"L\"",
+      "pattern": "\"estimate\": \"XL\"",
       "match": "contains"
     }
   ]

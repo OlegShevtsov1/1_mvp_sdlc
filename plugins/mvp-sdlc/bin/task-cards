@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""Give every task of a feature its own Trello card (decision 78) and record it in tasks/tasks.json.
+
+Usage: task-cards <slug> [--dry-run]   (run in the backend repository, after break-tasks wrote tasks/tasks.json)
+The feature must have been started from its card (state.json trello_card_id). Per task, in tasks.json order:
+- kept: the task records a card (trello_card_id, trello_card_id_short) that is an open card on the board;
+- adopt: no recorded card and exactly one open board card named `<slug> <task id>: <title>` (the name this command
+  gives; hand-made cards follow it too) -> its id and number are recorded, the card itself is left as it is;
+- create: no recorded card and no such card -> a card in the Ready list with the label `task`, named
+  `<slug> <task id>: <task title>`, whose description links the feature card and the task file.
+A recorded card that is not an open card on the board, two cards with the adoptable name, or one recorded for
+another task are reported and nothing is written: fix tasks.json or the board, never duplicate a card.
+The feature card gets one checklist item `<task id>: <task card link>` per task (checklist `Tasks`); an item that
+already starts with the task id (one added by hand) gets the link appended instead, keeping its text and its tick.
+tasks.json is rewritten after every recorded card,
+so a re-run after a failure creates only what is still missing. --dry-run reads the board and prints the decisions
+without writing anything. Everything is validated before anything is written.
+Credentials and the board id resolve as in feature-start: they reach curl on stdin only and are never printed.
+Card text is untrusted data: the output carries only task ids, card numbers and this command's own words.
+Exit 0 when every task has its card and checklist item (dry run: nothing to refuse), 1 refused or partially done
+(stderr says exactly what was done; re-running is safe).
+"""
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import sdlc_common  # noqa: E402
+
+# Importing a bin/ command must not leave a __pycache__ beside the commands on the PATH.
+sys.dont_write_bytecode = True
+feature_start = sdlc_common.load_script("bin/feature-start")
+feature_state = feature_start.feature_state
+Refused = feature_start.Refused
+TrelloError = feature_start.TrelloError
+
+TASK_LABEL = "task"
+CHECKLIST = "Tasks"
+
+
+def task_cards_of(tasks, rel):
+    """Validate tasks.json's tasks; {task id: recorded card id or None}."""
+    recorded, seen = {}, {}
+    for task in tasks:
+        if not (isinstance(task, dict) and isinstance(task.get("id"), str) and task["id"].strip()):
+            raise Refused("{} has a task without an id".format(rel))
+        task_id = task["id"]
+        if task_id in recorded:
+            raise Refused("{} lists task {} twice".format(rel, task_id))
+        if not (isinstance(task.get("title"), str) and task["title"].strip()):
+            raise Refused("task {} in {} has no title".format(task_id, rel))
+        try:
+            card = feature_start.task_card(task)
+        except ValueError:
+            raise Refused(
+                "task {} in {} has invalid trello_card_id/trello_card_id_short: fix or remove both".format(task_id, rel)
+            )
+        recorded[task_id] = card and card[0]
+        if card is None:
+            continue
+        if card[0] in seen:
+            raise Refused("tasks {} and {} in {} record the same card".format(seen[card[0]], task_id, rel))
+        seen[card[0]] = task_id
+    return recorded
+
+
+def decide(slug, tasks, recorded, board_cards):
+    """[(task, action, board card or None)] and the problems that stop every write."""
+    by_id = {card["id"]: card for card in board_cards}
+    owner = {card_id: task_id for task_id, card_id in recorded.items() if card_id}
+    plan, problems = [], []
+    for task in tasks:
+        task_id, card_id = task["id"], recorded[task["id"]]
+        if card_id:
+            if card_id in by_id:
+                plan.append((task, "kept", by_id[card_id]))
+            else:
+                plan.append((task, "missing", None))
+                problems.append(
+                    "{} records card PILOT-{}, which is not an open card on the board; fix tasks.json".format(
+                        task_id, task["trello_card_id_short"]
+                    )
+                )
+            continue
+        name = re.compile(r"{} {}:\s*\S.*".format(re.escape(slug), re.escape(task_id)), re.S)
+        matches = [card for card in board_cards if name.fullmatch(card.get("name") or "")]
+        if len(matches) > 1:
+            plan.append((task, "ambiguous", None))
+            problems.append(
+                "{}: {} open cards are named '{} {}: ...' ({}); archive the extra ones".format(
+                    task_id, len(matches), slug, task_id, ", ".join(number(card) for card in matches)
+                )
+            )
+        elif matches and matches[0]["id"] in owner:
+            plan.append((task, "conflict", None))
+            problems.append(
+                "{}: the card {} named for it is recorded for {}; fix tasks.json".format(
+                    task_id, number(matches[0]), owner[matches[0]["id"]]
+                )
+            )
+        elif matches:
+            plan.append((task, "adopt", matches[0]))
+        else:
+            plan.append((task, "create", None))
+    return plan, problems
+
+
+def number(card):
+    id_short = card.get("idShort")
+    return "PILOT-{}".format(id_short if feature_state.valid_card_number(id_short) else "?")
+
+
+def checklist_item(checklists, task_id, link):
+    """("present", None) when an item for the task carries the link of its card, ("link", the item) when one starts
+    with the task id without it, else ("add", None). A link of None (a card still to create) matches no item."""
+    start = re.compile(r"{}(?![0-9])".format(re.escape(task_id)))
+    items = [
+        item for checklist in checklists for item in checklist.get("checkItems") or []
+        if start.match((item.get("name") or "").strip())
+    ]
+    if link is not None and any(link in item.get("name", "") for item in items):
+        return "present", None
+    return ("link", items[0]) if items else ("add", None)
+
+
+def task_file(root, feature, task_id):
+    """Repo-relative path of the task's file in tasks/ (`t1.md`, `t1-...md`), else of the tasks/ folder."""
+    folder = feature / "tasks"
+    prefix = task_id.lower()
+    files = [
+        path for path in sorted(folder.iterdir())
+        if path.is_file() and path.suffix == ".md" and (path.stem.lower() == prefix or path.name.lower().startswith(
+            prefix + "-"))
+    ]
+    target, kind = (files[0], "blob") if len(files) == 1 else (folder, "tree")
+    return target.relative_to(root).as_posix(), kind
+
+
+def description(root, environ, feature, slug, task, feature_card):
+    path, kind = task_file(root, feature, task["id"])
+    link = feature_start.github_link(root, path, sdlc_common.base_branch(root, environ), kind)
+    return "\n".join([
+        "Task {} of feature {}: feature card {} {}.".format(task["id"], slug, number(feature_card),
+                                                            feature_card.get("shortUrl", "")),
+        "Task file: {}".format(link),
+        "Its pull request is titled PILOT-<this card's number>: {} (decision 78).".format(title(task)),
+    ])
+
+
+def title(task):
+    return " ".join(task["title"].split())
+
+
+def save(path, data):
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def run(root, slug, dry_run, environ):
+    feature = sdlc_common.feature_dir(root, slug)
+    rel = (sdlc_common.FEATURES_DIR / slug / "tasks" / "tasks.json").as_posix()
+    try:
+        state = feature_state.read(root, slug)
+    except feature_state.StateError as exc:
+        raise Refused(str(exc))
+    feature_id = state.get("trello_card_id")
+    if not (isinstance(feature_id, str) and feature_start.CARD_ID.fullmatch(feature_id)):
+        raise Refused("feature {} has no Trello card: start the feature from its card with feature-start "
+                      "first".format(slug))
+    tasks_path = Path(root) / rel
+    try:
+        data = json.loads(tasks_path.read_text(encoding="utf-8"))
+        tasks = data["tasks"]
+        if not isinstance(tasks, list):
+            raise TypeError
+    except OSError:
+        raise Refused("{} not found: run break-tasks first".format(rel))
+    except (ValueError, KeyError, TypeError):
+        raise Refused("{} does not follow the tasks.json contract".format(rel))
+    recorded = task_cards_of(tasks, rel)
+
+    key, token, board = feature_start.credentials(root, environ)
+    lists = sdlc_common.board_lists(root)
+    trello = feature_start.Trello(key, token)
+    try:
+        feature_card = trello.call("GET", "/cards/" + feature_id, {"fields": "name,idBoard,closed,shortUrl,idShort"})
+        board_lists = trello.call("GET", "/boards/{}/lists".format(board), {"fields": "name,idBoard"})
+        labels = trello.call("GET", "/boards/{}/labels".format(board), {"fields": "name"})
+        board_cards = trello.call("GET", "/boards/{}/cards".format(board), {"fields": "name,idShort,shortUrl,closed"})
+        checklists = trello.call("GET", "/cards/{}/checklists".format(feature_id))
+    except TrelloError as exc:
+        raise Refused("cannot read the board: {}".format(exc))
+    if feature_card.get("idBoard") not in {item.get("idBoard") for item in board_lists} | {board}:
+        raise Refused("the feature card is not on this project's board")
+    if feature_card.get("closed"):
+        raise Refused("the feature card is archived")
+    ready = next((i["id"] for i in board_lists if (i.get("name") or "").strip().lower() == lists["ready"].lower()),
+                 None)
+    if ready is None:
+        raise Refused("the board has no {} list".format(lists["ready"]))
+    label = next((i["id"] for i in labels if (i.get("name") or "").strip().lower() == TASK_LABEL), None)
+    if label is None:
+        raise Refused("the board has no label named {}".format(TASK_LABEL))
+
+    plan, problems = decide(slug, tasks, recorded, [c for c in board_cards if not c.get("closed")])
+    if dry_run or problems:
+        for task, action, card in plan:
+            print("task-cards: {} {}{}".format(task["id"], number(card) + " " if card else "", action))
+        for task, action, card in plan:
+            if action not in ("missing", "ambiguous", "conflict"):
+                link = card.get("shortUrl", "") if card else None
+                print("task-cards: checklist item {} {}".format(task["id"], checklist_item(checklists, task["id"],
+                                                                                            link)[0]))
+        if problems:
+            raise Refused("nothing was written:\n" + "\n".join("- " + p for p in problems))
+        print("task-cards: dry run, nothing written")
+        return
+
+    done, cards = [], {}
+    try:
+        for task, action, card in plan:
+            if action == "create":
+                card = trello.call("POST", "/cards", data={
+                    "idList": ready,
+                    "idLabels": label,
+                    "pos": "bottom",
+                    "name": "{} {}: {}".format(slug, task["id"], title(task)),
+                    "desc": description(root, environ, feature, slug, task, feature_card),
+                })
+                if not (feature_start.CARD_ID.fullmatch(card.get("id") or "")
+                        and feature_state.valid_card_number(card.get("idShort"))):
+                    raise TrelloError("POST /cards: the answer has no card id and number")
+            if action in ("create", "adopt"):
+                task["trello_card_id"], task["trello_card_id_short"] = card["id"], card["idShort"]
+                save(tasks_path, data)
+            word = {"create": "created", "adopt": "adopted", "kept": "kept"}[action]
+            done.append("{} {} {}".format(task["id"], number(card), word))
+            print("task-cards: " + done[-1])
+            cards[task["id"]] = card
+        tasks_checklist = next((c for c in checklists if (c.get("name") or "").strip() == CHECKLIST), None)
+        for task, _, _ in plan:
+            link = cards[task["id"]].get("shortUrl", "")
+            state_word, item = checklist_item(checklists, task["id"], link)
+            if state_word == "present":
+                print("task-cards: checklist item {} present".format(task["id"]))
+                continue
+            if state_word == "link":
+                if not feature_start.CARD_ID.fullmatch(item.get("id") or ""):
+                    raise TrelloError("the checklist item of {} has no id".format(task["id"]))
+                trello.call("PUT", "/cards/{}/checkItem/{}".format(feature_id, item["id"]),
+                            data={"name": "{} {}".format(item["name"].strip(), link)})
+                done.append("checklist item {} linked".format(task["id"]))
+                print("task-cards: " + done[-1])
+                continue
+            if tasks_checklist is None:
+                tasks_checklist = trello.call("POST", "/cards/{}/checklists".format(feature_id),
+                                              data={"name": CHECKLIST})
+                done.append("checklist {} created on {}".format(CHECKLIST, number(feature_card)))
+            trello.call("POST", "/checklists/{}/checkItems".format(tasks_checklist["id"]),
+                        data={"name": "{}: {}".format(task["id"], link)})
+            done.append("checklist item {} added".format(task["id"]))
+            print("task-cards: " + done[-1])
+    except TrelloError as exc:
+        raise Refused("a Trello write failed ({}). Done before the failure: {}; every card above is recorded in {}. "
+                      "Re-running task-cards {} is safe: it keeps the recorded cards.".format(
+                          exc, "; ".join(done) or "nothing", rel, slug))
+    print("task-cards: every task of {} has its card and a checklist item linking it on {}".format(
+        slug, number(feature_card)))
+
+
+def main(argv, environ):
+    args = [a for a in argv if a != "--dry-run"]
+    if len(args) != 1 or len(argv) - len(args) > 1:
+        print("usage: task-cards <slug> [--dry-run]", file=sys.stderr)
+        return 1
+    slug = args[0]
+    try:
+        if not sdlc_common.valid_slug(slug):
+            raise Refused("invalid slug {!r}: must match {}".format(slug, sdlc_common.SLUG_RE.pattern))
+        root = sdlc_common.repo_root()
+        if root is None:
+            raise Refused("not inside a git repository")
+        run(root, slug, len(argv) > len(args), environ)
+    except Refused as exc:
+        print("task-cards: {}".format(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:], os.environ))

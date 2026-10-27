@@ -15,12 +15,17 @@
 # checked: they reached main through an operator-merged pull request, so a back-merge of main into
 # develop after a hotfix whose every commit is already on main passes.
 #
-# Usage: [PR_BODY=<pull request body>] [MAIN_REF=<ref>] bin/tdd-check <base sha> <head sha>
+# <base> is the pull request's base branch as fetched (the workflow passes origin/<base ref>), not
+# the event's base sha: GitHub does not move that sha when the base branch advances, so commits
+# merged in from the advanced base would count as the pull request's own.
+#
+# Usage: [PR_BODY=<pull request body>] [MAIN_REF=<ref>] bin/tdd-check <base> <head sha>
 # Prints ::error::condition <n> failed: ... for every failed condition. On success writes
 # test_sha=<sha> to GITHUB_OUTPUT when it is set. Exit 0 pass, 1 fail, 2 usage error.
 set -euo pipefail
 
-[[ $# -eq 2 ]] || { echo "usage: $0 <base sha> <head sha>" >&2; exit 2; }
+[[ $# -eq 2 ]] || { echo "usage: $0 <base> <head sha>" >&2; exit 2; }
+git rev-parse --verify --quiet "$1^{commit}" > /dev/null || { echo "error: base $1 does not resolve" >&2; exit 2; }
 
 mapfile -t commits < <(git rev-list --reverse --topo-order --no-merges "$1..$2")
 if [[ -n "${MAIN_REF:-}" ]] && (( ${#commits[@]} > 0 )); then

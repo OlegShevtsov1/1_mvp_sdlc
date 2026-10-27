@@ -10,7 +10,7 @@
   },
   "execution": {
     "prompt": "Save the factory task text for task T1 of feature demo to brief-T1.md in the repository root.",
-    "max_turns": 10,
+    "max_turns": 14,
     "timeout_seconds": 300,
     "allowed_tools": [
       "Bash",

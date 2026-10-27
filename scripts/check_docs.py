@@ -34,6 +34,10 @@ ELSEWHERE = {
     "project-e2e.sh": "1_mvp_infra: tests/e2e/project-e2e.sh",
     "vpnctl project list": "1_mvp_infra: bin/vpnctl",
     "vpnctl project show": "1_mvp_infra: bin/vpnctl",
+    "vpnctl project add": "1_mvp_infra: bin/vpnctl",
+    "vpnctl project bootstrap": "1_mvp_infra: bin/vpnctl",
+    "vpnctl project delegate": "1_mvp_infra: bin/vpnctl",
+    "vpnctl project remove": "1_mvp_infra: bin/vpnctl",
 }
 # token -> (run that delivers it, path in this repository or None). A line naming one must say "planned" and the run.
 PLANNED = {
@@ -42,17 +46,14 @@ PLANNED = {
     "next-version.sh": ("C4", None),
     "release-watch": ("C4", None),
     "bin/sdlc-metrics": ("C4", None),
-    "bin/project-add": ("S5", "bin/project-add"),
-    "vpnctl project add": ("P2", None),
-    "vpnctl project bootstrap": ("P2", None),
-    "vpnctl project delegate": ("P2", None),
-    "vpnctl project remove": ("P2", None),
 }
 # Typed confirm word -> None (exists today) or the run that delivers it (same "planned" rule as PLANNED).
 CONFIRMS = {
     "confirm=prod": None,
     "confirm=remove-prod": None,
-    "DELEGATE-<name>": "P2",
+    "DELEGATE-<name>": None,
+    "REMOVE-<name>": None,
+    "PUSH-<name>": None,
 }
 OPERATOR_SECTIONS = (
     "## 1. One-time setup",

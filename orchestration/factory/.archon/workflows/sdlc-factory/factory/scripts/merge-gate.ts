@@ -4,12 +4,13 @@ import { parseSecretNames, runLogged } from "./_lib/exec.ts";
 import { type CiCheck, ciRefusal, isManualBase, lintCheck, parseManualMergeBases, PR_URL } from "./_lib/merge-decision.ts";
 
 // Bindings (see factory.yaml `merge-gate` node): pr (the whole pr-state
-// output), test_command, lint_command, build_command, secret_names and
+// output), body_sync (the whole pr-body-sync output), test_command, lint_command, build_command, secret_names and
 // manual_merge_bases (JSON array strings). ARTIFACTS_DIR is engine-provided.
 // Always exits 0 with one {action, pr_url, head, base, reason} line: a
 // refusal is a reported state, and a node failure would leave the conditions
 // of `merge` and `notify-operator` unreadable.
 const pr = parseJsonObject(process.env.INPUTS_PR ?? "") ?? {};
+const bodySync = parseJsonObject(process.env.INPUTS_BODY_SYNC ?? "") ?? {};
 const secretNames = parseSecretNames(process.env.INPUTS_SECRET_NAMES ?? "[]");
 const manualBases = parseManualMergeBases(process.env.INPUTS_MANUAL_MERGE_BASES ?? "");
 const artifactsDir = process.env.ARTIFACTS_DIR ?? ".";
@@ -46,12 +47,19 @@ async function decide(): Promise<Decision> {
   if (pr.is_draft !== false || pr.state !== "OPEN") {
     return refuse(head, `not an open, ready pull request (state ${String(pr.state)}, draft ${String(pr.is_draft)})`);
   }
+  // Only a definite conflict refuses: GitHub reports UNKNOWN for a while after
+  // every push, and a merge gh then refuses is reported by the merge node.
+  if (pr.mergeable === "CONFLICTING") return refuse(head, `the pull request is not mergeable: it conflicts with ${base}`);
   if (pr.checkout_is_head !== true) {
     return refuse(head, "the checkout is not the pull request head, so the checks would not test what would be merged");
   }
   if (pr.checkout_clean !== true) return refuse(head, "the checkout has uncommitted changes to tracked files");
   // An unreadable checks list would otherwise look like a project without CI.
   if (pr.checks_read !== true) return refuse(head, "could not read the pull request's CI checks from GitHub");
+  // The squash commit carries the description, so a stale one must not merge.
+  if (!["updated", "unchanged", "skipped"].includes(str(bodySync.action))) {
+    return refuse(head, `the pull request description could not be republished: ${str(bodySync.reason) || "no pr-body-sync result"}`);
+  }
 
   const checks = ciChecks(pr.checks);
   const red = ciRefusal(checks);
@@ -59,8 +67,7 @@ async function decide(): Promise<Decision> {
 
   // Lint is the one command whose local result depends on where the checkout
   // lives (RuboCop's excludes miss under the run's .archon/ worktree path), so
-  // a passing CI lint job stands in for it. Test and build always re-run: on
-  // Archon v0.10.1 the PR can be flipped ready after an introduced red.
+  // a passing CI lint job stands in for it. Test and build always re-run.
   const ciLint = lintCheck(checks);
   const commands: Array<[string, string]> = [
     ["test", process.env.INPUTS_TEST_COMMAND ?? ""],

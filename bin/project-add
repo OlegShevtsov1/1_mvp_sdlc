@@ -1,0 +1,1074 @@
+#!/usr/bin/env python3
+"""Turn a project name into a working project: the new-project orchestrator (S5).
+
+Usage: bin/project-add <name> [--step <id>] [--dry-run]
+       bin/project-add --undo <name>
+
+Steps, in order (docs/project-add.md):
+  0 preflight  read-only probes: name, gh (owner, scopes), aws, Trello/Notion/Telegram APIs, RAG settings,
+               dev host memory (R-A8), a free VPN octet 70-99. Any failure stops the run before anything is written.
+  1 infra      vpnctl project add, wait for the registry PR merge, fast-forward the local 1_mvp_infra checkout,
+               vpnctl project bootstrap
+  2 repos      the be and fe repositories from the templates; the first commit on main after a typed PUSH-<name>
+               (R-C4), develop from the same commit (decision 24)
+  3 github     environments dev and prod, the guard workflows active, every secret it can source (SECRETS)
+  4 telegram   the project's alerts bot, two forum topics, ~/.config/telegram-bots/.env, the TELEGRAM_* secrets
+  5 trello     board <NAME> with the lists of bin/board-lists and the labels, TRELLO_BOARD_ID_<NAME>
+  6 notion     page <NAME> under PROJECTS
+  7 plugins    claude plugin list in each clone (a check: a miss is reported, the run goes on)
+  8 report     the result table, links and manual steps; posted to MVP_VPN_ALERTS and the Notion page
+
+`bin/project-add <name>` skips the steps recorded done and runs from the first that is not. `--step <id>` re-runs one
+step (each step is idempotent against the remote state) once every earlier step is done. `--dry-run` prints the plan
+and calls nothing. A pause prints the exact operator action; running the same command again continues from there.
+`--undo <name>` runs `vpnctl project remove <name>` (refused for `protected: true`) and prints what to delete by hand.
+
+State: ~/.local/state/project-add/<name>.json (no secrets). Reads ~/.config/{trello,notion,telegram-bots,mvp-rag,
+project-add}/.env (the environment wins); writes TELEGRAM_<NAME>_{PROD,DEV}_ALERTS_* and TRELLO_BOARD_ID_<NAME>.
+Environment: PROJECT_ADD_DEV_SSH (ssh destination of the dev host), PROJECT_ADD_REPOS_DIR (default ~/projects/mvp),
+PROJECT_ADD_MERGE_WAIT (seconds, default 600), PROJECT_ADD_POLL_SECONDS (default 10), AWS_PROFILE (default
+hs-action, as vpnctl). Contract with 1_mvp_infra's output: a registry PR URL from `project add`, `step 4 delegation`
+from a bootstrap that waits for delegation, `ERROR:` lines otherwise.
+Never prints a secret: values reach gh and curl on stdin only. Exit 0 done, dry run or undone; 1 stopped
+(a protected --undo too); 2 usage or a refused --step; 3 paused for the operator.
+"""
+import argparse
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlencode
+
+SDLC = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SDLC / "plugins" / "mvp-sdlc" / "lib"))
+import sdlc_common  # noqa: E402
+
+OWNER = "OlegShevtsov1"
+NAME = re.compile(r"^[a-z][a-z0-9]{1,15}$")
+STEPS = ("preflight", "infra", "repos", "github", "telegram", "trello", "notion", "plugins", "report")
+KINDS = ("be", "fe")
+TOOLS = ("gh", "aws", "git", "curl", "ssh", "vpnctl", "claude")
+GH_SCOPES = ("repo", "workflow")
+MIN_FREE_MB = 1536
+OCTETS = range(70, 100)
+GUARDS = ("develop-guard.yml", "pr-conventions-check.yml")
+LABELS = (("feature", "green"), ("task", "blue"), ("hotfix", "red"), ("run", "purple"))
+NOTION_VERSION = "2022-06-28"
+MVP_TOPIC = "MVP_VPN_ALERTS"
+PR_URL = re.compile(r"https://github\.com/\S+/pull/\d+")
+EXIT_STOP, EXIT_USAGE, EXIT_PAUSE = 1, 2, 3
+
+
+def env_file(app):
+    return Path.home() / ".config" / app / ".env"
+
+
+class Stop(Exception):
+    pass
+
+
+class Pause(Exception):
+    pass
+
+
+class Refused(Exception):
+    pass
+
+
+# --- seams: every external effect is a command on PATH ---------------------------------------------------------------
+
+
+def run(argv, input=None, cwd=None, env=None):
+    try:
+        return subprocess.run(
+            [str(a) for a in argv],
+            input=input,
+            cwd=None if cwd is None else str(cwd),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+    except OSError as exc:
+        raise Stop("cannot run {}: {}".format(argv[0], exc))
+
+
+def check(argv, what, **kwargs):
+    """Run argv; a non-zero exit stops the run with the command's last error lines (never its input)."""
+    result = run(argv, **kwargs)
+    if result.returncode != 0:
+        raise Stop("{} failed (exit {}){}".format(what, result.returncode, tail(result)))
+    return result.stdout
+
+
+def tail(result, lines=5):
+    text = (result.stderr or "") + (result.stdout or "")
+    errors = [line for line in text.splitlines() if "ERROR" in line] or text.strip().splitlines()
+    return "".join("\n  " + line for line in errors[-lines:])
+
+
+def git(*args, **kwargs):
+    return run(["git"] + list(args), **kwargs)
+
+
+def curl_quote(value):
+    return '"{}"'.format(value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n"))
+
+
+class HttpError(Exception):
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+
+
+class Api:
+    """One of the three HTTP APIs; credentials go into curl's config on stdin, never into argv."""
+
+    def __init__(self, kind, token, key=None):
+        self.kind, self.token, self.key = kind, token, key
+
+    def url(self, path, query):
+        query = dict(query or {})
+        if self.kind == "trello":
+            query.update(key=self.key, token=self.token)
+            base = "https://api.trello.com/1"
+        elif self.kind == "notion":
+            base = "https://api.notion.com/v1"
+        else:
+            base = "https://api.telegram.org/bot" + self.token
+        return base + path + ("?" + urlencode(query) if query else "")
+
+    def call(self, method, path, query=None, data=None, body=None):
+        config = ["url = " + curl_quote(self.url(path, query)), "request = " + curl_quote(method)]
+        config += ["silent", "show-error", 'max-time = "60"', 'write-out = "\\n%{http_code}"']
+        if self.kind == "notion":
+            config += [
+                "header = " + curl_quote("Authorization: Bearer " + self.token),
+                "header = " + curl_quote("Notion-Version: " + NOTION_VERSION),
+            ]
+        if body is not None:
+            config.append("header = " + curl_quote("Content-Type: application/json"))
+            config.append("data = " + curl_quote(json.dumps(body)))
+        config += ["data-urlencode = " + curl_quote("{}={}".format(k, v)) for k, v in (data or {}).items()]
+        result = run(["curl", "--config", "-"], input="\n".join(config) + "\n")
+        text, _, status = result.stdout.rpartition("\n")
+        label = "{} {} {}".format(self.kind, method, path)
+        if result.returncode != 0 or not status.isdigit():
+            raise HttpError("{}: curl exit {}".format(label, result.returncode))
+        try:
+            payload = json.loads(text) if text.strip() else {}
+        except ValueError:
+            payload = None
+        if not status.startswith("2"):
+            detail = payload.get("description") or payload.get("message") if isinstance(payload, dict) else None
+            raise HttpError("{}: HTTP {}{}".format(label, status, ": " + detail if detail else ""), status)
+        if payload is None:
+            raise HttpError("{}: HTTP {} with a body that is not JSON".format(label, status))
+        return payload
+
+
+# --- operator files -------------------------------------------------------------------------------------------------
+
+class EnvFile:
+    """KEY=value file: read keys, upsert lines atomically (other lines kept), mode 600. Values are never echoed."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def lines(self):
+        try:
+            return self.path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+
+    def get(self, key):
+        return sdlc_common.env_file_value(self.path, key)
+
+    def update(self, values):
+        lines, seen = self.lines(), set()
+        for i, line in enumerate(lines):
+            match = sdlc_common.ENV_LINE.match(line)
+            if match and match.group(1) in values:
+                lines[i] = "{}={}".format(match.group(1), values[match.group(1)])
+                seen.add(match.group(1))
+        lines += ["{}={}".format(k, v) for k, v in values.items() if k not in seen]
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), prefix=".env.")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, str(self.path))
+
+
+def setting(name, path):
+    return sdlc_common.setting(name, path, os.environ)
+
+
+def credentials():
+    trello, notion = env_file("trello"), env_file("notion")
+    return {
+        "trello": (setting("TRELLO_API_KEY", trello), setting("TRELLO_TOKEN", trello)),
+        "notion": setting("NOTION_TOKEN", notion),
+        "mvp_bot": setting("TELEGRAM_MVP_VPN_ALERTS_BOT_TOKEN", env_file("telegram-bots")),
+        "mvp_chat": setting("TELEGRAM_MVP_VPN_ALERTS_CHAT_ID", env_file("telegram-bots")),
+    }
+
+
+def trello():
+    key, token = credentials()["trello"]
+    if not (key and token):
+        raise Stop("TRELLO_API_KEY and TRELLO_TOKEN must be set (environment or {})".format(env_file("trello")))
+    return Api("trello", token, key)
+
+
+def notion():
+    token = credentials()["notion"]
+    if not token:
+        raise Stop("NOTION_TOKEN must be set (environment or {})".format(env_file("notion")))
+    return Api("notion", token)
+
+
+class State:
+    """~/.local/state/project-add/<name>.json: per step its status, time and non-secret details."""
+
+    def __init__(self, name):
+        self.dir = Path.home() / ".local" / "state" / "project-add"
+        self.path = self.dir / "{}.json".format(name)
+        self.data = json.loads(self.path.read_text(encoding="utf-8")) if self.path.is_file() else {"name": name}
+        self.data.setdefault("steps", {})
+
+    def step(self, step):
+        return self.data["steps"].get(step, {})
+
+    def done(self, step):
+        return self.step(step).get("status") == "done"
+
+    def record(self, step, status, **details):
+        entry = dict(self.step(step), **details)
+        entry.update(status=status, at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.data["steps"][step] = entry
+        self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(self.dir), prefix=".state.")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(self.data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, str(self.path))
+
+
+# --- secrets --------------------------------------------------------------------------------------------------------
+
+# name -> (repositories, scopes, source, instruction for a manual one). Scope "repo" is repository-wide; "dev" and
+# "prod" are GitHub environments. The set equals the secrets.* names the templates' workflows read plus the two RAG
+# names (tests/project-add pins it).
+MANUAL = "manual"
+TELEGRAM = "telegram"
+SECRETS = (
+    ("AWS_ROLE_ARN", KINDS, ("repo",), "aws_role", None),
+    ("VPN_CI_OVPN", KINDS, ("repo",), "vpn_ci", None),
+    ("RAG_MCP_URL", KINDS, ("repo",), "rag", None),
+    ("RAG_MCP_TOKEN", KINDS, ("repo",), "rag", None),
+    ("PROD_VPN_IP", KINDS, ("prod",), "prod_vpn_ip", None),
+    ("SENTRY_DSN", KINDS, ("dev", "prod"), "dsn", None),
+    ("SENTRY_ALLOWED_FE_DSN", ("be",), ("dev", "prod"), "dsn", None),
+    ("SECRET_KEY_BASE", ("be",), ("dev", "prod"), "generated", None),
+    ("POSTGRES_PASSWORD", ("be",), ("dev", "prod"), "generated", None),
+    ("SMOKE_TOKEN", ("be",), ("dev", "prod"), "generated", None),
+) + tuple(
+    ("TELEGRAM_{}_ALERTS_{}".format(t, part), KINDS, (t.lower(),), TELEGRAM, None)
+    for t in ("DEV", "PROD")
+    for part in ("BOT_TOKEN", "CHAT_ID", "THREAD_ID")
+) + (
+    ("SRV_DEPLOY_SSH_KEY", KINDS, ("repo",), MANUAL,
+     "the dev host deploy key (1_mvp_infra docs/uk/16-dev-kamal.md; it has no copy, so rotation re-sets every repo)"),
+    ("PROD_SSH_KEY", KINDS, ("prod",), MANUAL,
+     "exists after the project's prod deploy (1_mvp_infra docs/uk/14-prod-proektu.md)"),
+    ("GLITCHTIP_API_TOKEN", KINDS, ("prod",), MANUAL, "a GlitchTip API token (1_mvp_infra docs/uk/15-glitchtip.md)"),
+    ("GLITCHTIP_API_URL", ("fe",), ("prod",), MANUAL, "the GlitchTip URL (1_mvp_infra docs/uk/15-glitchtip.md)"),
+    ("BE_REPO_READ_TOKEN", ("fe",), ("prod",), MANUAL,
+     "a fine-grained PAT with read-only Contents on the be repository"),
+    ("ANTHROPIC_API_KEY", KINDS, ("repo",), MANUAL, "the AI review key"),
+)
+GENERATED_BYTES = {"SECRET_KEY_BASE": 64, "POSTGRES_PASSWORD": 32, "SMOKE_TOKEN": 32}
+
+
+def secret_rows(kind, sources=None, exclude=()):
+    for name, kinds, scopes, source, instruction in SECRETS:
+        if kind in kinds and (sources is None or source in sources) and source not in exclude:
+            for scope in scopes:
+                yield name, scope, source, instruction
+
+
+def scope_args(scope):
+    return [] if scope == "repo" else ["--env", scope]
+
+
+def set_command(name, repo, scope):
+    return "gh secret set {} -R {}{}".format(name, repo, "".join(" " + a for a in scope_args(scope)))
+
+
+class Secrets:
+    """Names already set per (repo, scope), and `gh secret set` with the value on stdin."""
+
+    def __init__(self):
+        self.present = {}
+
+    def names(self, repo, scope):
+        if (repo, scope) not in self.present:
+            out = check(["gh", "secret", "list", "-R", repo, "--json", "name"] + scope_args(scope),
+                        "gh secret list -R {} {}".format(repo, scope))
+            self.present[(repo, scope)] = {item["name"] for item in json.loads(out or "[]")}
+        return self.present[(repo, scope)]
+
+    def ensure(self, repo, name, scope, source):
+        """Set name from source() unless present; True when it was set now. A present value is never replaced."""
+        if name in self.names(repo, scope):
+            return False
+        value = source()
+        if not value:
+            raise Stop("{}: no value to set for {} ({})".format(repo, name, scope))
+        argv = ["gh", "secret", "set", name, "-R", repo] + scope_args(scope)
+        check(argv, set_command(name, repo, scope), input=value)
+        self.present[(repo, scope)].add(name)
+        print("  {}: set {} ({})".format(repo, name, scope))
+        return True
+
+
+# --- the run --------------------------------------------------------------------------------------------------------
+
+
+class Project:
+    def __init__(self, name):
+        self.name, self.upper = name, name.upper()
+        self.state = State(name)
+        self.repos_dir = Path(os.environ.get("PROJECT_ADD_REPOS_DIR") or Path.home() / "projects" / "mvp")
+        self._show = None
+        self._values = {}
+
+    def secret(self, kind, name, scope, source):
+        if source == "generated":
+            return secrets.token_hex(GENERATED_BYTES[name])
+        if source == "dsn":
+            target = "fe" if name == "SENTRY_ALLOWED_FE_DSN" else kind
+            return dsn("{}-{}-{}".format(self.name, target, scope))
+        if (source, name) not in self._values:
+            self._values[(source, name)] = SOURCES[source](self, name)
+        return self._values[(source, name)]
+
+    def repo(self, kind):
+        return "{}/1_mvp_{}_{}".format(OWNER, self.name, kind)
+
+    def clone(self, kind):
+        return self.repos_dir / "1_mvp_{}_{}".format(self.name, kind)
+
+    def show(self):
+        if self._show is None:
+            self._show = json.loads(check(["vpnctl", "project", "show", self.name], "vpnctl project show"))
+        return self._show
+
+
+def infra_dir():
+    vpnctl = shutil.which("vpnctl")
+    return Path(vpnctl).resolve().parent.parent if vpnctl else None
+
+
+def registry(infra, *args):
+    return run([sys.executable, infra / "scripts" / "projects.py"] + list(args))
+
+
+def registry_path(name):
+    return "projects/{}.yaml".format(name)
+
+
+def registry_entry(infra, name):
+    """The registry entry of name in the local checkout, None when it has no projects/<name>.yaml; any other
+    failure of the lookup stops, so an unreadable entry is never taken for an unprotected one."""
+    if not (infra / registry_path(name)).is_file():
+        return None
+    result = registry(infra, "get", name)
+    try:
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+    except ValueError:
+        pass
+    raise Stop("scripts/projects.py get {} failed (exit {}){}".format(name, result.returncode, tail(result)))
+
+
+def preflight(project):
+    """Every read-only probe; all failures are listed together. Writes nothing."""
+    failures = []
+    name = project.name
+    missing = [tool for tool in TOOLS if not shutil.which(tool)]
+    if missing:
+        failures.append("tools not on PATH: " + ", ".join(missing))
+    infra = infra_dir()
+    if infra and not (infra / "scripts" / "projects.py").is_file():
+        failures.append("{}: no scripts/projects.py; vpnctl must be 1_mvp_infra's bin/vpnctl".format(infra))
+        infra = None
+    if infra:
+        result = registry(infra, "check-name", name)
+        if result.returncode != 0:
+            failures.append("name: " + (result.stdout + result.stderr).strip())
+        try:
+            entry = registry_entry(infra, name)
+        except Stop as exc:
+            failures.append("name: {}".format(exc))
+            entry = None
+        if entry and entry.get("protected"):
+            failures.append("name: {} is protected (protected: true); project-add never touches it".format(name))
+
+    def probe(label, argv, ok=lambda r: r.returncode == 0):
+        if shutil.which(argv[0]) and not ok(run(argv)):
+            failures.append(label)
+
+    probe("gh: not logged in (gh auth status)", ["gh", "auth", "status"])
+    probe("gh: logged in as another account; switch to {} (gh auth switch)".format(OWNER),
+          ["gh", "api", "user", "--jq", ".login"], lambda r: r.returncode == 0 and r.stdout.strip() == OWNER)
+    probe("gh: token lacks the scopes {} (gh auth refresh -s repo,workflow)".format(", ".join(GH_SCOPES)),
+          ["gh", "api", "-i", "user"], lambda r: r.returncode == 0 and set(GH_SCOPES) <= oauth_scopes(r.stdout))
+    probe("aws: no valid session for profile {} (aws sts get-caller-identity)".format(os.environ["AWS_PROFILE"]),
+          ["aws", "sts", "get-caller-identity"])
+    if shutil.which("curl"):
+        failures += api_failures()
+    rag = env_file("mvp-rag")
+    failures += ["RAG: {} not set (environment or {})".format(k, rag)
+                 for k in ("RAG_MCP_URL", "RAG_MCP_TOKEN") if not setting(k, rag)]
+    if not project.state.done("infra"):
+        failures += dev_memory_failures()
+        if shutil.which("vpnctl"):
+            failures += octet_failures(name)
+    if failures:
+        raise Stop("preflight failed; nothing was written:\n" + "\n".join("  - " + f for f in failures))
+    print("0 preflight: ok")
+
+
+def oauth_scopes(head):
+    for line in head.splitlines():
+        if line.lower().startswith("x-oauth-scopes:"):
+            return {s.strip() for s in line.split(":", 1)[1].split(",")}
+    return set()
+
+
+def api_failures():
+    failures, creds = [], credentials()
+    key, token = creds["trello"]
+    probes = (
+        ("Trello", key and token, lambda: Api("trello", token, key).call("GET", "/members/me", {"fields": "id"})),
+        ("Notion", creds["notion"], lambda: Api("notion", creds["notion"]).call("GET", "/users/me")),
+        ("Telegram " + MVP_TOPIC, creds["mvp_bot"] and creds["mvp_chat"],
+         lambda: Api("telegram", creds["mvp_bot"]).call("GET", "/getMe")),
+    )
+    for label, present, call in probes:
+        if not present:
+            failures.append("{}: credentials not set".format(label))
+            continue
+        try:
+            call()
+        except HttpError as exc:
+            failures.append("{}: {}".format(label, exc))
+    return failures
+
+
+def dev_memory_failures():
+    dest = setting("PROJECT_ADD_DEV_SSH", env_file("project-add"))
+    if not dest:
+        return ["dev host: PROJECT_ADD_DEV_SSH not set (environment or {})".format(env_file("project-add"))]
+    if not shutil.which("ssh"):
+        return []
+    result = run(["ssh", "-o", "BatchMode=yes", dest, "free", "-m"])
+    for line in result.stdout.splitlines() if result.returncode == 0 else ():
+        fields = line.split()
+        if fields[:1] == ["Mem:"] and len(fields) >= 7 and fields[6].isdigit():
+            if int(fields[6]) >= MIN_FREE_MB:
+                return []
+            return ["dev host: {} MB available, {} MB needed (R-A8)".format(fields[6], MIN_FREE_MB)]
+    return ["dev host: cannot read free memory over ssh (ssh -o BatchMode=yes <PROJECT_ADD_DEV_SSH> free -m)"]
+
+
+def octet_failures(name):
+    projects, users = run(["vpnctl", "project", "list"]), run(["vpnctl", "users"])
+    if projects.returncode != 0 or users.returncode != 0:
+        return ["VPN: cannot list projects and users (vpnctl project list, vpnctl users)"]
+    used = set()
+    for line in projects.stdout.splitlines():
+        fields = line.split()
+        if fields and fields[0] == name:
+            return []
+        if len(fields) >= 2 and fields[1].isdigit():
+            used.add(int(fields[1]))
+    for line in users.stdout.splitlines()[1:]:
+        match = re.search(r"\.(\d+)\s*$", line)
+        if match:
+            used.add(int(match.group(1)))
+    if all(octet in used for octet in OCTETS):
+        return ["VPN: no free octet in {}..{}".format(OCTETS.start, OCTETS.stop - 1)]
+    return []
+
+
+def step_infra(project):
+    name, infra = project.name, infra_dir()
+    result = run(["vpnctl", "project", "add", name])
+    if result.returncode != 0:
+        raise Stop("vpnctl project add {} failed{}".format(name, tail(result)))
+    match = PR_URL.search(result.stdout + result.stderr)
+    pr = match.group(0) if match else None
+    wait_for_registry(project, infra, pr)
+    current = git("-C", infra, "symbolic-ref", "--short", "-q", "HEAD").stdout.strip()
+    dirty = git("-C", infra, "status", "--porcelain", "--untracked-files=no").stdout.strip()
+    if current != "env/dev" or dirty or git("-C", infra, "merge", "--ff-only", "-q", "FETCH_HEAD").returncode != 0:
+        raise Stop("{} must be on a clean env/dev that fast-forwards to origin/env/dev; run: git -C {} switch env/dev "
+                   "&& git -C {} pull --ff-only, then bin/project-add {}".format(infra, infra, infra, name))
+    result = run(["vpnctl", "project", "bootstrap", name])
+    output = result.stdout + result.stderr
+    if result.returncode == 0:
+        return {"pr": pr} if pr else {}
+    if "step 4 delegation" in output:
+        raise Pause("Project Bootstrap waits for the DNS delegation. Run vpnctl project delegate {0} (MFA; type "
+                    "DELEGATE-{0}), then bin/project-add {0}{1}".format(name, tail(result)))
+    raise Stop("vpnctl project bootstrap {} failed{}".format(name, tail(result)))
+
+
+def wait_for_registry(project, infra, pr):
+    wait = int(os.environ.get("PROJECT_ADD_MERGE_WAIT") or 600)
+    deadline = time.time() + wait
+    entry = "FETCH_HEAD:" + registry_path(project.name)
+    while True:
+        check(["git", "-C", infra, "fetch", "-q", "origin", "env/dev"], "git fetch origin env/dev in " + str(infra))
+        if git("-C", infra, "cat-file", "-e", entry).returncode == 0:
+            return
+        if time.time() >= deadline:
+            raise Pause("the registry PR is not merged yet. Merge {} after review, then run bin/project-add {}".format(
+                pr or "the PR feat/project-{}".format(project.name), project.name))
+        time.sleep(min(30, max(1, deadline - time.time())))
+
+
+def step_repos(project):
+    name = project.name
+    sha = check(["git", "-C", SDLC, "rev-parse", "--short=12", "HEAD"], "git rev-parse in " + str(SDLC)).strip()
+    to_push = []
+    for kind in KINDS:
+        repo, dest = project.repo(kind), project.clone(kind)
+        if run(["gh", "repo", "view", repo, "--json", "name"]).returncode != 0:
+            check(["gh", "repo", "create", repo, "--private"], "gh repo create " + repo)
+            print("  created {}".format(repo))
+        if dest.exists():
+            origin = git("-C", dest, "config", "--get", "remote.origin.url").stdout.strip()
+            if not re.search(r"[:/]{}(\.git)?/?$".format(re.escape(repo)), origin):
+                raise Stop("{} exists and its origin is not {}; move it away or set PROJECT_ADD_REPOS_DIR".format(
+                    dest, repo))
+        else:
+            check(["gh", "repo", "clone", repo, dest], "gh repo clone " + repo)
+        # Once pushed, main moves on and a newer 1_mvp_sdlc renders differently: the render is checked only before.
+        if landed(dest):
+            continue
+        result = run([SDLC / "bin" / "render-template", kind, name, dest])
+        if result.returncode != 0:
+            raise Stop("bin/render-template {} {} {} refused{}".format(kind, name, dest, tail(result, 25)))
+        if git("-C", dest, "rev-parse", "--verify", "-q", "HEAD").returncode != 0:
+            check(["git", "-C", dest, "symbolic-ref", "HEAD", "refs/heads/main"], "git symbolic-ref in " + str(dest))
+            check(["git", "-C", dest, "add", "-A"], "git add in " + str(dest))
+            message = "Initial commit from 1_mvp_sdlc@{}\n\n{}\n\nType: chore\n".format(sha, RENDERED)
+            check(["git", "-C", dest, "commit", "-q", "-F", "-"], "git commit in " + str(dest), input=message)
+        head = check(["git", "-C", dest, "rev-parse", "HEAD"], "git rev-parse in " + str(dest)).strip()
+        remote = remote_head(dest, "main")
+        if not remote:
+            to_push.append((kind, dest, head))
+        elif remote != head:
+            raise Stop("{}: origin main is {} but the clone is at {}; reconcile by hand".format(repo, remote, head))
+    if to_push:
+        confirm_first_push(project, to_push)
+        for kind, dest, head in to_push:
+            check(["git", "-C", dest, "push", "-q", "-u", "origin", "HEAD:main"], "git push main " + project.repo(kind))
+    details = {}
+    for kind in KINDS:
+        repo, dest = project.repo(kind), project.clone(kind)
+        if not remote_head(dest, "develop"):
+            main = remote_head(dest, "main")
+            check(["git", "-C", dest, "push", "-q", "origin", main + ":refs/heads/develop"], "git push develop " + repo)
+        check(["gh", "repo", "set-default", repo], "gh repo set-default " + repo, cwd=dest)
+        details[kind] = {"repo": repo, "url": "https://github.com/" + repo, "clone": str(dest)}
+    return {"repos": details}
+
+
+RENDERED = "Rendered by bin/project-add."
+
+
+def landed(dest):
+    """True when origin main exists and starts at project-add's first commit: the render has landed."""
+    if not remote_head(dest, "main"):
+        return False
+    check(["git", "-C", dest, "fetch", "-q", "origin", "main"], "git fetch origin main in " + str(dest))
+    roots = git("-C", dest, "log", "--max-parents=0", "--format=%B", "FETCH_HEAD").stdout
+    return RENDERED in roots.splitlines()
+
+
+def remote_head(dest, branch):
+    out = check(["git", "-C", dest, "ls-remote", "--heads", "origin", branch], "git ls-remote in " + str(dest))
+    return out.split()[0] if out.strip() else None
+
+
+def confirm_first_push(project, to_push):
+    word = "PUSH-" + project.name
+    print("The first commit goes straight to main of each empty repository (R-C4, the only direct push):")
+    for kind, dest, head in to_push:
+        subject = git("-C", dest, "log", "-1", "--format=%s").stdout.strip()
+        print("  {} -> {} main: {} {}".format(dest, project.repo(kind), head[:12], subject))
+    sys.stdout.write("Type {} to push the first commit to main (R-C4): ".format(word))
+    sys.stdout.flush()
+    typed = sys.stdin.readline().strip()
+    print()
+    if typed != word:
+        raise Pause("the first push was not confirmed; nothing pushed. Run bin/project-add {} again and type {}".format(
+            project.name, word))
+
+
+def step_github(project):
+    poll = int(os.environ.get("PROJECT_ADD_POLL_SECONDS") or 10)
+    store, set_now = Secrets(), []
+    for kind in KINDS:
+        repo = project.repo(kind)
+        for environment in ("dev", "prod"):
+            check(["gh", "api", "-X", "PUT", "repos/{}/environments/{}".format(repo, environment), "--silent"],
+                  "creating environment {} in {}".format(environment, repo))
+        wait_for_guards(repo, poll)
+        for name, scope, source, _ in secret_rows(kind, exclude=(TELEGRAM, MANUAL)):
+            if store.ensure(repo, name, scope, lambda: project.secret(kind, name, scope, source)):
+                set_now.append("{} {} {}".format(repo, scope, name))
+    return {"secrets_set": set_now}
+
+
+def wait_for_guards(repo, poll):
+    for attempt in range(5):
+        out = check(["gh", "api", "repos/{}/actions/workflows".format(repo)], "listing workflows of " + repo)
+        workflows = json.loads(out).get("workflows", [])
+        active = {Path(w.get("path", "")).name for w in workflows if w.get("state") == "active"}
+        missing = [g for g in GUARDS if g not in active]
+        if not missing:
+            return
+        if attempt < 4:
+            time.sleep(poll)
+    raise Stop("{}: workflows not active: {}".format(repo, ", ".join(missing)))
+
+
+def aws_role(project, _name):
+    role = project.show().get("oidc_role")
+    return check(["aws", "iam", "get-role", "--role-name", role, "--query", "Role.Arn", "--output", "text"],
+                 "aws iam get-role " + str(role)).strip()
+
+
+def vpn_ci(_project, _name):
+    tmp = tempfile.mkdtemp(prefix="project-add-")
+    try:
+        os.chmod(tmp, 0o700)
+        path = Path(tmp) / "ci.ovpn"
+        check(["vpnctl", "user", "get", "ci", path], "vpnctl user get ci")
+        profile = check(["vpnctl", "_split-tunnel"], "vpnctl _split-tunnel", input=path.read_text(encoding="utf-8"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    lines = [line.strip() for line in profile.splitlines()]
+    if "route-nopull" not in lines or any(line.startswith("redirect-gateway") for line in lines):
+        raise Stop("the ci profile is not a split tunnel (route-nopull, no redirect-gateway); VPN_CI_OVPN not set")
+    return profile
+
+
+def rag(_project, name):
+    return setting(name, env_file("mvp-rag"))
+
+
+def prod_vpn_ip(project, _name):
+    return project.show().get("vpn_ip")
+
+
+def dsn(slug):
+    dest = setting("PROJECT_ADD_DEV_SSH", env_file("project-add"))
+    command = "bash ~/glitchtip/scripts/shared-manage.sh dsn {}".format(slug)
+    return check(["ssh", "-o", "BatchMode=yes", dest, command], "GlitchTip DSN " + slug).strip()
+
+
+SOURCES = {"aws_role": aws_role, "vpn_ci": vpn_ci, "rag": rag, "prod_vpn_ip": prod_vpn_ip}
+
+
+def step_telegram(project):
+    upper, bots = project.upper, EnvFile(env_file("telegram-bots"))
+    token_key = "TELEGRAM_{}_PROD_ALERTS_BOT_TOKEN".format(upper)
+    chat = credentials()["mvp_chat"]
+    token = bots.get(token_key)
+    if not token:
+        raise Pause(
+            "the project's alerts bot is not ready. 1) BotFather: /newbot, username {name}_alerts_bot (R-A6). "
+            "2) Add the bot to the alerts group as an administrator with Manage topics. 3) Add the line "
+            "{key}=<token> to {file} (mode 600; never paste the token anywhere else). "
+            "Then run bin/project-add {name}".format(name=project.name, key=token_key, file=bots.path))
+    bot = Api("telegram", token)
+    try:
+        me = bot.call("GET", "/getMe").get("result", {})
+    except HttpError as exc:
+        raise Stop("checking the bot of {}: {}. A revoked token is replaced on its line in {}; then run "
+                   "bin/project-add {}".format(token_key, exc, bots.path, project.name))
+    not_admin = ("the bot of {} is not an administrator of the alerts group with Manage topics{}. Make it one, then "
+                 "run bin/project-add {}")
+    try:
+        member = bot.call("GET", "/getChatMember", {"chat_id": chat, "user_id": me.get("id")}).get("result", {})
+    except HttpError as exc:
+        # Telegram answers 400 "chat not found" or 403 "not a member" for a bot outside the group.
+        if exc.status in ("400", "403"):
+            raise Pause(not_admin.format(token_key, " ({})".format(exc), project.name))
+        raise Stop("checking the bot of {} in the alerts group: {}. Run bin/project-add {} again".format(
+            token_key, exc, project.name))
+    if member.get("status") != "administrator" or not member.get("can_manage_topics"):
+        raise Pause(not_admin.format(token_key, "", project.name))
+    topics = []
+    for t in ("PROD", "DEV"):
+        prefix = "TELEGRAM_{}_{}_ALERTS".format(upper, t)
+        topic = "{}_{}_alerts".format(project.name, t.lower())
+        if not bots.get(prefix + "_THREAD_ID"):
+            try:
+                created = bot.call("POST", "/createForumTopic", data={"chat_id": chat, "name": topic})
+            except HttpError as exc:
+                raise Stop("createForumTopic {}: {}".format(topic, exc))
+            thread = created.get("result", {}).get("message_thread_id")
+            if not thread:
+                raise Stop("createForumTopic {}: the reply has no message_thread_id".format(topic))
+            bots.update({prefix + "_BOT_TOKEN": token, prefix + "_CHAT_ID": chat, prefix + "_THREAD_ID": thread})
+            print("  created topic {}".format(topic))
+        topics.append(topic)
+    store = Secrets()
+    for kind in KINDS:
+        for name, scope, _, _ in secret_rows(kind, sources=(TELEGRAM,)):
+            t, part = re.match(r"TELEGRAM_(DEV|PROD)_ALERTS_(\w+)$", name).groups()
+            key = "TELEGRAM_{}_{}_ALERTS_{}".format(upper, t, part)
+            store.ensure(project.repo(kind), name, scope, lambda: bots.get(key))
+    return {"topics": topics}
+
+
+def step_trello(project):
+    api, upper = trello(), project.upper
+    try:
+        boards = api.call("GET", "/members/me/boards", {"fields": "name,closed,url"})
+        known = project.state.step("trello").get("board_id")
+        board = next((b for b in boards if b["id"] == known and not b.get("closed")), None) or next(
+            (b for b in boards if b.get("name") == upper and not b.get("closed")), None)
+        if not board:
+            board = api.call("POST", "/boards", data={"name": upper, "defaultLists": "false", "defaultLabels": "false"})
+            print("  created board {}".format(upper))
+        board_id = board["id"]
+        wanted = check([SDLC / "bin" / "board-lists"], "bin/board-lists").splitlines()
+        have = [item["name"] for item in api.call("GET", "/boards/{}/lists".format(board_id), {"fields": "name"})]
+        for list_name in wanted:
+            if list_name not in have:
+                api.call("POST", "/lists", data={"name": list_name, "idBoard": board_id, "pos": "bottom"})
+        have = [item["name"] for item in api.call("GET", "/boards/{}/lists".format(board_id), {"fields": "name"})]
+        if have != wanted:
+            raise Stop("board {} lists are {}; bin/board-lists wants {}. Fix the board by hand, then bin/project-add "
+                       "{} --step trello".format(upper, have, wanted, project.name))
+        labels = api.call("GET", "/boards/{}/labels".format(board_id), {"fields": "name"})
+        labels = {item.get("name") for item in labels}
+        for label, color in LABELS:
+            if label not in labels:
+                api.call("POST", "/labels", data={"name": label, "color": color, "idBoard": board_id})
+    except HttpError as exc:
+        raise Stop(str(exc))
+    EnvFile(env_file("trello")).update({"TRELLO_BOARD_ID_" + upper: board_id})
+    return {"board_id": board_id, "board_url": board.get("url")}
+
+
+def title(page):
+    for prop in (page.get("properties") or {}).values():
+        if prop.get("type") == "title":
+            return "".join(part.get("plain_text", "") for part in prop.get("title", []))
+    return ""
+
+
+def step_notion(project):
+    api, upper = notion(), project.upper
+    try:
+        search = {"query": "PROJECTS", "filter": {"property": "object", "value": "page"}}
+        found = api.call("POST", "/search", body=search)
+        roots = [p for p in found.get("results", []) if p.get("object") == "page" and title(p) == "PROJECTS"]
+        if not roots:
+            raise Pause("the Notion page PROJECTS is missing or not shared with the integration (operator, once): "
+                        "create a top-level page titled exactly PROJECTS, then on it ... -> Connections -> add the "
+                        "integration PILOT. Then run bin/project-add {}".format(project.name))
+        if len(roots) > 1:
+            raise Stop("{} Notion pages are titled PROJECTS; keep one shared with the integration".format(len(roots)))
+        root = roots[0]["id"]
+        page_id, cursor = None, None
+        while page_id is None:
+            query = dict({"page_size": 100}, **({"start_cursor": cursor} if cursor else {}))
+            children = api.call("GET", "/blocks/{}/children".format(root), query)
+            page_id = next((b["id"] for b in children.get("results", [])
+                            if b.get("type") == "child_page" and b["child_page"].get("title") == upper), None)
+            cursor = children.get("next_cursor")
+            if not (children.get("has_more") and cursor):
+                break
+        if page_id is None:
+            page_id = api.call("POST", "/pages", body={
+                "parent": {"page_id": root}, "properties": {"title": {"title": [{"text": {"content": upper}}]}}})["id"]
+            print("  created Notion page {}".format(upper))
+        page = api.call("GET", "/pages/{}".format(page_id))
+    except HttpError as exc:
+        raise Stop(str(exc))
+    return {"page_id": page_id, "page_url": page.get("url")}
+
+
+def wanted_plugins(clone):
+    """The plugin ids the clone's .claude/settings.json enables (the templates' enabledPlugins)."""
+    try:
+        enabled = json.loads((clone / ".claude" / "settings.json").read_text(encoding="utf-8"))["enabledPlugins"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return [plugin for plugin, on in enabled.items() if on is True]
+
+
+def step_plugins(project):
+    missing = []
+    for kind in KINDS:
+        clone = project.clone(kind)
+        wanted = wanted_plugins(clone)
+        if not wanted:
+            missing.append("no enabledPlugins in {}".format(clone / ".claude" / "settings.json"))
+            continue
+        result = run(["claude", "plugin", "list", "--json"], cwd=clone)
+        try:
+            listed = json.loads(result.stdout) if result.returncode == 0 else None
+        except ValueError:
+            listed = None
+        if not isinstance(listed, list):
+            missing.append("claude plugin list failed in {} (exit {}){}".format(clone, result.returncode, tail(result)))
+            continue
+        here = {p.get("id") for p in listed if p.get("scope") == "project" and p.get("enabled", True)
+                and p.get("projectPath") and Path(p["projectPath"]).resolve() == clone.resolve()}
+        for plugin in wanted:
+            if plugin not in here:
+                missing.append("{} in {}".format(plugin, clone))
+    if missing:
+        print("  plugins missing: " + "; ".join(missing))
+        return None
+    return {}
+
+
+def plugins_instruction(project):
+    return ("open Claude Code in {} and {} and accept the mvp marketplace (or claude plugin install <id> --scope "
+            "project for each enabledPlugins id of .claude/settings.json), then bin/project-add {} --step "
+            "plugins".format(project.clone("be"), project.clone("fe"), project.name))
+
+
+def manual_items(project):
+    items = []
+    for kind in KINDS:
+        repo = project.repo(kind)
+        for name, scope, _, instruction in secret_rows(kind, sources=(MANUAL,)):
+            items.append("secret {} ({}): {}; {} (value on stdin)".format(name, repo, instruction,
+                                                                          set_command(name, repo, scope)))
+    if not project.state.done("plugins"):
+        items.append("plugins: " + plugins_instruction(project))
+    items += [
+        "self-hosted runner: register one for both repositories and set RUNS_ON "
+        "(1_mvp_infra docs/uk/23-github-runner.md)",
+        "the main-guard and develop-guard runs on the first commit are red: expected, that push had no PR (R-C4)",
+        "prod: the first prod deploy and the end-to-end proof (P3)",
+    ]
+    return items
+
+
+def step_report(project):
+    state, show = project.state, project.show()
+    rows = ["{} {} {}".format("✅" if state.done(s) or s in ("preflight", "report") else "❌", i, s)
+            for i, s in enumerate(STEPS)]
+    repos = state.step("repos").get("repos", {})
+    links = ["{}: {}".format(kind, repos.get(kind, {}).get("url", "-")) for kind in KINDS]
+    links += ["Trello board {}: {}".format(project.upper, state.step("trello").get("board_url") or "-"),
+              "Notion page {}: {}".format(project.upper, state.step("notion").get("page_url") or "-"),
+              "Telegram topics: {}".format(", ".join(state.step("telegram").get("topics", [])) or "-"),
+              "dev: https://{} https://{}".format(show.get("dev_host"), show.get("app_dev_host")),
+              "prod: https://{} https://{}".format(show.get("prod_host"), show.get("app_prod_host"))]
+    manual = manual_items(project)
+    heading = "project-add report {} {}".format(project.name, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    text = "\n".join([heading, ""] + rows + [""] + links + ["", "Manual steps left:"] + ["- " + m for m in manual])
+    print(text)
+    env = dict(os.environ)
+    for part in ("BOT_TOKEN", "CHAT_ID", "THREAD_ID"):
+        key = "TELEGRAM_{}_{}".format(MVP_TOPIC, part)
+        env[key] = setting(key, env_file("telegram-bots")) or ""
+    if not env["TELEGRAM_{}_BOT_TOKEN".format(MVP_TOPIC)]:
+        raise Stop("TELEGRAM_{}_BOT_TOKEN is not set; the report was not posted".format(MVP_TOPIC))
+    check(["bash", SDLC / "scripts" / "ci" / "notify-telegram.sh", MVP_TOPIC, text], "posting the report to Telegram",
+          env=env)
+    page = state.step("notion").get("page_id")
+    if not page:
+        raise Stop("no Notion page recorded; the report was not appended")
+    bullets = rows + links + ["Manual: " + m for m in manual]
+    blocks = [{"object": "block", "type": "heading_2",
+               "heading_2": {"rich_text": [{"type": "text", "text": {"content": heading}}]}}]
+    blocks += [{"object": "block", "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": b[:2000]}}]}}
+               for b in bullets]
+    try:
+        notion().call("PATCH", "/blocks/{}/children".format(page), body={"children": blocks})
+    except HttpError as exc:
+        raise Stop("appending the report to the Notion page: {}".format(exc))
+    return {}
+
+
+STEP_RUNNERS = {
+    "infra": step_infra,
+    "repos": step_repos,
+    "github": step_github,
+    "telegram": step_telegram,
+    "trello": step_trello,
+    "notion": step_notion,
+    "plugins": step_plugins,
+    "report": step_report,
+}
+
+
+def execute(project, step):
+    number = STEPS.index(step)
+    print("{} {}: running".format(number, step))
+    try:
+        details = STEP_RUNNERS[step](project)
+    except Pause as pause:
+        project.state.record(step, "paused")
+        raise Pause("{} {}: {}".format(number, step, pause))
+    except Stop as stop:
+        project.state.record(step, "failed")
+        raise Stop("{} {}: {}".format(number, step, stop))
+    if details is None:
+        project.state.record(step, "failed")
+        print("{} {}: failed; the run goes on. {}".format(number, step, plugins_instruction(project)))
+        return
+    project.state.record(step, "done", **details)
+    print("{} {}: done".format(number, step))
+
+
+def add(project, only):
+    if only and only != "preflight":
+        missing = [s for s in STEPS[1:STEPS.index(only)] if not project.state.done(s)]
+        if missing:
+            raise Refused("--step {} needs every earlier step done; not done: {}".format(only, ", ".join(missing)))
+    preflight(project)
+    if only:
+        if only != "preflight":
+            execute(project, only)
+        return
+    for number, step in enumerate(STEPS[1:], 1):
+        if project.state.done(step):
+            print("{} {}: already done".format(number, step))
+        else:
+            execute(project, step)
+    print("project-add {}: done".format(project.name))
+
+
+def dry_run(project):
+    state, name = project.state, project.name
+    print("project-add {} --dry-run: the plan; nothing is called or written".format(name))
+
+    def line(step, text):
+        mark = " (already done)" if state.done(step) else ""
+        print("{} {}{}: {}".format(STEPS.index(step), step, mark, text))
+
+    line("preflight", "read-only probes: name in the registry, gh auth and scopes, aws sts get-caller-identity, "
+                      "Trello/Notion/Telegram APIs, RAG_MCP_URL and RAG_MCP_TOKEN, dev host memory >= {} MB, "
+                      "a free VPN octet {}..{}".format(MIN_FREE_MB, OCTETS.start, OCTETS.stop - 1))
+    line("infra", "vpnctl project add {0}; wait for the registry PR merge; vpnctl project bootstrap {0} "
+                  "(pause for vpnctl project delegate {0})".format(name))
+    line("repos", "gh repo create {} and {} --private; bin/render-template into {}; first commit to main after "
+                  "PUSH-{} (pause); develop from the same commit".format(
+                      project.repo("be"), project.repo("fe"), project.repos_dir, name))
+    line("github", "environments dev and prod; {} active; secrets (missing names only):".format(" and ".join(GUARDS)))
+    labels = {TELEGRAM: "step 4", MANUAL: "manual, reported"}
+    for kind in KINDS:
+        for scope in ("repo", "dev", "prod"):
+            names = ["{}{}".format(n, " ({})".format(labels[src]) if src in labels else "")
+                     for n, sc, src, _ in secret_rows(kind) if sc == scope]
+            if names:
+                print("    {} {}: {}".format(project.repo(kind), scope, ", ".join(names)))
+    line("telegram", "bot {0}_alerts_bot (BotFather by hand, pause), topics {0}_prod_alerts and {0}_dev_alerts, "
+                     "TELEGRAM_{1}_*_ALERTS_* in ~/.config/telegram-bots/.env, the TELEGRAM_* secrets".format(
+                         name, project.upper))
+    line("trello", "board {} with the lists of bin/board-lists and the labels {}; TRELLO_BOARD_ID_{}".format(
+        project.upper, ", ".join(label for label, _ in LABELS), project.upper))
+    line("notion", "page {} under PROJECTS (pause if PROJECTS is missing); GET /v1/pages/<id> -> 200".format(
+        project.upper))
+    line("plugins", "claude plugin list in each clone: the enabledPlugins of its .claude/settings.json")
+    line("report", "result table, links, manual steps; posted to {} and the Notion page".format(MVP_TOPIC))
+
+
+def undo(name):
+    infra = infra_dir()
+    if not infra or not (infra / "scripts" / "projects.py").is_file():
+        raise Stop("vpnctl (1_mvp_infra's bin/vpnctl) is not on PATH")
+    entry = registry_entry(infra, name)
+    if entry and entry.get("protected"):
+        raise Stop("refused: {} is protected (protected: true); nothing done".format(name))
+    project = Project(name)
+    if subprocess.run(["vpnctl", "project", "remove", name]).returncode != 0:
+        raise Stop("vpnctl project remove {} failed; {} kept".format(name, project.state.path))
+    repos = project.state.step("repos").get("repos", {})
+    print("Delete by hand, each with its own OK (project-add never deletes them):")
+    for kind in KINDS:
+        info = repos.get(kind, {})
+        print("  - repository {} (gh repo delete {}) and the clone {}".format(
+            info.get("url", "https://github.com/" + project.repo(kind)), project.repo(kind),
+            info.get("clone", project.clone(kind))))
+    print("  - Trello board {} {}".format(project.upper, project.state.step("trello").get("board_url") or ""))
+    print("  - Notion page {} {}".format(project.upper, project.state.step("notion").get("page_url") or ""))
+    print("  - Telegram topics {0}_prod_alerts, {0}_dev_alerts and the bot {0}_alerts_bot "
+          "(BotFather /deletebot)".format(name))
+    print("  - lines TELEGRAM_{0}_* in ~/.config/telegram-bots/.env and TRELLO_BOARD_ID_{0} in "
+          "~/.config/trello/.env".format(project.upper))
+    if project.state.path.is_file():
+        project.state.path.rename(project.state.path.with_name("{}.undone.json".format(name)))
+    print("project-add --undo {}: done".format(name))
+
+
+def parse(argv):
+    parser = argparse.ArgumentParser(
+        prog="bin/project-add",
+        usage="bin/project-add <name> [--step <id>] [--dry-run] | bin/project-add --undo <name>")
+    parser.add_argument("name", nargs="?")
+    parser.add_argument("--step", choices=STEPS)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--undo", metavar="NAME")
+    args = parser.parse_args(argv)
+    if bool(args.name) == bool(args.undo) or (args.undo and (args.step or args.dry_run)):
+        parser.error("give a name, or --undo <name> alone")
+    if args.dry_run and args.step:
+        parser.error("--dry-run prints every step; it takes no --step")
+    name = args.name or args.undo
+    if not NAME.match(name):
+        parser.error("name {!r} must match {}".format(name, NAME.pattern))
+    return args, name
+
+
+def main(argv):
+    args, name = parse(argv)
+    os.environ.setdefault("AWS_PROFILE", "hs-action")
+    try:
+        if args.undo:
+            undo(name)
+        elif args.dry_run:
+            dry_run(Project(name))
+        else:
+            add(Project(name), args.step)
+    except Refused as exc:
+        print("project-add: {}".format(exc), file=sys.stderr)
+        return EXIT_USAGE
+    except Pause as exc:
+        print("PAUSE {}".format(exc))
+        return EXIT_PAUSE
+    except Stop as exc:
+        print("STOP {}".format(exc), file=sys.stderr)
+        return EXIT_STOP
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

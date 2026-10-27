@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Warning-only client of the project knowledge server mvp-rag (K1): `bin/rag search <query>` and `bin/rag reindex`.
+# URL and token come from RAG_MCP_URL and RAG_MCP_TOKEN in the environment; usage: bin/rag --help.
+set -euo pipefail
+command -v bun >/dev/null || { echo 'rag: warning: bun not found; nothing done' >&2; printf '{"status":"unavailable","warning":"bun not found"}\n'; exit 0; }
+exec bun "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/orchestration/factory/.archon/workflows/sdlc-factory/factory/scripts/rag-cli.ts" "$@"

@@ -3,28 +3,58 @@
 # install.sh (which validates), `workflow test factory`, trace assertions per factory fixture (merge-gate
 # executes in every one), runs in which pr-state, merge-gate and merge (or, for a pull request into a
 # manual base, notify-operator) execute for real against the engine's own deliver output (only gh is
-# faked), a real (not dry) run in which wait-keeper resumes a durable wait, and a stubbed dry run of
-# every orchestration/workflows/*.yaml. The Trello card nodes run in dry-run mode in every fixture, and
-# the traces assert each move at its node. Needs the binaries from `tools.sh archon`, bun and uv on PATH.
+# faked; they also cover a merge gh refuses and a pull request that conflicts with its base), and a stubbed
+# dry run of every orchestration/workflows/*.yaml. The Trello card nodes and rag-context run in dry-run
+# mode in every fixture, and the traces assert each move at its node and rag-context before the plan.
+# The Claude login checks run as dry runs in every fixture: claude-auth before the profile, claude-auth-scan
+# before the report (also after a failed sync-base); one fixture stops at claude-auth-stop before the profile.
+# sync-base is stubbed in every fixture and executes for real in a scratch run worktree cut from a
+# default branch that has diverged from the profile's base_branch, and from a base it cannot fetch (the
+# run must still end with a report). pr-body-sync is stubbed in every fixture and executes for real in
+# the unstubbed runs: once replacing a stale description before pr-state, once with a failed edit that
+# merge-gate refuses. Each binary must still name the artifacts pr-body-sync reads (its bundled
+# delivery is embedded as text). visual-scope executes in every fixture that is not visual, which must
+# pass visual-round straight on; the three visual fixtures stub it visual and assert the visual gate's
+# path for approve, for a needs-revision round on the same pull request, and for abort; one more run
+# gives visual-scope a UI task with no visual reference and asserts the run stops before the plan.
+# Needs the binaries from `tools.sh archon` and bun on PATH.
 # Every Archon call runs with a throwaway ARCHON_HOME: without one a binary reads and writes the
 # operator's live ~/.archon.
 set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 cd "${root}"
-versions=(0.10.1 0.11.1)
+versions=(0.12.1)
 fixtures_dir=orchestration/factory/.archon/workflows/sdlc-factory/factory/fixtures
 # The fixture whose validation is red; it must end with the merge skipped.
 red_fixture=validation-red-merge-refused
+# The fixture whose merge gh refused; the run must end not delivered with gh's words in the report.
+merge_failed_fixture=merge-refused-by-github
 # The fixture whose validation is red for an environment cause while the PR's CI is green; it must merge.
 env_fixture=validation-environment-ci-green
+# The fixture whose review verdict is the interim one of PILOT-120; it must end before the merge path.
+interim_fixture=review-interim-verdict
 # The fixture whose pull request targets a manual base; it must end completed, pending the operator.
 manual_fixture=manual-base-pending-operator
+# The fixture whose description could not be republished; it must end with merge-gate refusing.
+body_sync_fixture=pr-body-sync-failed
+# The fixture whose Claude login has expired; it must stop at claude-auth-stop before the profile.
+auth_fixture=claude-login-expired
+# The bundled delivery's artifact names pr-body-sync reads, as the binary embeds them: read from
+# _lib/pr-body.ts itself, so the check follows what the script relies on.
+pr_body_lib=orchestration/factory/.archon/workflows/sdlc-factory/factory/scripts/_lib/pr-body.ts
+# The visual gate fixtures (PILOT-278): approve, a needs-revision round then approve, and abort.
+visual_approved_fixture=visual-review-approved
+visual_revised_fixture=visual-review-revised
+visual_aborted_fixture=visual-review-aborted
 # The green fixture the unstubbed merge runs start from.
 green_fixture=existing-profile
 
 command -v bun >/dev/null || { echo "archon-check: bun not found on PATH" >&2; exit 1; }
-command -v uv >/dev/null || { echo "archon-check: uv not found on PATH (the bundled validate scripts run on it)" >&2; exit 1; }
-export UV_PYTHON="${UV_PYTHON:-3.12}"
+pr_body_literals_text=$(bun -e '
+  const { CANDIDATES, PR_CREATE_STARTED } = await import(process.argv[1]);
+  console.log([...CANDIDATES.map((name) => `$ARTIFACTS_DIR/${name}`), `\x27${PR_CREATE_STARTED}\x27`].join("\n"));
+' "${root}/${pr_body_lib}")
+mapfile -t pr_body_literals <<<"${pr_body_literals_text}"
 
 work=$(mktemp -d)
 trap 'rm -rf "${work}"' EXIT
@@ -68,7 +98,12 @@ check_trello_moves() {
     expect_skipped "${version}" "${name}" "${trace}" trello-profile-round
   fi
   case "${name}" in
-  existing-profile | fresh-profile | "${env_fixture}") final=Test ;;
+  "${visual_approved_fixture}" | "${visual_revised_fixture}" | "${visual_aborted_fixture}")
+    expect_move "${version}" "${name}" "${trace}" trello-visual-gate Blocked
+    ;;
+  esac
+  case "${name}" in
+  existing-profile | fresh-profile | "${env_fixture}" | "${visual_approved_fixture}" | "${visual_revised_fixture}") final=Test ;;
   "${manual_fixture}") final=Review ;;
   esac
   expect_move "${version}" "${name}" "${trace}" trello-done "${final}"
@@ -79,10 +114,105 @@ check_trello_moves() {
     fail "${version} ${name}" "trello-done must move the card before not-delivered cancels the run"
 }
 
+# The pre-flight stops the run before anything else; every other fixture runs both login checks
+# as dry runs: the pre-flight before the profile, the scan before the report.
+check_claude_auth() {
+  local version=$1 name=$2 trace=$3 auth_line profile_line scan_line report_line
+  if [ "${name}" = "${auth_fixture}" ]; then
+    grep -qE '^STUBBED +claude-auth \(' "${trace}" || fail "${version} ${name}" "claude-auth must be stubbed"
+    grep -qE '^COMPLETED +claude-auth-stop' "${trace}" || fail "${version} ${name}" "claude-auth-stop did not stop the run"
+    ! grep -qE '^(COMPLETED|STUBBED|FAILED) +(profile-check|rag-context|plan__plan) \(' "${trace}" ||
+      fail "${version} ${name}" "work ran after the login check failed: $(grep -E '^[A-Z]+ ' "${trace}" | tail -40)"
+    grep -qF 'claude /login' "${trace}" || fail "${version} ${name}" "the stop does not name claude /login"
+    return 0
+  fi
+  grep -qF '"status":"dry-run"' <<<"$(node_output "${trace}" claude-auth)" ||
+    fail "${version} ${name}" "claude-auth did not run as a dry run: $(node_output "${trace}" claude-auth)"
+  auth_line=$(grep -nE '^COMPLETED +claude-auth \(' "${trace}" | cut -d: -f1)
+  profile_line=$(grep -nE '^[A-Z]+ +profile-check \(' "${trace}" | head -1 | cut -d: -f1 || true)
+  [ -n "${profile_line}" ] && [ "${auth_line}" -lt "${profile_line}" ] ||
+    fail "${version} ${name}" "claude-auth must run before profile-check"
+  expect_skipped "${version}" "${name}" "${trace}" claude-auth-stop
+  grep -qF '"status":"dry-run"' <<<"$(node_output "${trace}" claude-auth-scan)" ||
+    fail "${version} ${name}" "claude-auth-scan did not run as a dry run: $(node_output "${trace}" claude-auth-scan)"
+  scan_line=$(grep -nE '^COMPLETED +claude-auth-scan \(' "${trace}" | cut -d: -f1)
+  report_line=$(grep -nE '^COMPLETED +report \(' "${trace}" | cut -d: -f1 || true)
+  [ -z "${report_line}" ] || [ "${scan_line}" -lt "${report_line}" ] ||
+    fail "${version} ${name}" "claude-auth-scan must run before the report"
+}
+
+# The line number of a node's first line in a trace.
+line_of() {
+  grep -nE "^[A-Z]+ +$2 \\(" "$1" | head -1 | cut -d: -f1 || true
+}
+
+check_visual_trace() {
+  local version=$1 name=$2 trace=$3 out want previous=0 node at
+  case "${name}" in
+  "${visual_approved_fixture}" | "${visual_revised_fixture}" | "${visual_aborted_fixture}") ;;
+  *)
+    # A task that is not visual: visual-scope executes and says so, there is no gate, and a ready
+    # delivery passes visual-round straight on (interim-verdict's delivery is not ready, so it skips).
+    grep -qF '"visual":false' <<<"$(node_output "${trace}" visual-scope)" ||
+      fail "${version} ${name}" "visual-scope must execute and find no UI task: $(grep -E '^[A-Z]+ +visual-scope' "${trace}" || true)"
+    expect_skipped "${version}" "${name}" "${trace}" visual-cycle
+    grep -qF '"proceed":true' <<<"$(node_output "${trace}" visual-round)" || expect_skipped "${version}" "${name}" "${trace}" visual-round
+    return 0
+    ;;
+  esac
+  out=$(node_output "${trace}" visual-shots)
+  grep -qF '"ready":true' <<<"${out}" && grep -qE 'blob/[0-9a-f]{40}/[^"]*/home-desktop-light-data\.png\?raw=true' <<<"${out}" ||
+    fail "${version} ${name}" "visual-shots must list the committed screenshots as links at the head: ${out:-none}"
+  grep -qE '^COMPLETED +visual-round \(' "${trace}" || fail "${version} ${name}" "visual-round must execute"
+  case "${name}" in
+  "${visual_revised_fixture}")
+    out=$(node_output "${trace}" revise__report)
+    grep -qF '"ready":true' <<<"${out}" && grep -qF '"pr_url":"https://github.com/example/repo/pull/3"' <<<"${out}" ||
+      fail "${version} ${name}" "the revision must deliver on the first delivery's pull request: ${out:-none}"
+    [ "$(grep -cE '^[A-Z]+ +implement__implement \(' "${trace}")" -eq 2 ] ||
+      fail "${version} ${name}" "the revision must run its own implement round"
+    for node in deliver__report visual-turn revise__report visual-shots visual-gate; do
+      at=$(line_of "${trace}" "${node}")
+      [ -n "${at}" ] && [ "${previous}" -lt "${at}" ] || fail "${version} ${name}" "${node} is out of order in the visual round"
+      previous=${at}
+    done
+    ;;
+  *)
+    ! grep -qE '^COMPLETED +revise__report \(' "${trace}" || fail "${version} ${name}" "the first visual round must revise nothing"
+    ;;
+  esac
+  if [ "${name}" = "${visual_aborted_fixture}" ]; then
+    grep -qF '"proceed":false' <<<"$(node_output "${trace}" visual-round)" || fail "${version} ${name}" "visual-round must stop the run"
+    for want in 'SKIPPED +pr-body-sync' 'SKIPPED +pr-state' 'SKIPPED +merge-gate' 'SKIPPED +merge' 'COMPLETED +not-delivered'; do
+      grep -qE "^${want}( |\$)" "${trace}" || fail "${version} ${name}" "trace lacks ${want}"
+    done
+    grep -qF 'stopped at the visual gate (operator chose abort: too dark)' "${trace}" ||
+      fail "${version} ${name}" "the report does not name the visual gate's abort"
+  else
+    grep -qF '"proceed":true' <<<"$(node_output "${trace}" visual-round)" || fail "${version} ${name}" "approve must pass visual-round"
+    for want in 'COMPLETED +merge-gate' 'STUBBED +merge' 'SKIPPED +not-delivered'; do
+      grep -qE "^${want}( |\$)" "${trace}" || fail "${version} ${name}" "trace lacks ${want}"
+    done
+  fi
+}
+
 check_fixture_trace() {
   local version=$1 name=$2 trace=$3
-  local gate_lines state_lines notify_lines
+  local gate_lines state_lines body_lines notify_lines sync_lines rag_line plan_line
+  check_claude_auth "${version}" "${name}" "${trace}"
+  [ "${name}" != "${auth_fixture}" ] || return 0
   check_trello_moves "${version}" "${name}" "${trace}"
+  check_visual_trace "${version}" "${name}" "${trace}"
+  # rag-context executes in every fixture, as a dry run (no request), before the plan reads its file.
+  rag_line=$(grep -nE '^COMPLETED +rag-context \(' "${trace}" | cut -d: -f1 || true)
+  [ -n "${rag_line}" ] || fail "${version} ${name}" "rag-context must execute, never be stubbed: $(grep -E '^[A-Z]+ +rag-context' "${trace}" || true)"
+  grep -qF '"status":"dry-run"' <<<"$(node_output "${trace}" rag-context)" ||
+    fail "${version} ${name}" "rag-context did not run as a dry run: $(node_output "${trace}" rag-context)"
+  plan_line=$(grep -nE '^[A-Z]+ +plan__plan \(' "${trace}" | head -1 | cut -d: -f1 || true)
+  [ -n "${plan_line}" ] && [ "${rag_line}" -lt "${plan_line}" ] ||
+    fail "${version} ${name}" "rag-context must run before the plan"
+  ! grep -qE '^COMPLETED +report \(' "${trace}" || grep -qF '"rag_status":"dry-run"' <<<"$(node_output "${trace}" report)" ||
+    fail "${version} ${name}" "the report does not record rag_status dry-run: $(node_output "${trace}" report)"
   gate_lines=$(grep -E '^[A-Z]+ +merge-gate \(' "${trace}" || true)
   [ -n "${gate_lines}" ] || fail "${version} ${name}" "no merge-gate line in the trace"
   ! grep -vE '^(COMPLETED|SKIPPED) ' <<<"${gate_lines}" >/dev/null ||
@@ -92,8 +222,16 @@ check_fixture_trace() {
   [ -n "${state_lines}" ] || fail "${version} ${name}" "no pr-state line in the trace"
   ! grep -vE '^(STUBBED|SKIPPED) ' <<<"${state_lines}" >/dev/null ||
     fail "${version} ${name}" "pr-state must be stubbed or skipped in a test: ${state_lines}"
-  grep -qE '^COMPLETED +wait-keeper \(' "${trace}" && grep -q '"keeper":"off"' "${trace}" ||
-    fail "${version} ${name}" "wait-keeper must execute and report itself off in a dry run"
+  # pr-body-sync talks to GitHub; a fixture must never reach it.
+  body_lines=$(grep -E '^[A-Z]+ +pr-body-sync \(' "${trace}" || true)
+  [ -n "${body_lines}" ] || fail "${version} ${name}" "no pr-body-sync line in the trace"
+  ! grep -vE '^(STUBBED|SKIPPED) ' <<<"${body_lines}" >/dev/null ||
+    fail "${version} ${name}" "pr-body-sync must be stubbed or skipped in a test: ${body_lines}"
+  # sync-base fetches and hard-resets the checkout; a fixture must never reach it.
+  sync_lines=$(grep -E '^[A-Z]+ +sync-base \(' "${trace}" || true)
+  [ -n "${sync_lines}" ] || fail "${version} ${name}" "no sync-base line in the trace"
+  ! grep -vE '^STUBBED ' <<<"${sync_lines}" >/dev/null ||
+    fail "${version} ${name}" "sync-base must be stubbed in a test: it fetches and resets the checkout: ${sync_lines}"
   # notify-operator comments on GitHub; a fixture must never reach it either.
   notify_lines=$(grep -E '^[A-Z]+ +notify-operator \(' "${trace}" || true)
   [ -n "${notify_lines}" ] || fail "${version} ${name}" "no notify-operator line in the trace"
@@ -110,27 +248,46 @@ check_fixture_trace() {
     grep -qE '^SKIPPED +notify-operator \(' "${trace}" || fail "${version} ${name}" "notify-operator ran for a base that is not manual"
   fi
   if [ "${name}" = "${env_fixture}" ]; then
-    grep -qE '^COMPLETED +deliver__gate-validated \(' "${trace}" ||
-      fail "${version} ${name}" "the bundled gate-validated did not pass the environment red"
+    grep -qE '^STUBBED +pr__publish \(' "${trace}" ||
+      fail "${version} ${name}" "the deliver block did not hand the environment red on to the pull request"
+    grep -qF '"ready":true' <<<"$(node_output "${trace}" deliver__report)" ||
+      fail "${version} ${name}" "the delivery did not end ready: $(node_output "${trace}" deliver__report)"
     grep -qE '^COMPLETED +merge-gate \(' "${trace}" && grep -qE '^STUBBED +merge \(' "${trace}" ||
       fail "${version} ${name}" "merge-gate did not lead to the merge: ${gate_lines}"
     grep -qE '^SKIPPED +not-delivered' "${trace}" || fail "${version} ${name}" "the run was not delivered"
   fi
-  if [ "${name}" != "${red_fixture}" ]; then
-    ! grep -q '^FAILED' "${trace}" || fail "${version} ${name}" "unexpected failure: $(grep '^FAILED' "${trace}")"
-    return
+  ! grep -q '^FAILED' "${trace}" || fail "${version} ${name}" "unexpected failure: $(grep '^FAILED' "${trace}")"
+  local want
+  if [ "${name}" = "${merge_failed_fixture}" ]; then
+    for want in 'STUBBED +merge' 'SKIPPED +deploy' 'COMPLETED +report' 'COMPLETED +not-delivered'; do
+      grep -qE "^${want} \\(" "${trace}" || fail "${version} ${name}" "trace lacks ${want}: $(grep -E '^[A-Z]+ ' "${trace}" | tail -40)"
+    done
+    grep -qF 'merge refused (merge: gh pr merge failed:' "${trace}" || fail "${version} ${name}" "the report does not carry gh's refusal"
   fi
-  local failed
-  failed=$(grep '^FAILED' "${trace}" || true)
-  grep -qE '^FAILED +deliver__gate-validated \(' <<<"${failed}" && [ "$(wc -l <<<"${failed}")" -eq 1 ] ||
-    fail "${version} ${name}" "want exactly one FAILED line, deliver__gate-validated; got: ${failed:-none}"
-  grep -qE '^SKIPPED +merge \(' "${trace}" || fail "${version} ${name}" "merge was not skipped"
-  grep -qE '^COMPLETED +not-delivered' "${trace}" || fail "${version} ${name}" "not-delivered did not complete"
-  if [ "${version}" = 0.10.1 ]; then
-    # Archon 0.10.1 flips the PR ready despite the red gate; the fixture must exercise that path.
-    grep -qE '^STUBBED +deliver__flip-ready' "${trace}" || fail "${version} ${name}" "the flip-ready path was not exercised"
+  if [ "${name}" = "${red_fixture}" ]; then
     grep -qE '^COMPLETED +merge-gate \(' "${trace}" && grep -q 'test command exited 1 on the pull request head' "${trace}" ||
       fail "${version} ${name}" "merge-gate did not refuse on its own test run"
+    for want in 'SKIPPED +merge' 'COMPLETED +not-delivered'; do
+      grep -qE "^${want}( |\$)" "${trace}" || fail "${version} ${name}" "trace lacks ${want}"
+    done
+  fi
+  if [ "${name}" = "${body_sync_fixture}" ]; then
+    grep -qE '^COMPLETED +merge-gate \(' "${trace}" &&
+      grep -q 'the pull request description could not be republished: gh pr edit exited 1' "${trace}" ||
+      fail "${version} ${name}" "merge-gate did not refuse the description that was not republished"
+    for want in 'SKIPPED +merge' 'COMPLETED +not-delivered'; do
+      grep -qE "^${want}( |\$)" "${trace}" || fail "${version} ${name}" "trace lacks ${want}"
+    done
+  fi
+  if [ "${name}" = "${interim_fixture}" ]; then
+    grep -qF '"reason":"review_open"' <<<"$(node_output "${trace}" deliver__report)" ||
+      fail "${version} ${name}" "the delivery did not end review_open: $(node_output "${trace}" deliver__report)"
+    for want in 'SKIPPED +pr-state' 'SKIPPED +merge-gate' 'SKIPPED +merge' 'COMPLETED +not-delivered'; do
+      grep -qE "^${want}( |\$)" "${trace}" || fail "${version} ${name}" "trace lacks ${want}"
+    done
+    grep -qF 'the delivery ended not ready (review_open). Not ready: Round 1: review_open. Not yet finalized' "${trace}" ||
+      fail "${version} ${name}" "the report does not quote the delivery's reason and summary"
+    ! grep -q 'invalid review verdict' "${trace}" || fail "${version} ${name}" "the review verdict was rejected"
   fi
 }
 
@@ -147,29 +304,48 @@ mkdir -p "${work}/fake-bin"
 cat >"${work}/fake-bin/gh" <<'GH'
 #!/usr/bin/env bash
 case "$*" in
-  "pr view "*" --json headRefOid,headRefName,isDraft,state,baseRefName")
-    printf '{"headRefOid":"%s","headRefName":"fixture-branch","isDraft":false,"state":"OPEN","baseRefName":"%s"}\n' \
-      "${FAKE_GH_HEAD_OID}" "${FAKE_GH_BASE:-develop}" ;;
+  "pr view "*" --json headRefOid,headRefName,isDraft,state,baseRefName,mergeable")
+    printf '{"headRefOid":"%s","headRefName":"fixture-branch","isDraft":false,"state":"OPEN","baseRefName":"%s","mergeable":"%s"}\n' \
+      "${FAKE_GH_HEAD_OID}" "${FAKE_GH_BASE:-develop}" "${FAKE_GH_MERGEABLE:-MERGEABLE}" ;;
   "pr checks "*" --json name,bucket") printf '%s\n' "${FAKE_GH_CHECKS:-[]}" ;;
-  "pr merge "*) ;;
+  "pr merge "*) [ -z "${FAKE_GH_MERGE_ERROR:-}" ] || { printf '%s\n' "${FAKE_GH_MERGE_ERROR}" >&2; exit 1; } ;;
   "pr comment "*) printf '%s\n' "$*" >>"${FAKE_GH_COMMENTS}" ;;
-  *"--json state --jq .state") echo MERGED ;;
+  *"--json state --jq .state") echo "${FAKE_GH_STATE_AFTER_MERGE:-MERGED}" ;;
   *"--json mergeCommit "*) printf '%s\n' "${FAKE_GH_MERGE_COMMIT}" ;;
   *"--json headRefName --jq .headRefName") echo fixture-branch ;;
+  "pr view https://github.com/example/repo/pull/3 --json body --jq .body")
+    # Stands in for the stubbed pr__prepare, which writes pr-body.md: the run's artifacts dir is only
+    # known inside the run, and pr-body-sync reads the live body before it looks for the file.
+    if [ -n "${FAKE_GH_SEED_BODY:-}" ] && [ ! -e "${ARTIFACTS_DIR}/pr-body.md" ]; then
+      printf '%s' "${FAKE_GH_SEED_BODY}" >"${ARTIFACTS_DIR}/pr-body.md"
+    fi
+    if [ -f "${FAKE_GH_EDIT_FILE}" ]; then
+      cat "${FAKE_GH_EDIT_FILE}"
+    else
+      printf '%s' "${FAKE_GH_LIVE_BODY:-}"
+    fi ;;
+  "pr edit https://github.com/example/repo/pull/3 --body-file "*)
+    [ -z "${FAKE_GH_EDIT_ERROR:-}" ] || { printf '%s\n' "${FAKE_GH_EDIT_ERROR}" >&2; exit 1; }
+    cp "${@: -1}" "${FAKE_GH_EDIT_FILE}" ;;
   *) echo "fake gh: unexpected call: $*" >&2; exit 1 ;;
 esac
 GH
 chmod +x "${work}/fake-bin/gh"
-export FAKE_GH_HEAD_OID FAKE_GH_COMMENTS="${work}/gh-comments"
+export FAKE_GH_HEAD_OID FAKE_GH_COMMENTS="${work}/gh-comments" FAKE_GH_EDIT_FILE="${work}/gh-edit.md"
 FAKE_GH_HEAD_OID=$(git -C "${scratch}" rev-parse HEAD)
-sed -e '/^pr-state:/d' -e '/^merge:/d' -e '/^exec-code:/,$d' \
+sed -e '/^pr-body-sync:/d' -e '/^pr-state:/d' -e '/^merge:/d' -e '/^exec-code:/,$d' \
   "${fixtures_dir}/${green_fixture}.stubs.yaml" >"${work}/unstubbed-merge.stubs.yaml"
 
-# Runs the factory with pr-state, merge-gate, merge and notify-operator unstubbed against a pull
-# request into base (default develop); the trace goes to trace.out.
+# Runs the factory with pr-body-sync, pr-state, merge-gate, merge and notify-operator unstubbed against a pull
+# request into base (default develop) that GitHub reports as mergeable (default MERGEABLE); a non-empty
+# merge_error makes `gh pr merge` print it and exit 1; state_after_merge (default MERGED) is the state
+# gh reads back after the merge. The trace goes to trace.out.
 run_unstubbed_merge() {
-  local archon_bin=$1 merge_commit=$2 base=${3:-develop}
+  local archon_bin=$1 merge_commit=$2 base=${3:-develop} mergeable=${4:-MERGEABLE} merge_error=${5:-} \
+    state_after_merge=${6:-MERGED}
   PATH="${work}/fake-bin:${PATH}" FAKE_GH_MERGE_COMMIT="${merge_commit}" FAKE_GH_BASE="${base}" \
+    FAKE_GH_MERGEABLE="${mergeable}" FAKE_GH_MERGE_ERROR="${merge_error}" \
+    FAKE_GH_STATE_AFTER_MERGE="${state_after_merge}" \
     "${archon_bin}" workflow run factory --cwd "${scratch}" --dry-run --stubs "${work}/unstubbed-merge.stubs.yaml" \
     --exec-code --input task=fixture 2>&1 | without_logs >"${work}/trace.out" || true
 }
@@ -181,10 +357,22 @@ expect_trace() {
 }
 
 check_unstubbed_merge() {
-  local version=$1 archon_bin=$2 label
+  local version=$1 archon_bin=$2 label body_line state_line
+  # The live description is round 1's; the run's pr-body.md is round 2's.
   label="${version} unstubbed pr-state and merge-gate"
+  rm -f "${FAKE_GH_EDIT_FILE}"
+  export FAKE_GH_SEED_BODY=$'## Problem\nfixture body, round 2\n' FAKE_GH_LIVE_BODY=$'## Problem\nfixture body, round 1\n'
   run_unstubbed_merge "${archon_bin}" 0123456789abcdef0123456789abcdef01234567
+  unset FAKE_GH_SEED_BODY FAKE_GH_LIVE_BODY
   ! grep -q '^FAILED' "${work}/trace.out" || fail "${label}" "unexpected failure: $(grep '^FAILED' "${work}/trace.out")"
+  expect_trace "${label}" '^COMPLETED +pr-body-sync \('
+  grep -qF '"action":"updated"' <<<"$(node_output "${work}/trace.out" pr-body-sync)" ||
+    fail "${label}" "pr-body-sync did not update the description: $(node_output "${work}/trace.out" pr-body-sync)"
+  body_line=$(grep -nE '^COMPLETED +pr-body-sync \(' "${work}/trace.out" | cut -d: -f1)
+  state_line=$(grep -nE '^COMPLETED +pr-state \(' "${work}/trace.out" | cut -d: -f1 || true)
+  [ -n "${state_line}" ] && [ "${body_line}" -lt "${state_line}" ] || fail "${label}" "pr-body-sync must complete before pr-state"
+  grep -qF 'fixture body, round 2' "${FAKE_GH_EDIT_FILE}" 2>/dev/null ||
+    fail "${label}" "the edit did not carry the run's pr-body.md"
   expect_trace "${label}" '^COMPLETED +pr-state \('
   expect_trace "${label}" '^COMPLETED +merge-gate \('
   expect_trace "${label}" '^COMPLETED +merge \('
@@ -221,112 +409,140 @@ check_unstubbed_merge() {
   expect_trace "${label}" '^SKIPPED +not-delivered'
   grep -q 'ready for the operator: base main is manual' "${FAKE_GH_COMMENTS}" 2>/dev/null ||
     fail "${label}" "no operator comment was posted on the pull request"
+
+  # gh refuses the merge (its real conflict text): the run must end not delivered with gh's words,
+  # not fail at the report.
+  label="${version} gh pr merge refused"
+  run_unstubbed_merge "${archon_bin}" "" develop MERGEABLE \
+    $'X Pull request example/repo#3 is not mergeable: the merge commit cannot be cleanly created.\nTo have the pull request merged after all the requirements have been met, add the --auto flag.'
+  ! grep -q '^FAILED' "${work}/trace.out" || fail "${label}" "unexpected failure: $(grep '^FAILED' "${work}/trace.out")"
+  expect_trace "${label}" '^COMPLETED +merge \('
+  expect_trace "${label}" '^SKIPPED +deploy \('
+  expect_trace "${label}" '^COMPLETED +report \('
+  expect_trace "${label}" '^COMPLETED +trello-done \('
+  expect_trace "${label}" '^COMPLETED +not-delivered'
+  expect_trace "${label}" 'merge refused \(merge: gh pr merge failed: X Pull request example/repo#3 is not mergeable'
+
+  # gh reports success but the pull request reads back still open: the merge did not happen.
+  label="${version} pull request not MERGED after the merge"
+  run_unstubbed_merge "${archon_bin}" "" develop MERGEABLE "" OPEN
+  ! grep -q '^FAILED' "${work}/trace.out" || fail "${label}" "unexpected failure: $(grep '^FAILED' "${work}/trace.out")"
+  expect_trace "${label}" '^COMPLETED +merge \('
+  expect_trace "${label}" '^SKIPPED +deploy \('
+  expect_trace "${label}" '^COMPLETED +report \('
+  expect_trace "${label}" '^COMPLETED +not-delivered'
+  expect_trace "${label}" 'merge refused \(merge: pull request is not MERGED after the merge \(state: OPEN\)'
+
+  # The edit of a stale description fails: merge-gate refuses before anything is merged.
+  label="${version} pull request description not republished"
+  rm -f "${FAKE_GH_EDIT_FILE}"
+  export FAKE_GH_SEED_BODY=$'## Problem\nfixture body, round 2\n' FAKE_GH_LIVE_BODY=$'## Problem\nfixture body, round 1\n' \
+    FAKE_GH_EDIT_ERROR='HTTP 502: Bad Gateway'
+  run_unstubbed_merge "${archon_bin}" ""
+  unset FAKE_GH_SEED_BODY FAKE_GH_LIVE_BODY FAKE_GH_EDIT_ERROR
+  ! grep -q '^FAILED' "${work}/trace.out" || fail "${label}" "unexpected failure: $(grep '^FAILED' "${work}/trace.out")"
+  expect_trace "${label}" '^COMPLETED +pr-body-sync \('
+  expect_trace "${label}" '^COMPLETED +merge-gate \('
+  expect_trace "${label}" '^SKIPPED +merge \('
+  expect_trace "${label}" '^COMPLETED +not-delivered'
+  expect_trace "${label}" 'the pull request description could not be republished: gh pr edit exited 1: HTTP 502: Bad Gateway'
+
+  # GitHub already reports the conflict: merge-gate refuses before anything is merged.
+  label="${version} pull request conflicts with its base"
+  run_unstubbed_merge "${archon_bin}" "" develop CONFLICTING
+  ! grep -q '^FAILED' "${work}/trace.out" || fail "${label}" "unexpected failure: $(grep '^FAILED' "${work}/trace.out")"
+  expect_trace "${label}" '^COMPLETED +merge-gate \('
+  expect_trace "${label}" '^SKIPPED +merge \('
+  expect_trace "${label}" '^COMPLETED +not-delivered'
+  expect_trace "${label}" 'merge refused \(the pull request is not mergeable: it conflicts with develop\)'
 }
 
-# A probe workflow shaped like the bundled deliver's await-checks: the first CI probe reads pending and
-# the run suspends on a 2 s durable `wait:`; the second reads concluded. `after` records the keeper's
-# verdict. Written with or without the keeper node (the negative control).
-write_wait_probe() {
-  local dir=$1 with_keeper=$2
-  {
-    printf 'name: wait-keeper-probe\ndescription: wait-keeper real-run check\nnodes:\n'
-    if [ "${with_keeper}" = yes ]; then
-      cat <<'YAML'
-  - id: keeper
-    script: wait-keeper
-    runtime: bun
-    with:
-      poll_seconds: "1"
-    output_format:
-      type: object
-      properties:
-        keeper: { type: string }
-        reason: { type: string }
-        run_id: { type: string }
-      required: [keeper, reason, run_id]
-YAML
-    fi
-    cat <<'YAML'
-  - id: await
-    loop_group:
-      max_iterations: 5
-      until_bash: test -f ci-done
-      nodes:
-        - id: probe
-          bash: |
-            if test -f seen; then touch ci-done; printf '{"state":"concluded"}'; else touch seen; printf '{"state":"pending"}'; fi
-          output_format:
-            type: object
-            properties:
-              state: { type: string }
-            required: [state]
-        - id: pause
-          wait:
-            duration_ms: 2000
-          depends_on: [probe]
-          when: "$probe.output.state == 'pending'"
-YAML
-    if [ "${with_keeper}" = yes ]; then
-      printf '    depends_on: [keeper]\n'
-      printf '  - id: after\n    bash: printf %%s $keeper.output.keeper > keeper-state\n    depends_on: [await]\n'
-    else
-      printf '  - id: after\n    bash: echo after\n    depends_on: [await]\n'
-    fi
-  } >"${dir}/.archon/workflows/wait-keeper-probe.yaml"
+# Reproduces how Archon cuts a run worktree: from origin/main of a repository whose profile names
+# develop, the two branches diverged. sync-base executes for real and must move the run branch to
+# develop before the plan starts.
+check_sync_base() {
+  local version=$1 archon_bin=$2 label="${version} sync-base from the default branch" dir seed run main_tip develop_tip
+  local ident=(-c user.name=archon-check -c user.email=archon-check@example.com) sync_line plan_line out
+  dir="${work}/sync-${version}"
+  seed="${dir}/seed"
+  run="${dir}/run"
+  git init -q --bare -b main "${dir}/origin.git"
+  git init -q -b main "${seed}"
+  git -C "${seed}" remote add origin "${dir}/origin.git"
+  git -C "${seed}" "${ident[@]}" commit -q --allow-empty -m base
+  git -C "${seed}" checkout -q -b develop
+  git -C "${seed}" "${ident[@]}" commit -q --allow-empty -m develop-only
+  git -C "${seed}" checkout -q main
+  git -C "${seed}" "${ident[@]}" commit -q --allow-empty -m main-only
+  git -C "${seed}" push -q origin main develop
+  git clone -q "${dir}/origin.git" "${dir}/clone"
+  git -C "${dir}/clone" worktree add -q -b archon/task-factory-fixture "${run}" origin/main
+  main_tip=$(git -C "${dir}/clone" rev-parse origin/main)
+  develop_tip=$(git -C "${dir}/clone" rev-parse origin/develop)
+  [ "$(git -C "${run}" rev-parse HEAD)" = "${main_tip}" ] || fail "${label}" "the run worktree does not start at main"
+
+  sed -e '/^sync-base:/d' -e '/^exec-code:/,$d' "${fixtures_dir}/${green_fixture}.stubs.yaml" >"${work}/sync-base.stubs.yaml"
+  "${archon_bin}" workflow run factory --cwd "${run}" --dry-run --stubs "${work}/sync-base.stubs.yaml" \
+    --exec-code --input task=fixture 2>&1 | without_logs >"${work}/trace.out" || true
+  ! grep -q '^FAILED' "${work}/trace.out" || fail "${label}" "unexpected failure: $(grep '^FAILED' "${work}/trace.out")"
+  expect_trace "${label}" '^COMPLETED +sync-base \('
+  out=$(node_output "${work}/trace.out" sync-base)
+  grep -qF '"action":"reset"' <<<"${out}" && grep -qF "\"before\":\"${main_tip}\"" <<<"${out}" &&
+    grep -qF "\"after\":\"${develop_tip}\"" <<<"${out}" ||
+    fail "${label}" "sync-base must reset from ${main_tip} to ${develop_tip}; output: ${out:-none}"
+  sync_line=$(grep -nE '^COMPLETED +sync-base \(' "${work}/trace.out" | cut -d: -f1)
+  plan_line=$(grep -nE '^[A-Z]+ +plan__plan \(' "${work}/trace.out" | head -1 | cut -d: -f1)
+  [ -n "${plan_line}" ] && [ "${sync_line}" -lt "${plan_line}" ] || fail "${label}" "sync-base must complete before the plan"
+  [ "$(git -C "${run}" rev-parse HEAD)" = "${develop_tip}" ] || fail "${label}" "the run worktree is not at develop"
+  [ "$(git -C "${run}" symbolic-ref --short HEAD)" = archon/task-factory-fixture ] ||
+    fail "${label}" "the run worktree left its branch"
+
+  # The base cannot be fetched: sync-base fails, everything after it is skipped, and the run must
+  # still end with a report that records the skipped rag-context.
+  label="${version} sync-base cannot fetch the base"
+  git -C "${run}" remote set-url origin "${dir}/missing.git"
+  "${archon_bin}" workflow run factory --cwd "${run}" --dry-run --stubs "${work}/sync-base.stubs.yaml" \
+    --exec-code --input task=fixture 2>&1 | without_logs >"${work}/trace.out" || true
+  expect_trace "${label}" '^FAILED +sync-base \('
+  expect_trace "${label}" '^SKIPPED +rag-context \('
+  expect_trace "${label}" '^COMPLETED +claude-auth-scan \('
+  expect_trace "${label}" '^COMPLETED +report \('
+  expect_trace "${label}" '^COMPLETED +trello-done \('
+  out=$(node_output "${work}/trace.out" report)
+  grep -qF '"rag_status":"skipped"' <<<"${out}" && grep -qF '"rag_sources":[]' <<<"${out}" ||
+    fail "${label}" "the report must record the skipped rag-context; output: ${out:-none}"
 }
 
-# Starts the probe in a fresh scratch repository and home; prints "<archon home> <repo> <run id>".
-start_wait_probe() {
-  local archon_bin=$1 with_keeper=$2 dir
-  dir=$(mktemp -d "${work}/wait-probe.XXXX")
-  mkdir -p "${dir}/repo/.archon/workflows" "${dir}/home"
-  git init -q "${dir}/repo"
-  git -C "${dir}/repo" -c user.name=archon-check -c user.email=archon-check@example.com commit -q --allow-empty -m init
-  cp -R orchestration/factory/.archon/workflows/sdlc-factory/factory/scripts "${dir}/repo/.archon/scripts"
-  write_wait_probe "${dir}/repo" "${with_keeper}"
-  ARCHON_HOME="${dir}/home" "${archon_bin}" workflow run wait-keeper-probe --cwd "${dir}/repo" --no-worktree \
-    </dev/null >"${dir}/run.out" 2>&1 || true
-  printf '%s %s %s\n' "${dir}/home" "${dir}/repo" "$(ARCHON_HOME="${dir}/home" "${archon_bin}" workflow runs \
-    --cwd "${dir}/repo" --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["runs"][0]["id"])')"
-}
-
-run_status() {
-  ARCHON_HOME=$1 "$2" workflow get "$3" --json 2>/dev/null |
-    python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", "unreadable"))' 2>/dev/null || echo unreadable
-}
-
-check_wait_keeper() {
-  local version=$1 archon_bin=$2 label="${version} wait-keeper" home repo id status="" i want_keeper output_root
-  read -r home repo id < <(start_wait_probe "${archon_bin}" yes)
-  for i in $(seq 1 90); do
-    status=$(run_status "${home}" "${archon_bin}" "${id}")
-    [ "${status}" != completed ] || break
-    sleep 1
-  done
-  [ "${status}" = completed ] || fail "${label}" "the probe run is ${status}, not completed: $(without_logs <"${repo}/../run.out" | tail -20)"
-  want_keeper=off
-  [ "${version}" != 0.10.1 ] || want_keeper=on
-  [ "$(cat "${repo}/keeper-state" 2>/dev/null)" = "${want_keeper}" ] ||
-    fail "${label}" "want keeper ${want_keeper}, got '$(cat "${repo}/keeper-state" 2>/dev/null)'"
-  [ "${version}" = 0.10.1 ] || return 0
-  output_root=$(ARCHON_HOME="${home}" "${archon_bin}" workflow get "${id}" --json 2>/dev/null |
-    python3 -c 'import json,sys; print(json.load(sys.stdin)["output_root"])')
-  grep -q ' resume: ' "${output_root}/artifacts/runs/${id}/wait-keeper.log" ||
-    fail "${label}" "wait-keeper.log has no resume line"
-
-  # Negative control: without the keeper the same run stays paused, so this check reproduces the defect.
-  read -r home repo id < <(start_wait_probe "${archon_bin}" no)
-  sleep 15
-  status=$(run_status "${home}" "${archon_bin}" "${id}")
-  [ "${status}" = paused ] || fail "${label}" "without the keeper the probe run is ${status}, not paused"
+# A UI task whose brief names no visual reference (PILOT-278): visual-scope executes for real, the
+# cancel node stops the run, and neither the plan nor the delivery starts.
+check_visual_scope_missing() {
+  local version=$1 archon_bin=$2 label="$1 a UI task without a visual reference" out
+  sed '/^exec-code:/,$d' "${fixtures_dir}/${green_fixture}.stubs.yaml" >"${work}/stubs.yaml"
+  "${archon_bin}" workflow run factory --cwd "${root}" --dry-run --stubs "${work}/stubs.yaml" --exec-code \
+    --input task=$'PILOT-7: fixture\nLayer: ui.' 2>&1 | without_logs >"${work}/trace.out" || true
+  out=$(node_output "${work}/trace.out" visual-scope)
+  grep -qF '"visual":true' <<<"${out}" && grep -qF '"ready":false' <<<"${out}" ||
+    fail "${label}" "visual-scope must execute and find the reference missing; output: ${out:-none}"
+  expect_trace "${label}" '^COMPLETED +abort-visual-scope \(cancel\) — workflow cancelled'
+  expect_trace "${label}" 'Stopped before the plan: .*names no visual reference'
+  ! grep -qE '^[A-Z]+ +(plan-cycle|plan__[a-z-]+|deliver|deliver__[a-z-]+|visual-cycle) \(' "${work}/trace.out" ||
+    fail "${label}" "the plan or the delivery started: $(grep -E '^[A-Z]+ ' "${work}/trace.out")"
 }
 
 for version in "${versions[@]}"; do
   archon_bin="${root}/.tools/bin/archon-${version}"
   [ -x "${archon_bin}" ] || fail "${version}" "${archon_bin} missing; run: bash scripts/ci/tools.sh archon"
+  for literal in "${pr_body_literals[@]}"; do
+    grep -aqF -- "${literal}" "${archon_bin}" ||
+      fail "${version}" "the bundled delivery no longer names ${literal}; pr-body-sync (_lib/pr-body.ts) reads it"
+  done
   home="${work}/home-${version}"
   mkdir -p "${home}"
   export ARCHON_HOME="${home}"
+  # Release binaries from v0.12.0 on ship without providers; the factory's monitor node and the other
+  # workflows name claude.
+  "${archon_bin}" provider add claude >"${work}/provider.out" 2>&1 ||
+    fail "${version}" "provider add claude failed: $(cat "${work}/provider.out")"
 
   ARCHON_BIN="${archon_bin}" INSTALL_SKIP_RUNTIME_TOOLS=1 bash install.sh >"${work}/install.out" 2>&1 ||
     fail "${version}" "install.sh failed: $(cat "${work}/install.out")"
@@ -346,7 +562,8 @@ for version in "${versions[@]}"; do
     check_fixture_trace "${version}" "${name}" "${work}/trace.out"
   done
   check_unstubbed_merge "${version}" "${archon_bin}"
-  check_wait_keeper "${version}" "${archon_bin}"
+  check_sync_base "${version}" "${archon_bin}"
+  check_visual_scope_missing "${version}" "${archon_bin}"
 
   dry_runs=0
   for workflow in orchestration/workflows/*.yaml; do
@@ -359,5 +576,5 @@ for version in "${versions[@]}"; do
     dry_runs=$((dry_runs + 1))
   done
 
-  echo "archon ${version}: install+validate ok, ${fixture_count} fixtures passed, traces ok, unstubbed merge ok, wait-keeper ok, ${dry_runs} dry-runs ok"
+  echo "archon ${version}: install+validate ok, ${fixture_count} fixtures passed, traces ok, unstubbed merge ok, sync-base ok, visual reference check ok, ${dry_runs} dry-runs ok, pr-body names ok"
 done

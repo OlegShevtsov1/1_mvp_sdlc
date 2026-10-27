@@ -7,15 +7,18 @@ discipline (M7.7), feedback loops (M7.6).
 ## The task text: `task-brief`
 
 The factory's gate 2 must be approvable without editing the task text, so the text is generated, not written.
-`task-brief <slug> <task-id>` (or `/mvp-sdlc:task-brief`), run in the repository that owns the task, prints it in
-the factory guide's form:
+`task-brief <slug> <task-id>` (or `/mvp-sdlc:task-brief`), run in the repository of the task, prints it in the
+factory guide's form. A frontend task lives in the backend `tasks/tasks.json`, which `sync-spec` does not copy: in
+the frontend, add `--from <be checkout>` (it reads `tasks/` as committed at `origin/<repo.base_branch>`, or
+`--ref <ref>`).
 
 - **A. What to do and how to tell it works**: the task title, layer and likely files; its acceptance criteria
   verbatim from PRD section 5; the test level of each criterion; the task's DoD; the rules — at most one day and 500
   changed lines, exactly three commits in order, the commit trailers, the test and lint commands from
   `.claude/sdlc.local.md`, the tracker row and the `tasks/tasks.json` status to set to `done` in the same PR, and the
-  Trello checklist item to tick (the card id comes from `state.json`); the pull request title
-  `PILOT-<n>: <card title>` and the description lines `Type:`, `SDLC-Task:` and `SDLC-AC:`
+  feature card's checklist item to tick (the card id comes from `state.json`); the pull request title
+  `PILOT-<task card>: <task title>` from the task's card in `tasks/tasks.json` (decision 78; a task without a card
+  falls back to the feature card, with a warning to run `task-cards`) and the description lines `Type:`, `SDLC-Task:` and `SDLC-AC:`
   ([05-git-pr-review.md](05-git-pr-review.md)).
 - **B. Deploy, C. Health check, D. Rollback** from `.archon/factory-profile.yaml`, or a note that the factory's
   profile gate will ask.

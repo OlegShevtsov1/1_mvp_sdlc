@@ -54,6 +54,29 @@ RSpec.describe 'bin/pr-conventions-check' do
     end
   end
 
+  # Every release has its own card; <KEY>-0 is only for card-less chores (decision 91).
+  [
+    [ "#{KEY}-0: Release v1.2.3", 'develop', 'main' ],
+    [ "#{KEY}-0: Release 1.2.3 changelog", 'archon/task-factory-1792086449006', 'develop' ],
+    [ "#{KEY}-00: Release v1.2.3", 'develop', 'main' ]
+  ].each do |title, head, base|
+    it "fails condition 4 for the release title #{title.inspect} into #{base}" do
+      conventions('PR_TITLE' => title, 'HEAD_REF' => head, 'BASE_REF' => base) do |output, status|
+        expect(status.exitstatus).to eq(1)
+        expect(output).to include('::error::condition 4 failed:', 'decision 91', "#{KEY}-<n>: Release vX.Y.Z")
+        expect(output).not_to include('condition 1', 'condition 2', 'condition 3')
+      end
+    end
+  end
+
+  [ "#{KEY}-0: Sync main (abc1234)", "#{KEY}-12: Release v1.2.3" ].each do |title|
+    it "passes the title #{title.inspect} from develop into main" do
+      conventions('PR_TITLE' => title, 'HEAD_REF' => 'develop', 'BASE_REF' => 'main') do |output, status|
+        expect(status).to be_success, output
+      end
+    end
+  end
+
   {
     "What and why\n" => 'the body has no Type: line',
     "What\n\n Type: feat\n" => 'the body has no Type: line',

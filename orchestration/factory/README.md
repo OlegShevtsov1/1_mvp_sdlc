@@ -12,7 +12,8 @@ fixes the findings, waits for CI, flips the PR to ready, merges it, deploys to
 your own infrastructure, polls a health URL, asks your error-monitoring service
 whether new errors appeared, and rolls back automatically when health or
 monitoring is red. Every run ends with an honest report: a rolled-back deploy is
-never reported as a success.
+never reported as a success. When the Claude login of the host has expired, the run
+stops at once and alerts you on Telegram with the fix (`claude /login`).
 
 This directory is the source of one Archon workflow, named `factory`. It lives in
 the `1_mvp_sdlc` repository; the operator guide is
@@ -89,7 +90,9 @@ On `abort` the run stops.
 again. The same three responses apply, with up to 3 revision rounds.
 
 After gate 2 the run is hands-off: implement, review, merge, deploy, health
-check, monitoring check, rollback if red, report.
+check, monitoring check, rollback if red, report. A UI task stops once more
+after CI, at the visual gate, for the operator to review its screenshots
+(see [archon-factory.md](../docs/archon-factory.md), section 6).
 
 If you forgot the run id, list the paused runs:
 
@@ -118,7 +121,9 @@ A full annotated example with every field is in
 - `repo` — `remote`, `base_branch`, `merge_strategy` (`squash` | `merge` |
   `rebase`), `manual_merge_bases` — the bases whose pull requests the operator
   merges by hand. Absent means `["main"]`, so a profile whose `base_branch` is
-  `main` needs `manual_merge_bases: []` for the factory to merge.
+  `main` needs `manual_merge_bases: []` for the factory to merge. The run
+  starts from `<remote>/<base_branch>`, whatever the repository's default branch
+  (see the [operator guide §9](../docs/archon-factory.md#9-known-archon-issues-the-factory-handles)).
 - `deploy` — `command`, `health_url`, `wait_seconds`, `rollback_command`.
   Before running `command`, the workflow checks out the merged commit inside
   Archon's own worktree, which leaves that worktree on a detached HEAD — that is
@@ -207,15 +212,21 @@ ends with status `cancelled` and a reason that starts with
 that fails outright ends the same way, without a rollback (there is nothing to
 roll back to).
 
-The merge itself is guarded. After the bundled deliver block, the `pr-state`
-node reads the pull request, its CI checks and the checkout, and the
-`merge-gate` node re-runs the profile's test and build commands on the exact
+The merge itself is guarded. After the bundled deliver block, the
+`pr-body-sync` node republishes the pull request description from the run's
+latest body file (the run's `pr-body.md`, unless the PR opened with it and no
+round rewrote it since; else the newest `pr-body*.md`), and `merge-gate`
+refuses when it could not. The `pr-state` node then reads the pull request,
+its CI checks and the checkout, and the `merge-gate` node re-runs the profile's test and build commands on the exact
 pull request head. The lint command runs too, unless the pull request has a
 passing CI check named lint, which stands in for it. On any red command, any
-failed or cancelled CI check, or when the pull request is not open and ready or
-is not what the checkout holds, it refuses. The merge is skipped and the run ends
-`cancelled` with `Not delivered: merge refused (…)`: the pull request stays open
-and unmerged (`merge-gate.log` in the artifacts shows the checks). A delivery
+failed or cancelled CI check, or when the pull request is not open and ready, is
+not what the checkout holds, or GitHub reports it as conflicting with its base,
+it refuses. The merge is skipped and the run ends `cancelled` with
+`Not delivered: merge refused (…)`: the pull request stays open and unmerged
+(`merge-gate.log` in the artifacts shows the checks). When `gh pr merge` itself
+refuses, the run ends the same way, with gh's message in
+`Not delivered: merge refused (…)`. A delivery
 that fails before a mergeable pull request also ends `cancelled` with a report.
 
 A pull request whose base is listed in `repo.manual_merge_bases` is not merged
@@ -232,11 +243,8 @@ stops at a gate or ends not delivered sends the card back to `Ready` with a
 comment naming the reason; a failed rollback leaves it in `Blocked`. Trello never fails a run: a missing
 credentials file, card or list is a warning in `trello.log` in the artifacts.
 
-On Archon v0.10.1 the `wait-keeper` node keeps a run moving while the deliver
-block waits for the pull request's CI: it resumes the run each time that durable
-wait falls due (`wait-keeper.log` in the artifacts), and is off on v0.11.1.
-
-A run that reaches its report leaves a `report.json` in its artifacts directory, plus `deploy.log`
+A run that reaches its report leaves a `report.json` in its artifacts directory (with `rag_status` and
+`rag_sources`, the project knowledge the plan was given from `mvp-rag`, see `rag-context.md`), plus `deploy.log`
 and `rollback.log` depending on the path the run took — `rollback.log` only
 exists when a rollback actually ran. To find the path:
 
@@ -271,9 +279,12 @@ bash scripts/ci/check.sh factory
 The unit tests include the Trello card reference parser, the move for every
 point of the run, and the Trello calls against a stubbed `fetch`.
 
-Install, validation, the eight dry-run fixtures with trace assertions (each
-Trello move at its node, in dry-run mode, with no network), and a dry
-run of every other workflow, on Archon v0.10.1 and v0.11.1 (pinned binaries in
+Install, validation, the fifteen dry-run fixtures with trace assertions (each
+Trello move at its node, in dry-run mode, with no network), a run in
+which `sync-base` moves a run worktree cut from a diverged default branch to
+`develop`, a run in which a UI task without a visual reference stops before
+the plan, and a dry run of every other workflow, on Archon v0.12.1 (pinned
+binary in
 `.tools/bin`, never installed, always with a throwaway `ARCHON_HOME`; no AI
 spend):
 
@@ -325,8 +336,10 @@ running the workflow.
 - The base branch must be mergeable by your own GitHub account — no merge queue
   or required-review rule that `gh pr merge` cannot satisfy.
 - Bun ≥ 1.2.21 is required.
-- `outcome_field` is disabled until a version of Archon newer than 0.10.1 accepts
-  it, so a red run shows `cancelled` rather than an authored `failed` outcome.
+- Archon ≥ v0.12.1 with the claude provider (`archon provider add claude`) is
+  required.
+- A red run ends `cancelled` (the `not-delivered` node), not with an authored
+  `failed` outcome.
 - Not in v1: multi-service deploys, blue/green strategies, GitLab or Bitbucket,
   secrets managers, per-run cost budgets, Slack/Telegram notifications, and a web
   UI form for the profile.

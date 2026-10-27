@@ -45,12 +45,9 @@ fetch_binary() {
 }
 
 if [ "${1:-}" = archon ]; then
-  fetch_binary archon-0.10.1 \
-    "https://github.com/coleam00/Archon/releases/download/v0.10.1/archon-linux-x64" \
-    7aa8b25a4b0017dddb05aead518cbd453ca8db9c54ac4a7611f40164fecd3973
-  fetch_binary archon-0.11.1 \
-    "https://github.com/coleam00/Archon/releases/download/v0.11.1/archon-linux-x64" \
-    81ee5feaf4e6c8de19903a6c1252743228d235bbedb818dbee045b21df49d59d
+  fetch_binary archon-0.12.1 \
+    "https://github.com/coleam00/Archon/releases/download/v0.12.1/archon-linux-x64" \
+    1af92a3884f811c77ddddea347c21e2a58cb87e03cf822193c07429493ddfe02
   exit 0
 fi
 

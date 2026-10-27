@@ -3,11 +3,13 @@
 # files under src/ bin/ deploy/ scripts/ docker/):
 #   1. the first commit is test(...), and its tests fail (RED);
 #   2. a later feat(...) or fix(...) commit follows;
-#   3. tests (tests/ and *.test.* files under those directories) do not change between
-#      those two commits.
+#   3. tests (tests/ and *.test.* files under those directories) that the task's own commits
+#      change do not change between those two commits.
+# Merge commits are skipped, and commits merged in from the base branch never count.
 # GitHub runs CI only on the pushed head, so RED is reproduced here (npm ci && npm test at
 # the test commit) and recorded on that commit as the failing status tdd-check/red.
-# Env: BASE_REF (e.g. main), HEAD_SHA (40 hex), REPO (owner/name); GH_TOKEN for gh.
+# Env: BASE_REF (the pull request's base branch, e.g. develop), HEAD_SHA (40 hex),
+# REPO (owner/name); GH_TOKEN for gh.
 # Exit 0: order kept or not applicable. Exit 1: order broken. Exit 2: bad input or tool error.
 set -uo pipefail
 base_ref=${BASE_REF:-}
@@ -45,7 +47,9 @@ red=$(head -n 1 <<<"${commits}")
 [[ "$(subject "${red}")" =~ ${test_subject} ]] || fail "the first commit must start with test( (got: $(subject "${red}"))"
 
 green=""
+own=""
 while read -r commit; do
+  own+="${commit}"$'\n'
   if [[ "$(subject "${commit}")" =~ ${code_subject} ]]; then
     green=${commit}
     break
@@ -54,7 +58,8 @@ done < <(tail -n +2 <<<"${commits}")
 [ -n "${green}" ] || fail "no feat( or fix( commit after the test commit ${red:0:7}"
 
 red_to_green=$(git diff --name-only "${red}" "${green}") || exit 2
-tests_changed=$(grep -E "${test_path}" <<<"${red_to_green}")
+own_changed=$(git diff-tree --stdin --no-commit-id --name-only -r <<<"${own}") || exit 2
+tests_changed=$(grep -E "${test_path}" <<<"${red_to_green}" | grep -Fx -f <(printf '%s\n' "${own_changed}"))
 if [ -n "${tests_changed}" ]; then
   echo "::error::tdd-check: tests changed between the test commit and the feat/fix commit:"
   printf '%s\n' "${tests_changed}"

@@ -2,8 +2,8 @@ name: pr-conventions-check
 
 # Pull requests into develop and main follow the branch model (decisions 24-26, 29): a <KEY>
 # branch name, a <KEY>-<n>: title and exactly one Type: line in the body, which becomes the
-# squash commit body (scripts/pr-conventions.sh). <KEY> is PROJECT_NAME from config/project.env
-# in capitals. Applies once the develop branch exists.
+# squash commit body, and a release is never titled <KEY>-0 (decision 91; scripts/pr-conventions.sh).
+# <KEY> is PROJECT_NAME from config/project.env in capitals. Applies once the develop branch exists.
 on:
   pull_request:
     branches: [develop, main]

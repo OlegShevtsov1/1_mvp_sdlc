@@ -69,6 +69,27 @@ describe('scripts/pr-conventions.sh', () => {
     expect(result.stdout).toContain(`PR title must match ^${key}-[0-9]+: .+$`)
   })
 
+  // Every release has its own card; <KEY>-0 is only for card-less chores (decision 91).
+  it.each([
+    [`${key}-0: Release v1.2.3`, 'develop', 'main'],
+    [`${key}-0: Release 1.2.3 changelog`, 'archon/task-factory-1792086449826', 'develop'],
+    [`${key}-00: Release v1.2.3`, 'develop', 'main'],
+  ])('rejects the card-less release title %j from %s into %s', (title, head, base) => {
+    const result = check({ PR_TITLE: title, HEAD_REF: head, BASE_REF: base })
+    expect(result.status).toBe(1)
+    expect(errors(result.stdout)).toHaveLength(1)
+    expect(result.stdout).toContain('decision 91')
+    expect(result.stdout).toContain(`${key}-<n>: Release vX.Y.Z`)
+  })
+
+  it.each([`${key}-0: Sync main (abc1234)`, `${key}-12: Release v1.2.3`])(
+    'accepts the title %j from develop into main',
+    (title) => {
+      const result = check({ PR_TITLE: title, HEAD_REF: 'develop', BASE_REF: 'main' })
+      expect(result.status, result.stdout + result.stderr).toBe(0)
+    },
+  )
+
   it('accepts the key derived from config/project.env', () => {
     const result = check({ PR_TITLE: `${key}-12: x` })
     expect(result.status, result.stdout + result.stderr).toBe(0)

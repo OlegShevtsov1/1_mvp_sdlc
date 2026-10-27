@@ -1,5 +1,6 @@
 export const PROFILE_PATH = ".archon/factory-profile.yaml";
 export const MONITORING_MCP_PATH = ".archon/mcp/monitoring.json";
+export const PROFILE_COMMIT_MESSAGE = "chore: add factory profile";
 
 export const MERGE_STRATEGIES = ["squash", "merge", "rebase"] as const;
 export const MONITORING_PROVIDERS = ["sentry", "datadog", "grafana", "none"] as const;
@@ -185,4 +186,16 @@ export function profileToYaml(p: Profile): string {
     "",
   ];
   return lines.join("\n");
+}
+
+// `add -f` so a repo that gitignores `.archon/` still tracks the file, and the
+// commit is skipped when nothing is staged: re-writing identical bytes must
+// count as done, not die on git's "nothing to commit" exit code.
+export function commitIfChanged(path: string, message: string): { ok: boolean; err: string } {
+  const run = (...args: string[]) => Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
+  const add = run("add", "-f", "--", path);
+  if (add.exitCode !== 0) return { ok: false, err: add.stderr.toString().trim() };
+  if (run("diff", "--cached", "--quiet").exitCode === 0) return { ok: true, err: "" };
+  const commit = run("commit", "-q", "-m", message);
+  return { ok: commit.exitCode === 0, err: commit.stderr.toString().trim() };
 }

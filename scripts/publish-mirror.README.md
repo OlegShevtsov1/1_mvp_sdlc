@@ -8,8 +8,8 @@ automatically.
 ## Usage
 
 ```bash
-scripts/publish-mirror.sh <repo> [<ref>] [--dry-run] [--subject <text>]
-make mirror REPO=<repo> [REF=<ref>] [ARGS="--dry-run --subject <text>"]
+scripts/publish-mirror.sh <repo> [<ref>] [--dry-run] [--subject <text>] [--card PILOT-<n>]
+make mirror REPO=<repo> [REF=<ref>] [ARGS="--dry-run --subject <text> --card PILOT-<n>"]
 ```
 
 | Repo | Default ref |
@@ -20,11 +20,14 @@ make mirror REPO=<repo> [REF=<ref>] [ARGS="--dry-run --subject <text>"]
 
 The source is the primary's released `main` for all three (decision 55). Any other repo name is rejected: the other
 primary repos stay private. `<ref>` is anything `git rev-parse` resolves in a fresh clone of the primary
-(`origin/<branch>`, a tag, a sha). `--subject` is appended to the commit message. `--dry-run` builds the commit and
+(`origin/<branch>`, a tag, a sha). `--subject` is appended to the commit message. `--card` sets the card in the
+release PR title and overrides the lookup (below); it must be `PILOT-<n>` with n > 0, and it is ignored with a log
+line when the sync carries no release tag. `--dry-run` builds the commit and
 prints every push and GitHub API call (`dry run: git push …`, `dry run: gh api -X <METHOD> <path> <args>`,
 `dry run: tag <tag> on the merge commit`, or `dry run: tag <tag> on <sha>` when recreating a deleted tag) without
 running any of them — `gh` is not called at all; the temporary
 clone is kept and its path is printed on stderr, and stdout is the sync commit sha (the PR number shows as `<pr>`).
+Every run that opens or updates a PR, a dry run included, logs `PR title: <title>` on stderr.
 
 After a sync the only stdout line is the new mirror `main` sha (the merge commit), so
 `sha=$(scripts/publish-mirror.sh …)` works. When there is nothing to sync, stdout is instead the line
@@ -33,8 +36,8 @@ After a sync the only stdout line is the new mirror `main` sha (the merge commit
 | Exit | Meaning |
 | --- | --- |
 | 0 | synced, or `nothing to sync` |
-| 1 | cloning, resolving the ref, pushing or a GitHub API call failed; the mirror `main` has changes that are not on `develop`; the merge or a tag target did not verify |
-| 2 | refused to publish: primary owner left over (in the tree or a tag message) or the scan for it failed, public-repo check or gitleaks failed |
+| 1 | cloning, resolving the ref, pushing or a GitHub API call failed; the mirror `main` has changes that are not on `develop`; no card number found for a carried release tag (rerun with `--card`); the `CHANGELOG.md` at the release tag the title names has no section with an entry for it; the merge or a tag target did not verify |
+| 2 | refused to publish: primary owner left over (in the tree, a tag message or the tag's changelog section) or the scan for it failed, public-repo check or gitleaks failed |
 | 3 | the PR checks failed or timed out: nothing merged, the PR stays open and its URL is the stdout line |
 | 64 | usage |
 
@@ -54,8 +57,9 @@ After a sync the only stdout line is the new mirror `main` sha (the merge commit
    ahead of `main` (an earlier run stopped on red checks or a timeout), it resumes that PR instead (step 6).
 5. Writes `MIRROR_SOURCE.json`, runs the repo's public-repo check if it has one (`scripts/check-public-repo.sh`, else
    `scripts/ci/hygiene-check.sh`) and `gitleaks dir` when gitleaks is installed (a failure refuses with exit 2),
-   commits as the mirror author and pushes to the mirror's `develop` (never forced; if `develop` moved meanwhile, the
-   push fails with exit 1).
+   commits as the mirror author, decides the PR title and body (a release without a card number, or whose `CHANGELOG.md` has no entry for its tag,
+   stops here with exit 1, before anything is pushed) and pushes to the mirror's `develop` (never forced; if `develop` moved meanwhile, the push fails
+   with exit 1).
 6. Opens the PR `develop → main` on the mirror, or updates the open one.
 7. Waits for the PR checks, then merges with a merge commit.
 8. Verifies the merge: the new `main` has two parents, the previous `main` and the sync commit, and the sync commit's
@@ -70,10 +74,24 @@ did reach a mirror is fixed by a new sync (rerun after the fix); mirror history 
 No sync is pushed to the mirror's `main` (decision 54): the sync commit goes to `develop` and reaches `main` through a
 PR, so `main-guard` on the mirror stays green and the mirror `main` can be branch-protected.
 
-- **Title:** `PILOT-0: Release <tag>` when the sync carries a new release tag (the highest one), else
-  `PILOT-0: Sync <branch> (<7-char primary sha>)`, where `<branch>` is the ref without `origin/`.
-- **Body:** one line naming the repo, branch and primary sha; a `Tags: <list>` line when tags are carried; then
-  `Type: chore` — the only line starting with `Type:` (the mirror's `pr-conventions-check` demands one).
+- **Title:** `PILOT-<n>: Release <tag>` when the sync carries a new release tag (the highest one), where `<n>` is the
+  release's card on the primary (decision 58). The card comes from the release-prep squash commit
+  `PILOT-<n>: Release X.Y.Z changelog` reachable from the tag, else from the release PR `PILOT-<n>: Release vX.Y.Z`
+  reachable from the synced commit (its squash subject or the title line of its merge commit); PILOT-0 never counts.
+  When neither is found the script stops with exit 1 before pushing; rerun with `--card PILOT-<n>` — typical for a
+  hotfix tag, whose history has neither. Otherwise the title is `PILOT-0: Sync <branch> (<7-char primary sha>)`,
+  where `<branch>` is the ref without `origin/`.
+- **Body:** one line naming the repo, branch and primary sha; a `Tags: <list>` line when tags are carried; for the
+  tag the title names, the sentence `Changelog of vX.Y.Z:` and then `## Changelog` with that version's `CHANGELOG.md`
+  section (decision 64) — one block, since condition 4 reads only the first; then `Type: chore` — the only line starting with `Type:` (the mirror's `pr-conventions-check`
+  demands one).
+- **Changelog:** the section is read from the primary's `CHANGELOG.md` at the tagged commit, without its
+  `## [X.Y.Z] - date` heading, owner replaced (a leftover refuses with exit 2): exactly what the app repos'
+  `scripts/release-notes.sh vX.Y.Z` prints, which their pr-conventions condition 4 demands under an exact
+  `## Changelog` line. There is no block when the tagged commit has no `CHANGELOG.md`. A `CHANGELOG.md` with no
+  `## [X.Y.Z]` section, or one without a list entry, stops the sync with exit 1 before anything is pushed; the fix is
+  a new release whose section is written. On the sdlc mirror the block passes the release rule of its own
+  `pr-conventions-check`, which compares it with the mirror's `CHANGELOG.md`.
 - **Checks:** every `MIRROR_CHECKS_INTERVAL` seconds (default 30), for up to `MIRROR_CHECKS_TIMEOUT` seconds (default
   1800), it reads the check runs of the sync commit. Green means at least one check run, all completed, each
   `success`, `neutral` or `skipped`. A failed check or the timeout stops with exit 3: the failed check names on stderr,

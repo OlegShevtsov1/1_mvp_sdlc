@@ -9,6 +9,7 @@ import {
   listNames,
   parseCardRef,
   readCreds,
+  runIdFrom,
   runTrelloMove,
   transition,
   type MoveInput,
@@ -34,6 +35,16 @@ function report(fields: Record<string, unknown>): string {
 function gate(proceed: boolean, stop_reason = ""): string {
   return JSON.stringify({ proceed, decision: proceed ? "approve" : "abort", stop_reason });
 }
+
+describe("runIdFrom", () => {
+  test("a real run's artifacts dir ends in its run id", () => {
+    expect(runIdFrom(`/home/op/.archon/workspaces/o/r/artifacts/runs/${RUN_ID}`)).toBe(RUN_ID);
+  });
+
+  test("a dry run's artifacts dir yields no run id", () => {
+    expect(runIdFrom(`/tmp/dry-run-${RUN_ID}/artifacts`)).toBeNull();
+  });
+});
 
 describe("parseCardRef", () => {
   test("a card link", () => {
@@ -100,6 +111,12 @@ describe("transition", () => {
   });
   test("an unreadable gate verdict is a warning, not a move", () => {
     expect(t("plan-round", { gate: "approved" })).toEqual({ warning: expect.stringContaining("gate verdict") });
+  });
+  test("the visual gate waiting → Blocked with a comment", () => {
+    expect(t("visual-gate")).toEqual({
+      target: "blocked",
+      comment: `Factory run ${RUN_ID} waits for the operator at the visual gate (screenshots).`,
+    });
   });
   test("PR opened → Review", () => {
     expect(t("review")).toEqual({ target: "review", comment: "" });
@@ -301,6 +318,36 @@ describe("runTrelloMove", () => {
     expect(r.card).toBe("PILOT-7");
     const fromRequest = await runTrelloMove(input({ task: "", request: cardLink("AbCd1234"), dryRun: true }), { fetch: stubFetch().fetch, readProfile: noProfile });
     expect(fromRequest.card).toBe("AbCd1234");
+  });
+  describe("a release run keeps its release card in In Progress (decision 91)", () => {
+    const target = async (fields: Partial<MoveInput>) =>
+      (await runTrelloMove(input({ dryRun: true, ...fields }), { fetch: stubFetch().fetch, readProfile: noProfile })).target;
+    const prep = "PILOT-282: Release 0.3.0 changelog";
+
+    test("the review and delivered moves stay in In Progress", async () => {
+      expect(await target({ task: prep, event: "review" })).toBe("In Progress");
+      expect(await target({ task: prep, event: "done", report: report({ delivered: true }) })).toBe("In Progress");
+      expect(await target({ task: prep, event: "done", report: report({ status: "delivered-pending-operator" }) })).toBe("In Progress");
+      expect(await target({ task: prep, event: "plan-round", gate: gate(true) })).toBe("In Progress");
+      expect(await target({ task: "PILOT-282: Release v0.3.0", event: "review" })).toBe("In Progress");
+    });
+    test("a card link with a release title in the request is a release run", async () => {
+      const request = `${cardLink("AbCd1234")} PR title «PILOT-298: Release 0.3.1 changelog»`;
+      expect(await target({ task: "", request, event: "review" })).toBe("In Progress");
+    });
+    test("gate moves report the run as for any card", async () => {
+      expect(await target({ task: prep, event: "plan-gate", ready: "true" })).toBe("Blocked");
+      expect(await target({ task: prep, event: "done", report: report({}) })).toBe("Ready");
+    });
+    test("a release title of another card, a placeholder or PILOT-0 is no release run", async () => {
+      for (const task of [
+        "PILOT-12: Add x\nafter PILOT-282: Release v0.3.0",
+        "PILOT-12: Add x\ntitle PILOT-<n>: Release vX.Y.Z or PILOT-0: Release v1.2.3",
+        "PILOT-12: Release v1.2.3a",
+      ]) {
+        expect(await target({ task, event: "review" })).toBe("Review");
+      }
+    });
   });
   test("list names come from the profile", async () => {
     const readProfile = async () => ({ trello: { lists: { review: "Code review" } } });

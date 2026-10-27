@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { parseJsonObject } from "./io.ts";
-import { runIdFrom } from "./keeper.ts";
 
 // The lists of decision 53 the factory moves a card to; the profile may rename them under trello.lists.
 export const DEFAULT_LISTS = {
@@ -12,6 +12,14 @@ export const DEFAULT_LISTS = {
 } as const;
 export type ListKey = keyof typeof DEFAULT_LISTS;
 export type Lists = Record<ListKey, string>;
+
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+// A real run's ARTIFACTS_DIR ends in its run id; a dry run's ends in `artifacts`.
+export function runIdFrom(artifactsDir: string): string | null {
+  const name = basename(artifactsDir);
+  return RUN_ID.test(name) ? name : null;
+}
 
 export type CardRef = { kind: "link"; value: string } | { kind: "number"; value: number };
 
@@ -32,6 +40,16 @@ export function parseCardRef(text: string): CardRef | null {
   if (link) return { kind: "link", value: link[1] };
   const number = TITLE_LINE.exec(text) ?? BARE_NUMBER.exec(text);
   return number ? { kind: "number", value: Number(number[1]) } : null;
+}
+
+const RELEASE_TITLE = /(?<![A-Za-z0-9-])PILOT-([1-9]\d{0,5}): Release (?:v\d+\.\d+\.\d+|\d+\.\d+\.\d+ changelog)(?![\w.])/g;
+
+// A release title of the run's own card; a card link carries no number, so any release title counts.
+function isReleaseRun(text: string, ref: CardRef): boolean {
+  for (const match of text.matchAll(RELEASE_TITLE)) {
+    if (ref.kind === "link" || Number(match[1]) === ref.value) return true;
+  }
+  return false;
 }
 
 export function cardLabel(ref: CardRef): string {
@@ -89,6 +107,8 @@ export function transition(event: string, facts: Facts, runId: string): Transiti
       };
     case "plan-round":
       return roundMove(facts.gate, 2, "in_progress", runId);
+    case "visual-gate":
+      return { target: "blocked", comment: `Factory run ${runId} waits for the operator at the visual gate (screenshots).` };
     case "review":
       return { target: "review", comment: "" };
     case "done":
@@ -124,7 +144,7 @@ export interface Creds {
 
 const CRED_VARS = ["TRELLO_API_KEY", "TRELLO_TOKEN", "TRELLO_BOARD_ID"] as const;
 
-const ASSIGNMENT = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/;
+export const ASSIGNMENT = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/;
 
 // Only the file counts, never the caller's environment, so an exported variable cannot stand in
 // for one missing from the file; the file holds flat assignments, as feature-start reads it too.
@@ -235,7 +255,8 @@ export interface MoveResult {
 }
 
 export async function runTrelloMove(input: MoveInput, deps: MoveDeps): Promise<MoveResult> {
-  const ref = parseCardRef(input.task) ?? parseCardRef(input.request);
+  const taskRef = parseCardRef(input.task);
+  const ref = taskRef ?? parseCardRef(input.request);
   if (ref === null) return { card: "", target: "", comment: "", status: "none", warning: "" };
   const card = cardLabel(ref);
 
@@ -251,6 +272,11 @@ export async function runTrelloMove(input: MoveInput, deps: MoveDeps): Promise<M
 
   const runId = runIdFrom(input.artifactsDir);
   const move = transition(input.event, input, runId ?? "dry-run");
+  // A release card waits in In Progress until the release reaches prod (decision 91), not in Review or Test.
+  if ("target" in move && (move.target === "review" || move.target === "test")
+    && isReleaseRun(taskRef !== null ? input.task : input.request, ref)) {
+    move.target = "in_progress";
+  }
   if ("warning" in move) return { card, target: "", comment: "", status: "warning", warning: [...warnings, move.warning].join("; ") };
   const result = { card, target: lists[move.target], comment: move.comment };
   if (runId === null || input.dryRun) return { ...result, status: "dry-run", warning: warnings.join("; ") };

@@ -23,8 +23,10 @@ export interface RoundVerdict {
   stop_reason: string;
 }
 
-export function roundVerdict(raw: string): RoundVerdict {
-  const gate = parseGate(raw);
+// saved: the decision the loop's until_bash wrote; it overrides the loop output's.
+export function roundVerdict(raw: string, saved = ""): RoundVerdict {
+  const parsed = parseGate(raw);
+  const gate = saved ? { decision: saved, text: parsed.text } : parsed;
   const proceed = gate.decision === "approve";
   return {
     proceed,

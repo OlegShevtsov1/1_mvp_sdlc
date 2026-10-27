@@ -32,3 +32,15 @@ describe("roundVerdict", () => {
     });
   });
 });
+
+describe("roundVerdict with a saved decision (PILOT-217)", () => {
+  test("the saved decision wins over a loop output without one", () => {
+    expect(roundVerdict('{"ready":true,"summary":"plan"}', "approve").proceed).toBe(true);
+  });
+  test("a saved abort stops even if the output looks approved", () => {
+    expect(roundVerdict("approved", "abort")).toEqual({ proceed: false, decision: "abort", stop_reason: "operator chose abort:" });
+  });
+  test("no saved decision keeps the old behaviour", () => {
+    expect(roundVerdict("approved", "").proceed).toBe(true);
+  });
+});

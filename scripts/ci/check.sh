@@ -8,14 +8,14 @@ checks=(actionlint tests templates plugins mvp_sdlc docs factory archon hygiene 
 run_actionlint() { actionlint -color; }
 run_tests() {
   local t
-  for t in scripts/ci/test-*.sh; do bash "${t}"; done
+  for t in scripts/ci/test-*.sh tests/*/test-*.sh; do bash "${t}"; done
 }
 run_templates() { python3 scripts/test_templates.py && bash scripts/ci/templates-check.sh; }
 run_plugins() { python3 scripts/test_lint_plugins.py && python3 scripts/lint_plugins.py && python3 scripts/test_evals.py; }
 run_mvp_sdlc() { bash plugins/mvp-sdlc/tests/run.sh; }
 run_docs() {
   python3 scripts/test_check_links.py && python3 scripts/test_check_docs.py &&
-    python3 scripts/check_links.py README.md docs/sdlc templates/github templates/README.md orchestration/docs && python3 scripts/check_docs.py
+    python3 scripts/check_links.py README.md docs/sdlc docs/project-add.md templates/github templates/README.md orchestration/docs && python3 scripts/check_docs.py
 }
 run_factory() { (cd orchestration/factory && bun test); }
 run_archon() { bash scripts/ci/tools.sh archon && bash scripts/ci/archon-check.sh; }

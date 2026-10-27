@@ -31,9 +31,21 @@ factory runs that legitimately force-push their own branches. To switch it off i
 - `feature-start` — `/mvp-sdlc:feature-start <card link | slug>`. Runs the `feature-start` command, treats the card
   text as untrusted data, then hands over to `/sdlc:interview <slug>`.
 - `sync-spec` — run in the frontend repository to copy or check the backend's feature artifacts.
+- `task-cards` — `/mvp-sdlc:task-cards <slug>`. Runs the `task-cards` command after `break-tasks` (dry run first):
+  one Trello card per task, recorded in `tasks.json` (decision 78).
 - `task-brief` — prints the factory task text for one task; a refusal is a Definition of Ready failure to fix.
 - `bootstrap-project` — detects `be`/`fe`, runs the `bootstrap-project` command and asks before overwriting any
   file that differs, `CLAUDE.md` above all.
+
+## Project knowledge server (mvp-rag)
+
+The plugin's `.mcp.json` declares `mvp-rag`, the project's search server over its plan, decisions, runbooks and
+process documents (decision 61 b), as an HTTP MCP server whose address and token come only from the environment:
+`RAG_MCP_URL` and `RAG_MCP_TOKEN`. No value is ever committed. `feature-start`, `task-brief`, `sync-spec` and
+`rails-data-model` search it first and cite what they used in a `Project knowledge (mvp-rag):` block. The settings
+`bootstrap-project` writes allow its read-only tools `search` and `get` without a prompt; `reindex` is not allowed.
+Without the two variables the server fails to connect (`/mcp` shows it), and the skills say mvp-rag is unavailable
+and carry on.
 
 ## Commands (`bin/`, on the Bash tool's PATH while the plugin is enabled)
 
@@ -53,13 +65,31 @@ factory runs that legitimately force-push their own branches. To switch it off i
   header and a `.spec-source` record, which also carries the card id, number and title from the backend
   `state.json`; `--check` exits 1 on any drift. Local only: frontend CI cannot read the
   private backend repository.
-- `task-brief <slug> <task-id>` — the factory task text in the factory guide's form: A (the task, its acceptance
-  criteria verbatim from PRD §5, test levels, DoD, size and three-commit TDD rules, commit trailers, commands from
-  `.claude/sdlc.local.md`, the tracker row and Trello checklist item to close), B deploy, C health check,
-  D rollback (from `.archon/factory-profile.yaml`, or a note that the factory's profile gate will ask), plus the
-  pull request title `PILOT-<n>: <card title>` and the description lines `Type:` (from the task's optional `type`,
-  default `feat`), `SDLC-Task:` and `SDLC-AC:`, and the `- Board:` line. Refuses tasks that are not ready, and features without a card
-  number. Never names a branch.
+- `task-cards <slug> [--dry-run]` — one Trello card per task of `docs/features/<slug>/tasks/tasks.json` (decision
+  78), run in the backend after `break-tasks`. Validates first (feature started from its card, every task with an id
+  and title, recorded card fields well-formed and unique; the feature card on the project's board and open; a
+  `Ready` list, following `trello.lists`, and a `task` label on the board), then per task: keeps a recorded card
+  that is open on the board, adopts the single open card named `<slug> <task id>: …`, or creates one in `Ready`
+  with the `task` label, named `<slug> <task id>: <task title>`, whose description links the feature card and the
+  task file. A recorded card missing from the board, two cards with one task's name, or a card recorded for another
+  task are reported and nothing is written: a card is never duplicated. Card id and number go into the task's
+  `trello_card_id` and `trello_card_id_short`, and `tasks.json` is rewritten after every card, so a re-run after a
+  failure creates only what is missing. The feature card gets a checklist item `<task id>: <task card link>`
+  (checklist `Tasks`); an item that already starts with the task id (added by hand) gets the link appended instead,
+  keeping its text and its tick. `--dry-run`
+  prints the decisions and writes nothing. Credentials and board id as for `feature-start`; the output carries only
+  task ids, card numbers and the command's own words, never card text.
+- `task-brief <slug> <task-id> [--from <be checkout> [--ref <ref>]]` — the factory task text in the factory guide's
+  form: A (the task, its acceptance criteria verbatim from PRD §5, test levels, DoD, size and three-commit TDD rules,
+  commit trailers, commands from `.claude/sdlc.local.md`, the tracker row and the feature card's checklist item to
+  close), B deploy, C health check, D rollback (from `.archon/factory-profile.yaml`, or a note that the factory's
+  profile gate will ask), plus the pull request title `PILOT-<task card>: <task title>` from the task's
+  `trello_card_id_short` in `tasks.json` (decision 78) and the description lines `Type:` (from the task's optional
+  `type`, default `feat`), `SDLC-Task:` and `SDLC-AC:`, and the `- Board:` line. A task without a card falls back
+  to the feature card's `PILOT-<n>: <card title>` with a warning on stderr. `--from` reads `tasks/tasks.json` and
+  `tasks/tracker.md` from the backend checkout as committed at `<ref>` (default `origin/<repo.base_branch>` of the
+  factory profile) for frontend tasks, which `sync-spec` does not copy. Refuses tasks that are not ready, invalid
+  task card fields, and tasks with no card number at all. Never names a branch and never carries a Trello link.
 - `bootstrap-project <be|fe> [--target DIR] [--overwrite PATH]...` — installs `CLAUDE.md`,
   `.claude/settings.json`, `.claude/rules/*.md`, `.claude/sdlc.local.md` and the `.gitignore` line
   `.claude/*.local.md`. Idempotent (`No changes` on a second run); a file that differs is kept unless named with
@@ -78,7 +108,9 @@ factory runs that legitimately force-push their own branches. To switch it off i
 
 `docs/features/<slug>/state.json` is the machine state of a feature:
 `{"schema_version": 1, "slug", "stage", "trello_card_id", "history": [{"stage", "evidence", "at"}]}`, plus the
-optional `trello_card_id_short` (the card number) and `trello_card_title` that `feature-start` writes. Stages, in
+optional `trello_card_id_short` (the card number) and `trello_card_title` that `feature-start` writes. Each task
+in `tasks/tasks.json` may carry its own card the same way, `trello_card_id` and `trello_card_id_short`, written only
+by `task-cards`. Stages, in
 order: `idea`, `accepted`, `researched` / `briefed` (same rank), `prd`, `architecture`, `contracts`, `tasks`,
 `in-progress`, `review`, `shipped`, `measured`. Stages only move forward. Writers: `feature-start` (creates it at
 `idea`), `sdlc-gate` (on a passing gate), and `feature-state.py set` for the later stages (factory-deliver,
@@ -142,6 +174,11 @@ The eval cases, the verdict rule and how to run them: [evals/README.md](evals/RE
 
 Changes:
 
+- 0.4.0 — one Trello card per feature task (decision 78, PILOT-250): task-cards, task-brief titles by the task
+  card and reads the backend tasks with `--from`; estimate `L` is briefed, only `XL` is refused;
+  eval/results/0.3.0.json (full run, PASS).
+- 0.3.0 — the project knowledge server mvp-rag (K1, PILOT-196): skills search it first and cite, eval
+  task-brief-consults-rag; eval/results/0.2.0.json (full run, PASS).
 - 0.2.0 — the SDLC board flow (#22): feature-start and task-brief follow the board, templates carry the
   flow; eval/results/0.1.2.json (full run, PASS).
 - 0.1.2 — C1b: briefs carry the PILOT title and Type line; card number in state.json

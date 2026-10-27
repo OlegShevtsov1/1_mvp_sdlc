@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """Print the factory task text (factory guide form A-D) for one task of a feature.
 
-Usage: task-brief <slug> <task-id>   (run in the repository that owns the task)
+Usage: task-brief <slug> <task-id> [--from <backend checkout> [--ref <ref>]]   (run in the repository of the task)
 Reads docs/features/<slug>/{PRD.md, test-plan.md, tasks/tasks.json, tasks/tracker.md, state.json},
-.claude/sdlc.local.md and .archon/factory-profile.yaml at run time. Refuses (exit 1) when the task is not ready:
-unknown task, unfinished dependency, larger than one day, an AC missing from PRD section 5 or without a test level,
-no Trello card number (state.json, or .spec-source in the frontend), a task "type" outside PR_TYPES, or no
-.claude/sdlc.local.md. The text carries the pull request title `PILOT-<card number>: <card title>`, the description
-lines Type:, SDLC-Task:, SDLC-AC: that pr-conventions-check and the squash commit need, and a `- Board:` line naming
-the lists the factory moves the card through (decision 53; renames from `trello.lists` in the factory profile).
-The text never names a branch: the factory opens the PR from its own branch.
+.claude/sdlc.local.md and .archon/factory-profile.yaml at run time. With --from (a frontend task: sync-spec does not
+copy tasks/), tasks/tasks.json and tasks/tracker.md come from the backend checkout as committed at <ref> (default
+origin/<repo.base_branch of the factory profile>), never from its working tree; --from is refused where this
+repository has its own tasks/tasks.json. Refuses (exit 1) when the task is not ready: unknown task, unfinished
+dependency, larger than one day, an AC missing from PRD section 5 or without a test level, invalid task card fields,
+no Trello card number at all, a task "type" outside PR_TYPES, or no .claude/sdlc.local.md.
+The text carries the pull request title `PILOT-<task card number>: <task title>` from the
+task's trello_card_id_short in tasks.json (decision 78); a task without a card falls back to the feature card
+(state.json, or .spec-source in the frontend) with a warning on stderr. It also carries the description lines Type:,
+SDLC-Task:, SDLC-AC: that pr-conventions-check and the squash commit need, and a `- Board:` line naming the lists
+the factory moves the card through (decision 53; renames from `trello.lists` in the factory profile). The text
+never names a branch and never carries a Trello link: the factory opens the PR from its own branch and finds the
+card by the title line.
 """
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -19,7 +26,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import sdlc_common  # noqa: E402
 
-feature_state = sdlc_common.load_script("scripts/feature-state.py")
+# Importing a bin/ command must not leave a __pycache__ beside the commands on the PATH.
+sys.dont_write_bytecode = True
+feature_start = sdlc_common.load_script("bin/feature-start")
+feature_state = feature_start.feature_state
 lint_prd = sdlc_common.load_script("scripts/lint-prd.py")
 
 LOCAL_SETTINGS = Path(".claude") / "sdlc.local.md"
@@ -31,12 +41,28 @@ COMMAND_KEYS = (
     ("cmd_vet", "vet"),
 )
 PR_TYPES = ("feat", "fix", "chore", "docs", "refactor", "test", "ci")
-TOO_LARGE = {"L", "XL"}
+TOO_LARGE = {"XL"}
 MAX_HOURS = 8
+USAGE = "usage: task-brief <slug> <task-id> [--from <backend checkout> [--ref <ref>]]"
 
 
 class NotReady(Exception):
     pass
+
+
+class Backend:
+    """tasks/ files of a feature as committed at `ref` in another checkout (the backend owns tasks.json)."""
+
+    def __init__(self, checkout, ref):
+        if sdlc_common.git(checkout, "rev-parse", "--show-toplevel") is None:
+            raise NotReady("{} is not a git checkout".format(checkout))
+        if sdlc_common.git(checkout, "rev-parse", "--verify", "--quiet", ref + "^{commit}") is None:
+            raise NotReady("{} does not resolve in {}: fetch the be checkout: git -C {} fetch origin".format(
+                ref, checkout, checkout))
+        self.checkout, self.ref = checkout, ref
+
+    def read(self, rel):
+        return sdlc_common.git(self.checkout, "show", "{}:{}".format(self.ref, rel))
 
 
 def read(path, missing):
@@ -122,13 +148,39 @@ def card_fields(feature):
     return None, {}
 
 
-def brief(root, slug, task_id):
+def task_card(task):
+    """(card id, card number) of the task's own Trello card in tasks.json, or None when it has none."""
+    try:
+        return feature_start.task_card(task)
+    except ValueError:
+        raise NotReady("task {} has invalid trello_card_id/trello_card_id_short in tasks.json; fix them or re-run "
+                       "task-cards".format(task["id"]))
+
+
+def task_files(feature, rel, backend):
+    """(tasks.json text, tracker.md lines) from this repository or, with --from, from the backend at its ref."""
+    tasks_rel, tracker_rel = rel + "/tasks/tasks.json", rel + "/tasks/tracker.md"
+    if backend is None:
+        tracker = feature / "tasks" / "tracker.md"
+        tracker_lines = tracker.read_text(encoding="utf-8").splitlines() if tracker.is_file() else []
+        missing = "{} not found (a frontend task: add --from <be checkout>)".format(tasks_rel)
+        return read(feature / "tasks" / "tasks.json", missing), tracker_lines
+    if (feature / "tasks" / "tasks.json").exists():
+        raise NotReady("{} exists here: its tasks are briefed from it, drop --from".format(tasks_rel))
+    text = backend.read(tasks_rel)
+    if text is None:
+        raise NotReady("{} not found at {} in {}".format(tasks_rel, backend.ref, backend.checkout))
+    return text, (backend.read(tracker_rel) or "").splitlines()
+
+
+def brief(root, slug, task_id, backend=None):
     feature = sdlc_common.feature_dir(root, slug)
     rel = (sdlc_common.FEATURES_DIR / slug).as_posix()
     if not feature.is_dir():
         raise NotReady("no feature {}: {} does not exist".format(slug, rel))
+    tasks_text, tracker_lines = task_files(feature, rel, backend)
     try:
-        tasks = json.loads(read(feature / "tasks" / "tasks.json", "{}/tasks/tasks.json not found".format(rel)))["tasks"]
+        tasks = json.loads(tasks_text)["tasks"]
         by_id = {t["id"]: t for t in tasks}
     except (ValueError, KeyError, TypeError):
         raise NotReady("{}/tasks/tasks.json does not follow the tasks.json contract".format(rel))
@@ -151,12 +203,23 @@ def brief(root, slug, task_id):
     untested = [ac for ac in acs if ac not in levels]
     if untested:
         raise NotReady("{} has no test level in {}/test-plan.md or the PRD test plan".format(", ".join(untested), rel))
+    own_card = task_card(task)
     card_source, card = card_fields(feature)
-    if not card:
+    warning = None
+    if own_card:
+        title_line = "PILOT-{}: {}".format(own_card[1], " ".join(str(task.get("title", "")).split()))
+    elif card:
+        title_line = "PILOT-{}: {}".format(card["trello_card_id_short"], card["trello_card_title"])
+        warning = (
+            "task {} has no Trello card in tasks.json; the pull request is titled by the feature card PILOT-{}; "
+            "run task-cards {} in the backend (decision 78)".format(task_id, card["trello_card_id_short"], slug)
+        )
+    else:
         raise NotReady(
-            "{} has no Trello card number and title: the pull request title must be PILOT-<n>: <card title> "
-            "(pr-conventions-check); start the feature from its Trello card with feature-start in the backend, "
-            "or re-run sync-spec in the frontend".format(rel)
+            "task {} has no Trello card in tasks.json and {} has no feature card number and title: the pull request "
+            "title must be PILOT-<n>: <title> (pr-conventions-check); run task-cards {} in the backend, start the "
+            "feature from its Trello card with feature-start in the backend, or re-run sync-spec in the "
+            "frontend".format(task_id, rel, slug)
         )
     pr_type = task.get("type")
     if pr_type is None:
@@ -168,8 +231,6 @@ def brief(root, slug, task_id):
     if not settings_path.is_file():
         raise NotReady("{} is missing: run bootstrap-project first".format(LOCAL_SETTINGS.as_posix()))
     settings = sdlc_common.frontmatter(settings_path.read_text(encoding="utf-8"))
-    tracker = feature / "tasks" / "tracker.md"
-    tracker_lines = tracker.read_text(encoding="utf-8").splitlines() if tracker.is_file() else []
     row_start = re.compile(r"^\|\s*{}\s*\|".format(re.escape(task_id)))
     row = next((line for line in tracker_lines if row_start.match(line)), None)
 
@@ -200,21 +261,24 @@ def brief(root, slug, task_id):
         "- Commands (from {}):".format(LOCAL_SETTINGS.as_posix()),
     ]
     out += ["  - {}: {}".format(label, settings[key]) for key, label in COMMAND_KEYS if settings.get(key)]
-    if row:
+    if backend is not None:
+        out.append("- The tracker row and tasks.json status of {0} live in the backend repository; do not edit them "
+                   "here: the operator marks {0} done in the backend after this pull request is merged.".format(task_id))
+    elif row:
         out += [
             "- In {}/tasks/tracker.md set this row's status to `done` in the same pull request:".format(rel),
             "  " + row,
             "  and set \"status\": \"done\" for {} in {}/tasks/tasks.json.".format(task_id, rel),
         ]
     if card.get("trello_card_id"):
-        out.append("- Trello card {} (from {}/{}): tick the checklist item {} when the pull request is "
+        out.append("- Trello feature card {} (from {}/{}): tick the checklist item {} when the pull request is "
                    "merged.".format(card["trello_card_id"], rel, card_source, task_id))
     lists = sdlc_common.board_lists(root)
     out.append("- Board: the factory moves the card itself ({in_progress} → {review} → {test}; {blocked} while a gate "
                "waits for the operator); do not move the card by hand.".format(**lists))
     out += [
         "- Pull request title, exactly this line:",
-        "  PILOT-{}: {}".format(card["trello_card_id_short"], card["trello_card_title"]),
+        "  " + title_line,
         "- Pull request description (it becomes the squash commit body): include these lines exactly, each on its "
         "own line; no other line may start with `Type:`, or pr-conventions-check fails:",
         "  Type: {}".format(pr_type),
@@ -223,6 +287,8 @@ def brief(root, slug, task_id):
         "",
     ]
     out += deploy_sections(Path(root) / FACTORY_PROFILE)
+    if warning:
+        print("task-brief: warning: " + warning, file=sys.stderr)
     return "\n".join(out)
 
 
@@ -244,18 +310,41 @@ def deploy_sections(profile_path):
     ]
 
 
+def parse_args(argv):
+    """(slug, task id, {"--from": path, "--ref": ref}) or None when the arguments do not fit the usage."""
+    if len(argv) < 2 or len(argv) % 2:
+        return None
+    options = dict(zip(argv[2::2], argv[3::2]))
+    if len(options) * 2 != len(argv) - 2 or not set(options) <= {"--from", "--ref"}:
+        return None
+    if "--ref" in options and "--from" not in options:
+        return None
+    return argv[0], argv[1], options
+
+
+def default_ref(root):
+    """origin/<repo.base_branch> of the factory profile, else origin/<the base branch feature-start links to>."""
+    profile = Path(root) / FACTORY_PROFILE
+    sections = yaml_sections(profile.read_text(encoding="utf-8")) if profile.is_file() else {}
+    return "origin/" + (sections.get("repo", {}).get("base_branch") or sdlc_common.base_branch(root, os.environ))
+
+
 def main(argv):
-    if len(argv) != 2:
-        print("usage: task-brief <slug> <task-id>", file=sys.stderr)
+    parsed = parse_args(argv)
+    if parsed is None:
+        print(USAGE, file=sys.stderr)
         return 1
-    slug, task_id = argv
+    slug, task_id, options = parsed
     try:
         if not sdlc_common.valid_slug(slug):
             raise NotReady("invalid slug {!r}: must match {}".format(slug, sdlc_common.SLUG_RE.pattern))
         root = sdlc_common.repo_root()
         if root is None:
             raise NotReady("not inside a git repository")
-        print(brief(root, slug, task_id))
+        backend = None
+        if "--from" in options:
+            backend = Backend(options["--from"], options.get("--ref") or default_ref(root))
+        print(brief(root, slug, task_id, backend))
     except NotReady as exc:
         print("task-brief: not ready: {}".format(exc), file=sys.stderr)
         return 1

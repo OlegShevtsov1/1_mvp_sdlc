@@ -16,11 +16,14 @@ REPO = Path(__file__).resolve().parent.parent
 RUNNER = REPO / "scripts" / "evals.py"
 PLUGIN = REPO / "plugins" / "mvp-sdlc"
 FIXED_FLAGS = ["--ablation", "none", "--no-publish", "--trust-plugin", "--scaffold", "--allow-tools", "Bash",
-               "Write", "Edit", "--threshold", "1"]
+               "Write", "Edit", "mcp__plugin_mvp-sdlc_mvp-rag__search", "--threshold", "1"]
+RAG_CASE = "task-brief-consults-rag"
 
 # Stub claude: `--version`, and `plugin eval <target> ... --output-dir DIR [--case NAME]` which logs its argv and
 # the sha256 of <target>/hooks/hooks.json, then writes aggregate-result.json for the cases under <target>/evals.
-# The arm is the parent of --output-dir (green or red). EVAL_STUB_PLAN (JSON) sets per arm and case the runs as [passed, error] pairs, and the cost of each invocation.
+# The arm is the parent of --output-dir (green or red). EVAL_STUB_PLAN (JSON) sets per arm and case the runs as
+# [passed, error] pairs, or [passed, error, mock calls] for the per-run tool-call log, and the cost of each
+# invocation. By default GREEN runs pass with one mock call and RED runs fail with none.
 CLAUDE_STUB = textwrap.dedent(
     """\
     #!/usr/bin/env python3
@@ -43,10 +46,12 @@ CLAUDE_STUB = textwrap.dedent(
     names = [case] if case else sorted(r[-2] for r in rels if r[0] != "broken" and r[:2] != ("cases", "_template"))
     cases = []
     for name in names:
-        runs = plan.get(arm, {}).get(name, [[arm == "green", None]] * 3)
+        runs = plan.get(arm, {}).get(name, [[arm == "green", None, int(arm == "green")]] * 3)
         cases.append({"name": name, "maxTurns": 8, "timeoutSeconds": 180, "runsPerCase": 3, "arms": {"with": [
-            {"score": 1 if p else 0, "passed": p, "turns": 2, "costUsd": 0.01, "durationSeconds": 5.0, "error": e,
-             "tracePath": str(target / "trace.jsonl")} for p, e in runs]}})
+            dict({"score": 1 if r[0] else 0, "passed": r[0], "turns": 2, "costUsd": 0.01, "durationSeconds": 5.0,
+                  "error": r[1], "tracePath": str(target / "trace.jsonl")},
+                 **({"mocks": {"calls": {"total": r[2], "errors": 0, "unmocked": []}}} if len(r) > 2 else {}))
+            for r in runs]}})
     out.mkdir(parents=True, exist_ok=True)
     result = {"claudeVersion": "2.1.281", "durationSeconds": 10.0, "costUsd": plan.get("cost", {}).get(arm, 0.1),
               "partial": False, "suite": {"root": str(target)}, "cases": cases}
@@ -186,6 +191,25 @@ class EvalsRunnerTest(unittest.TestCase):
                 self.assertEqual((summary["verdict"], case["verdict"], summary["complete"]), (verdict, verdict, False))
                 got = (case["green"]["passed"], case["green"]["errors"], case["red"]["passed"], case["red"]["errors"])
                 self.assertEqual(got, counts)
+
+    def test_tool_call_case_needs_a_mock_call(self):
+        green_no_call, red_with_call = [True, None, 0], [False, None, 1]
+        table = [
+            ("green calls the mock, red does not", {}, "PASS", (3, 0)),
+            ("green passes its graders without a call", {"green": {RAG_CASE: [green_no_call] * 3}}, "FAIL", (0, 0)),
+            ("green has no tool-call log", {"green": {RAG_CASE: [[True, None]] * 3}}, "FAIL", (0, 0)),
+            ("red calls the mock but fails its graders", {"red": {RAG_CASE: [red_with_call] * 3}}, "PASS", (3, 0)),
+        ]
+        for label, plan, verdict, counts in table:
+            with self.subTest(label):
+                self.plan.update({"green": {}, "red": {}}, **plan)
+                shutil.rmtree(str(self.out), ignore_errors=True)
+                self.assertEqual(self.run_evals("--case", RAG_CASE).returncode, 0)
+                result, summary = self.results()
+                self.assertEqual(result.returncode, 0 if verdict == "PASS" else 1, result.stdout + result.stderr)
+                case = summary["cases"][0]
+                self.assertEqual(case["verdict"], verdict)
+                self.assertEqual((case["green"]["passed"], case["red"]["passed"]), counts)
 
     def test_full_run_is_complete(self):
         self.assertEqual(self.run_evals().returncode, 0)

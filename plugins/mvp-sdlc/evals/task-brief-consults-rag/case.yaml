@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "name": "task-brief-consults-rag",
+  "description": "Skill task-brief: it searches the mvp-rag server first and the saved brief cites the source it got.",
+  "tags": [
+    "golden"
+  ],
+  "context": {
+    "scaffold_script": "scaffold.sh"
+  },
+  "execution": {
+    "prompt": "Save the factory task text for task T1 of feature demo to brief-T1.md in the repository root.",
+    "max_turns": 14,
+    "timeout_seconds": 300,
+    "allowed_tools": [
+      "Bash",
+      "Read",
+      "Write",
+      "Skill",
+      "mcp__plugin_mvp-sdlc_mvp-rag__search"
+    ]
+  },
+  "runs": 3,
+  "graders": [
+    {
+      "name": "brief-written",
+      "type": "file_exists",
+      "path": "brief-T1.md",
+      "exists": true
+    },
+    {
+      "name": "brief-generated",
+      "type": "regex",
+      "target": {
+        "source": "file",
+        "path": "brief-T1.md"
+      },
+      "pattern": "SDLC-Task: T1",
+      "match": "contains"
+    },
+    {
+      "name": "rag-source-cited",
+      "type": "regex",
+      "target": {
+        "source": "file",
+        "path": "brief-T1.md"
+      },
+      "pattern": "0099-export-format-canary",
+      "match": "contains"
+    }
+  ]
+}

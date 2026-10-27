@@ -34,6 +34,8 @@ Delivered by C4 (backend) and C5 (frontend); everything in this section is plann
 - **prod only from a tag**: the prod deploy refuses anything that is not an annotated tag on `main`.
 - After a prod deploy `release-watch` (planned, C4) checks health and new GlitchTip issues for 10 minutes and posts
   the result to the project's prod topic. **No automatic rollback**: the decision is the operator's.
+- The body of the app repositories' release pull request carries `## Changelog` with the version's section
+  (decision 64); the backend and frontend checks for it come with their own cards.
 
 ## This repository (1_mvp_sdlc)
 
@@ -45,6 +47,15 @@ Delivered by C4 (backend) and C5 (frontend); everything in this section is plann
 - A hotfix is a branch `hotfix/PILOT-<n>-<slug>` from `main` → a pull request into `main` (merged by the operator) and
   the back-merge pull request into `develop`.
 - The public mirror is synced from the released `main` (decision 55).
+- The changes are kept in `CHANGELOG.md` (Keep a Changelog). The release-prep pull request
+  `PILOT-<n>: Release X.Y.Z changelog`, where `<n>` is the release's own card (decision 91), moves `[Unreleased]`
+  into `## [X.Y.Z] - YYYY-MM-DD`.
+- Every release pull request carries its changelog (decision 64):
+  - the release pull request `PILOT-<n>: Release vX.Y.Z` has `## Changelog` with that section, and
+    `scripts/ci/pr-conventions.sh` fails it otherwise;
+  - the mirror sync pull request of a release gets `## Changelog` with the tag's section from
+    `scripts/publish-mirror.sh`;
+  - the infra promotion pull request lists the changes since the last promotion (`scripts/publish-prod-infra.sh`).
 
 ## Hotfix
 

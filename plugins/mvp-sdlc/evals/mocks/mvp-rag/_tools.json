@@ -1,0 +1,41 @@
+{
+  "tools": [
+    {
+      "name": "search",
+      "description": "Search the mvp project knowledge: plan and decisions (1_mvp_prompt), infra and runbooks (1_mvp_infra), SDLC/factory (1_mvp_sdlc), app README/CONTEXT/CHANGELOG/architecture maps (1_mvp_pilot_be, 1_mvp_pilot_fe). Returns up to k (1..20) files, best chunk each, with repo, path, commit_sha and a GitHub url to cite. repo narrows the search to one of those repos.",
+      "inputSchema": {
+        "properties": {
+          "query": {
+            "title": "Query",
+            "type": "string"
+          },
+          "k": {
+            "default": 5,
+            "title": "K",
+            "type": "integer"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Repo"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      }
+    }
+  ]
+}

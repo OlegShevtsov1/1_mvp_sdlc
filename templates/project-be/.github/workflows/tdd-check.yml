@@ -7,6 +7,8 @@ name: TDD check
 # A ci/chore/docs pull request that changes only .github/, .archon/, docs/ or Markdown is exempt
 # (bin/tdd-check); the body decides that, so it reaches the script as untrusted input through env
 # only, and editing it re-runs the check.
+# The order is checked against the live base branch, not the event's base sha, so commits that
+# come in by merging the base branch never count.
 # Commits already on main are not checked again (MAIN_REF), so a back-merge of main into develop
 # after a hotfix passes; the release pull request develop → main is skipped (decision 27).
 
@@ -37,11 +39,11 @@ jobs:
       - name: Check the commit order
         id: order
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_BODY: ${{ github.event.pull_request.body }}
           MAIN_REF: origin/main
-        run: bin/tdd-check "${BASE_SHA}" "${HEAD_SHA}"
+        run: bin/tdd-check "origin/${BASE_REF}" "${HEAD_SHA}"
 
   red:
     name: TDD RED on the test commit

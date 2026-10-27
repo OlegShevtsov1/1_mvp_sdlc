@@ -73,6 +73,8 @@ Repository secrets:
 - `VPN_CI_OVPN` — the shared CI VPN profile
 - `SRV_DEPLOY_SSH_KEY` — SSH key of the dev host's deploy user
 - `ANTHROPIC_API_KEY` — AI PR review (only used when `AI_REVIEW` is `on`)
+- `RAG_MCP_URL`, `RAG_MCP_TOKEN` — address and token of the shared project knowledge server `mvp-rag` that the
+  `mvp-sdlc` plugin connects to (decision 61 b); set by `project-add` (S5), read by no workflow yet
 
 Environment `dev` secrets:
 
@@ -169,7 +171,9 @@ Prod runs only released versions: annotated tags `vX.Y.Z` on `main`, each with a
    `skip-changelog`); every section keeps `Minimum backend version: vX.Y.Z`, equal to
    [`deploy/min-be-version`](deploy/min-be-version).
 2. Release prep PR into `develop` renames `[Unreleased]` to the number
-   `scripts/next-version.sh origin/develop` prints; then the release PR `develop → main`.
+   `scripts/next-version.sh origin/develop` prints; then the release PR `develop → main`, titled
+   `<KEY>-<n>: Release vX.Y.Z`, with `## Changelog` and the version's CHANGELOG section in its body. Both PRs carry
+   the release's own card, never `<KEY>-0` (`pr-conventions-check` fails it).
 3. Tag the merge commit: `git tag -a vX.Y.Z -m vX.Y.Z origin/main && git push origin vX.Y.Z`.
    The Release workflow checks the tag and creates a draft GitHub Release from the CHANGELOG
    section; the operator publishes it.

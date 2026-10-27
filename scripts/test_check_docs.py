@@ -112,13 +112,17 @@ class CheckDocsTest(unittest.TestCase):
         self.assertPasses()
 
     def test_planned_command_prefix_is_caught(self):
-        self.append("docs/sdlc/01-section.md", "DNS: `vpnctl project delegate <name>`.\n")
-        self.assertFails("vpnctl project delegate")
+        self.append("docs/sdlc/01-section.md", "Metrics: `bin/sdlc-metrics v0.2.0`.\n")
+        self.assertFails("bin/sdlc-metrics")
 
-    def test_planned_in_repo_path_that_exists_fails(self):
+    def test_shipped_in_repo_path_passes(self):
         self.write("bin/project-add", "x\n")
-        self.append("docs/sdlc/01-section.md", "Create it with `bin/project-add` (planned, S5).\n")
-        self.assertFails("now exists; update the docs and the registry")
+        self.append("docs/sdlc/01-section.md", "Create it with `bin/project-add`.\n")
+        self.assertPasses()
+
+    def test_shipped_elsewhere_command_passes(self):
+        self.append("docs/sdlc/01-section.md", "DNS: `vpnctl project delegate <name>`.\n")
+        self.assertPasses()
 
     def test_unregistered_confirm_word_fails(self):
         self.append("docs/sdlc/01-section.md", "Type `confirm=yes`.\n")
@@ -131,13 +135,13 @@ class CheckDocsTest(unittest.TestCase):
     def test_registered_confirm_words_pass(self):
         self.append(
             "docs/sdlc/01-section.md",
-            "Type `confirm=prod` or `confirm=remove-prod`; `DELEGATE-<name>` (planned, P2).\n",
+            "Type `confirm=prod` or `confirm=remove-prod`.\n",
         )
         self.assertPasses()
 
-    def test_planned_confirm_word_needs_planned(self):
-        self.append("docs/sdlc/01-section.md", "Type `DELEGATE-<name>`.\n")
-        self.assertFails("DELEGATE-<name>")
+    def test_shipped_confirm_words_pass(self):
+        self.append("docs/sdlc/01-section.md", "Type `DELEGATE-<name>`, `REMOVE-<name>` or `PUSH-<name>`.\n")
+        self.assertPasses()
 
     def test_cyrillic_fails(self):
         self.append("docs/sdlc/01-section.md", "привіт\n")

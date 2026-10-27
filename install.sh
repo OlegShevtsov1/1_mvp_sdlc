@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs this repository's Archon workflows for the current user: the `factory` pack
 # (orchestration/factory) into <ARCHON_HOME>/workflows/sdlc-factory/factory and every
-# orchestration/workflows/*.yaml into <ARCHON_HOME>/workflows/. Whatever it replaces is first copied to
+# orchestration/workflows/*.yaml into <ARCHON_HOME>/workflows/, plus scripts/ci/notify-telegram.sh into the
+# pack's scripts/_lib/ (the factory's Claude login check alerts through it). Whatever it replaces is first copied to
 # <ARCHON_HOME>/workflows-backup/<UTC timestamp>/ (outside workflows/, which Archon reads in full).
 # Other packs, such as mvp-ops, are never touched. Every installed workflow is then validated;
 # a validation error exits 1.
@@ -54,6 +55,7 @@ if [ "${backed_up}" -eq 1 ]; then echo "backup: ${backup}"; else echo "backup: n
 mkdir -p "${workflows}/sdlc-factory"
 rm -rf "${workflows:?}/${factory_rel}"
 cp -R "${factory_src}" "${workflows}/${factory_rel}"
+install -m 0755 "${HERE}/scripts/ci/notify-telegram.sh" "${workflows}/${factory_rel}/scripts/_lib/notify-telegram.sh"
 for y in "${yamls[@]}"; do install -m 0644 "${y}" "${workflows}/$(basename "${y}")"; done
 echo "installed: ${targets[*]} into ${workflows}"
 

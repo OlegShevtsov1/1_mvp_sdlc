@@ -2,7 +2,7 @@ import { emit, parseJsonObject } from "./_lib/io.ts";
 import { type CiCheck, PR_URL } from "./_lib/merge-decision.ts";
 
 // Binding (see factory.yaml `pr-state` node): delivery (the whole deliver
-// output). Reports facts only, merge-gate decides; always exits 0 with one line.
+// report). Reports facts only, merge-gate decides; always exits 0 with one line.
 const delivery = parseJsonObject(process.env.INPUTS_DELIVERY ?? "") ?? {};
 
 interface PrState {
@@ -11,6 +11,7 @@ interface PrState {
   head: string;
   base: string;
   state: string;
+  mergeable: string;
   is_draft: boolean;
   checkout_is_head: boolean;
   checkout_clean: boolean;
@@ -43,15 +44,15 @@ function readChecks(url: string): { checks: CiCheck[]; checks_read: boolean } {
 }
 
 function read(): PrState {
-  // Archon v0.10.1's archon-deliver returns the PR record ({url, head, ...});
-  // v0.11.1's returns {pr_url}.
-  const url = typeof delivery.url === "string" ? delivery.url : typeof delivery.pr_url === "string" ? delivery.pr_url : "";
+  // archon-deliver-block's report carries the URL as pr_url.
+  const url = typeof delivery.pr_url === "string" ? delivery.pr_url : "";
   const unread: PrState = {
     pr_url: PR_URL.test(url) ? url : "",
     read: false,
     head: "",
     base: "",
     state: "",
+    mergeable: "",
     is_draft: false,
     checkout_is_head: false,
     checkout_clean: false,
@@ -61,7 +62,7 @@ function read(): PrState {
   if (!PR_URL.test(url)) return unread;
 
   // The URL is the selector, so gh infers no repository from the checkout.
-  const view = capture(["gh", "pr", "view", url, "--json", "headRefOid,headRefName,isDraft,state,baseRefName"]);
+  const view = capture(["gh", "pr", "view", url, "--json", "headRefOid,headRefName,isDraft,state,baseRefName,mergeable"]);
   const pr = view.ok ? parseJsonObject(view.out) : null;
   if (!pr || typeof pr.headRefOid !== "string" || typeof pr.headRefName !== "string" || typeof pr.baseRefName !== "string") {
     return unread;
@@ -76,6 +77,7 @@ function read(): PrState {
     head: pr.headRefName,
     base: pr.baseRefName,
     state: String(pr.state),
+    mergeable: typeof pr.mergeable === "string" ? pr.mergeable : "",
     is_draft: pr.isDraft !== false,
     checkout_is_head: checkout.ok && checkout.out === pr.headRefOid,
     checkout_clean: status.ok && status.out === "",

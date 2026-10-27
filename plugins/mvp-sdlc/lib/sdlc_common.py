@@ -167,6 +167,28 @@ def base_branch(root, environ):
     return "main"
 
 
+# One line of an operator's ~/.config/<app>/.env: KEY=value, optionally `export`-ed, the value optionally quoted.
+ENV_LINE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
+
+
+def env_file_value(path, name):
+    """The unquoted value of name in a KEY=value file; None when the file, the key or the value is missing."""
+    try:
+        lines = Path(path).expanduser().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        match = ENV_LINE.match(line)
+        if match and match.group(1) == name:
+            return match.group(2).strip("'\"") or None
+    return None
+
+
+def setting(name, env_file, environ):
+    """name from environ, else from env_file: the environment wins."""
+    return environ.get(name) or env_file_value(env_file, name)
+
+
 def load_script(rel):
     """Import a plugin script by path relative to the plugin dir (hyphenated names and extension-less bin files)."""
     path = PLUGIN_DIR / rel

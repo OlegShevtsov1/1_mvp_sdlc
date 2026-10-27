@@ -2,7 +2,7 @@
 """Print the lists of a project's Trello board, one per line, in board order (decision 53).
 
 Usage: bin/board-lists
-bin/project-add (planned, S5) creates a new project's board with exactly these lists in this order. The names are
+bin/project-add creates a new project's board with exactly these lists in this order. The names are
 BOARD_LISTS in plugins/mvp-sdlc/lib/sdlc_common.py, the constant feature-start and task-brief use; a new project
 has no factory profile yet, so these are the defaults, never renames.
 Exit 0, 2 on usage.

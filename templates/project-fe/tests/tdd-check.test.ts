@@ -145,6 +145,52 @@ describe('scripts/tdd-check.sh', () => {
     expect(calls(bin, 'gh')[0]).toContain(`statuses/${red}`)
   })
 
+  describe('after merging develop', () => {
+    function moveDevelop(subject: string, files: Record<string, string>) {
+      git(repo, 'checkout', '-q', 'develop')
+      const moved = commit(repo, subject, files)
+      git(repo, 'update-ref', 'refs/remotes/origin/develop', moved)
+      git(repo, 'checkout', '-q', 'pr')
+      git(repo, 'merge', '-q', '--no-ff', '--no-edit', 'develop')
+    }
+
+    beforeEach(() => {
+      git(repo, 'branch', 'develop', 'main')
+      git(repo, 'update-ref', 'refs/remotes/origin/develop', 'main')
+    })
+
+    it('counts only the own commits, not the non-test develop commits and the tests they change', () => {
+      const red = commit(repo, 'test(x): failing test', { 'src/a.test.ts': 'red\n' })
+      moveDevelop('APP-248: tracker (#80)', { 'tests/other.test.ts': 'other\n', 'src/other.ts': 'export const o = 1\n' })
+      commit(repo, 'feat(x): code', { 'src/app.ts': 'export const a = 2\n' })
+      const result = tddCheck({ BASE_REF: 'develop' })
+      expect(result.status, result.stdout + result.stderr).toBe(0)
+      expect(calls(bin, 'gh')[0]).toContain(`statuses/${red}`)
+    })
+
+    it('still requires the own first commit to be test(', () => {
+      moveDevelop('test(y): elsewhere', { 'src/y.test.ts': 'red\n' })
+      commit(repo, 'feat(x): code first', { 'src/app.ts': 'export const a = 2\n' })
+      commit(repo, 'test(x): failing test', { 'src/a.test.ts': 'red\n' })
+      commit(repo, 'fix(x): code', { 'src/app.ts': 'export const a = 3\n' })
+      const result = tddCheck({ BASE_REF: 'develop' })
+      expect(result.status).toBe(1)
+      expect(result.stdout).toContain('first commit must start with test(')
+      expect(result.stdout).toContain('feat(x): code first')
+    })
+
+    it('still rejects an own test change between the test commit and the feat( commit', () => {
+      commit(repo, 'test(x): failing test', { 'src/a.test.ts': 'red\n' })
+      moveDevelop('APP-248: tracker (#80)', { 'tests/other.test.ts': 'other\n' })
+      commit(repo, 'feat(x): code', { 'src/app.ts': 'export const a = 2\n', 'src/a.test.ts': 'weakened\n' })
+      const result = tddCheck({ BASE_REF: 'develop' })
+      expect(result.status).toBe(1)
+      expect(result.stdout).toContain('tests changed between the test commit and the feat/fix commit')
+      expect(result.stdout).toContain('src/a.test.ts')
+      expect(result.stdout).not.toContain('tests/other.test.ts')
+    })
+  })
+
   it.each([
     ['BASE_REF', { BASE_REF: '' }],
     ['HEAD_SHA', { HEAD_SHA: '' }],

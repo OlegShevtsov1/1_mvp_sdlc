@@ -46,11 +46,9 @@ jobs:
         run: bash scripts/ci/check.sh gitleaks
 
   orchestration:
-    name: Archon workflows (v0.10.1 and v0.11.1)
+    name: Archon workflows (v0.12.1)
     runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
     timeout-minutes: 20
-    env:
-      UV_PYTHON: "3.12"
 
     steps:
       - uses: actions/checkout@v7
@@ -61,10 +59,8 @@ jobs:
         with:
           bun-version: 1.4.2
 
-      - uses: astral-sh/setup-uv@v10.3.0
-
       - name: Factory unit tests (bun)
         run: bash scripts/ci/check.sh factory
 
-      - name: Archon validate and dry-run fixtures on both pinned versions
+      - name: Archon validate and dry-run fixtures on the pinned version
         run: bash scripts/ci/check.sh archon

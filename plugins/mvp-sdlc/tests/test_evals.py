@@ -28,6 +28,7 @@ GOLDEN = {
     "rails-data-model-expand-contract",
     "task-brief-ac",
     "task-brief-split-large",
+    "task-brief-consults-rag",
     "sync-spec-stale",
     "bootstrap-project-idempotent",
 }
@@ -42,6 +43,8 @@ GRADER_KEYS = {
 LEDGERS = {"block-main-push": "push-log.txt", "block-destructive-git": "rewrite-log.txt"}
 PATCHABLE = ("hooks/", "skills/", "bin/")
 FLAGS = {"i": re.I, "m": re.M, "s": re.S}
+# The plugin's mvp-rag server (.mcp.json) as Claude Code names its search tool; evals/mocks/mvp-rag/ answers it.
+RAG_SEARCH_TOOL = "mcp__plugin_mvp-sdlc_mvp-rag__search"
 
 
 def discover():
@@ -153,7 +156,7 @@ class PluginCopies(TempTestCase):
 
 
 class CaseFilesTest(TempTestCase):
-    def test_golden_cases_are_the_agreed_ten(self):
+    def test_golden_cases_are_the_agreed_set(self):
         golden = {name for name, path in discover().items() if path.parent == EVALS}
         self.assertEqual(golden, GOLDEN)
 
@@ -263,6 +266,20 @@ class WorkspaceTest(PluginCopies):
                     else:
                         self.assertFalse(all(verdicts.values()), verdicts)
 
+    def test_rag_mock_answers_with_the_cited_source(self):
+        mocks = EVALS / "mocks" / "mvp-rag"
+        tools = json.loads((mocks / "_tools.json").read_text(encoding="utf-8"))["tools"]
+        self.assertEqual([tool["name"] for tool in tools], ["search"])
+        self.assertEqual(sorted(p.name for p in mocks.iterdir()), ["_tools.json", "search.md"])
+        front, body = re.fullmatch(r"---\n(.*?)\n---\n(.*)", (mocks / "search.md").read_text(encoding="utf-8"), re.S).groups()
+        self.assertEqual(front, "type: fixed")
+        paths = [hit["path"] for hit in json.loads(body)["hits"]]
+        grader = next(g for g in load(discover()["task-brief-consults-rag"])["graders"] if g["name"] == "rag-source-cited")
+        self.assertEqual([p for p in paths if re.search(grader["pattern"], p)], paths)
+        self.assertEqual(len(paths), 1)
+        execution = load(discover()["task-brief-consults-rag"])["execution"]
+        self.assertIn(RAG_SEARCH_TOOL, execution["allowed_tools"])
+
     def test_sync_spec_grader_hash_matches_the_scaffold(self):
         case_dir = discover()["sync-spec-stale"]
         grader = next(g for g in load(case_dir)["graders"] if g["name"] == "synced-by-sync-spec")
@@ -350,6 +367,14 @@ class BrokenConfigurationTest(PluginCopies):
             outputs[label] = result.stdout
         self.assertIn("Exactly three commits", outputs["real"])
         self.assertNotIn("Exactly three commits", outputs["broken"])
+
+    def test_task_brief_consults_rag(self):
+        name = "task-brief-consults-rag"
+        real = (PLUGIN / "skills" / "task-brief" / "SKILL.md").read_text(encoding="utf-8")
+        broken = (self.broken(name) / "skills" / "task-brief" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("## Project knowledge first (mvp-rag)", real)
+        self.assertIn(RAG_SEARCH_TOOL, real)
+        self.assertNotIn("mvp-rag", broken)
 
     def test_sync_spec_stale(self):
         name = "sync-spec-stale"

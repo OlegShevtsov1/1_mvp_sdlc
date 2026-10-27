@@ -1,0 +1,10 @@
+# Reproduces the 2026-10-23 and 2026-10-27 incidents: the Claude CLI login on
+# the Archon host has expired, so every AI node would fail on auth. The
+# pre-flight reports it, and the run must stop at claude-auth-stop with the
+# `claude /login` fix before the profile, the plan or anything else runs.
+claude-auth: { status: auth_failed, node: "", alert: sent, message: "stub: the Claude CLI login has expired" }
+exec-code: true
+fixture:
+  expect: cancelled
+  inputs:
+    task: "add a /health endpoint"

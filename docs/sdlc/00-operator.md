@@ -49,6 +49,10 @@ Also once, on the operator machine:
   id as `TRELLO_BOARD_ID_PILOT` (the project name from `config/project.env`, upper case) or `TRELLO_BOARD_ID`. The
   command passes them to `curl` on stdin and never prints them. The factory reads the same file on the Archon host
   (only `TRELLO_BOARD_ID`) to move the task's card; without it the factory still delivers and only logs a warning.
+- `RAG_MCP_URL` and `RAG_MCP_TOKEN` in the shell environment of the operator machine and the Archon host (values
+  from the private infra registry and `~/.config/mvp-rag/`; never printed, never committed). They connect Claude Code
+  sessions (through the `mvp-sdlc` plugin), the factory's plan stage and `bin/rag` to the project knowledge server
+  `mvp-rag`; without them everything works and says mvp-rag is unavailable.
 - The plugins are installed at **project scope only**, through the committed `.claude/settings.json`. The first time
   you open Claude Code in an app repository, accept the `mvp` marketplace when it asks.
 - Known limitation: an unattended Archon run does **not** see a project-scope plugin (plugin probe, 2026-10-14:
@@ -58,30 +62,49 @@ Also once, on the operator machine:
 
 ## 2. A new project
 
-Once per project, for a project other than the pilot. The automated flow is **planned**:
-`bin/project-add <name>` (planned, S5) will create the backend and frontend repositories from the templates in `templates/project-be/` and
-`templates/project-fe/`, the registry entry in
-`1_mvp_infra`, the prod VPN profile, ECR, the role, the DNS zone, the dev sites, Gatus and Beszel, the GlitchTip
-projects, the Trello board `<NAME>` and the Notion page `<NAME>`; the infrastructure part is
-`vpnctl project add|bootstrap|delegate|remove` (planned, P2). What exists today in `1_mvp_infra`:
-`vpnctl project list` and `vpnctl project show` (read-only). Course basis: one-time host preparation is done by a
-human (M11.2).
+Once per project, for a project other than the pilot: `bin/project-add <name>` from a checkout of this repository
+([project-add](../project-add.md) has the details). Course basis: one-time host preparation is done by a human
+(M11.2); the command does the rest and stops where only you can act.
 
-Your manual steps (they stay manual when the automation lands):
+Before the first project, once: create the Notion page `PROJECTS` and connect the `PILOT` integration to it; put
+`1_mvp_infra`'s `bin/` on your `PATH` (that checkout on `env/dev`); set `PROJECT_ADD_DEV_SSH` in
+`~/.config/project-add/.env`. Check the plan first with `bin/project-add --dry-run <name>`: it calls nothing.
 
-1. **Name**: lowercase Latin letters and digits, 2–16 characters; not `mvp`, `shared`, `projects`, `modules`, `envs`,
-   `bootstrap` or `smoke-*`.
-2. **Telegram**: in BotFather, `/newbot` → `@<name>_alerts_bot`; add it to the alerts group; create two topics
-   `<name>_prod_alerts` and `<name>_dev_alerts`; store the token in `~/.config/telegram-bots/.env`. Never paste the
-   token into a chat, an issue or a repository.
-3. **Notion**: only for the first new project, create the root page `PROJECTS` and connect the `PILOT` integration to
-   it.
-4. **DNS delegation, only from your console**: `vpnctl project delegate <name>` (planned, P2) shows the exact NS
-   record it will write; you type `DELEGATE-<name>` (planned, P2) to go on. It never runs from GitHub Actions.
-5. **First commit of an empty new repository** is the only allowed direct push to `main`, and only with your
-   explicit OK (R-C4).
-6. **Memory on the dev host**: at least 1.5 GB free before the project's dev stack is added (R-A8); the command
+1. **Name**: lowercase Latin letters and digits, 2–16 characters, starting with a letter; not a name `1_mvp_infra`'s
+   registry reserves (preflight asks the registry).
+2. The nine steps, each recorded in `~/.local/state/project-add/<name>.json`; a rerun skips what is done:
+   - `preflight`: read-only probes (name, `gh` account and scopes, AWS, Trello, Notion, Telegram, RAG settings,
+     memory on the dev host, a free VPN address); any failure stops before anything is written.
+   - `infra`: `vpnctl project add <name>` opens the registry PR; `vpnctl project bootstrap <name>` after its merge.
+   - `repos`: the backend and frontend repositories from `templates/project-be/` and `templates/project-fe/`, the
+     first commit on `main` and `develop` from the same commit.
+   - `github`: environments `dev` and `prod`, the guard workflows active, the secrets it can source, among them
+     `RAG_MCP_URL` and `RAG_MCP_TOKEN`.
+   - `telegram`: topics `<name>_prod_alerts` and `<name>_dev_alerts`, their lines in `~/.config/telegram-bots/.env`
+     and the `TELEGRAM_*` secrets.
+   - `trello`: the board `<NAME>` with the lists of `bin/board-lists` and its labels.
+   - `notion`: the page `<NAME>` under `PROJECTS`.
+   - `plugins`: the two plugins enabled in each clone.
+   - `report`: what was done, the links and what is left, posted to the `MVP_VPN_ALERTS` topic and the Notion page.
+3. **Where it pauses for you** (exit code 3; do what it prints, then run `bin/project-add <name>` again; a failure
+   that is no pause, such as a revoked bot token, stops with exit code 1 and prints its cause and remedy):
+   - **Registry PR**: review and merge it in `1_mvp_infra`.
+   - **DNS delegation, only from your console**: `vpnctl project delegate <name>` shows the exact NS record it will
+     write; you type `DELEGATE-<name>` to go on. It never runs from GitHub Actions.
+   - **First commit of the empty repositories** is the only allowed direct push to `main`, and only with your
+     explicit OK (R-C4): you type `PUSH-<name>`. The guard runs on that commit are red; that is expected.
+   - **Telegram bot**: with no token yet, in BotFather, `/newbot` → `@<name>_alerts_bot`; add it to the alerts
+     group as an administrator who can manage topics; put its token on one line in `~/.config/telegram-bots/.env`.
+     Never paste the token into a chat, an issue or a repository. When the bot exists but is not a member or not an
+     administrator with "Manage topics", only make it one: no new bot, no new token.
+   - **Notion**: only if the page `PROJECTS` is missing.
+4. **Memory on the dev host**: at least 1.5 GB free before the project's dev stack is added (R-A8); the command
    checks it and stops if not.
+5. **What stays manual**: the report lists it — the secrets it cannot source (deploy and prod SSH keys, GlitchTip,
+   the frontend's read token for the backend, the AI review key), the plugin install if the check failed, the
+   self-hosted runner, and the first prod deploy.
+6. **Undo** a project that is not protected: `bin/project-add --undo <name>` runs `vpnctl project remove <name>`
+   (you type `REMOVE-<name>`) and prints the repositories, board, page and topics to delete by hand.
 
 After that the project lives by sections 1 and 3–7 of this page.
 
@@ -122,10 +145,11 @@ Steps 0–2 and 4–9 of the M path below, with these differences:
 - step 5: no `/sdlc:break-tasks` (it refuses without `sad.md` and an Accepted ADR). **Known gap:** the task is
   written by hand: ask the agent in the session to write, from the PRD, `docs/features/<slug>/tasks/tasks.json` with
   one task and one row in `docs/features/<slug>/tasks/tracker.md`, in the contracts docs PR (no `T1.md` is needed),
-  then run `task-brief <slug> T1`: it validates both. A feature that touches the frontend too gets a second task
-  `T1` in the frontend repository's own `docs/features/<slug>/tasks/`, written the same way in the frontend's spec
-  docs PR (section 4). Fix tasks after review are appended the same way as `T2`, `T3` in a docs PR. A helper that
-  writes these files is a candidate follow-up. The minimal shape (R-C2):
+  then run `task-cards <slug>` to give the task its card and `task-brief <slug> T1` to validate both. A feature that
+  touches the frontend too gets its frontend task as `T2` in the same backend `tasks/tasks.json` and `tracker.md`
+  (layer `ui`), so `task-cards` gives it its card in the backend too; it is briefed in the frontend with
+  `task-brief <slug> T2 --from <be checkout>` (step 6). Fix tasks after review are appended the same way as the next
+  `T<n>` in a docs PR. A helper that writes these files is a candidate follow-up. The minimal shape (R-C2):
 
   ```json
   {"slug": "<slug>", "tasks": [{"id": "T1", "title": "<what the task delivers>", "layer": "app", "deps": [],
@@ -135,8 +159,8 @@ Steps 0–2 and 4–9 of the M path below, with these differences:
 
   `layer` is one of the layers `break-tasks` defines in
   [its skill](../../plugins/sdlc/skills/break-tasks/SKILL.md) (step 4, "Identify work-items by layer"); `acs` are the
-  IDs from PRD section 5; `estimate` is hours (`6h`, at most `8h`) or a size up to `M`; `status` is `todo` and
-  becomes `done` in the task's own PR. The tracker row is
+  IDs from PRD section 5; `estimate` is hours (`6h`, at most `8h`) or a size up to `L` (one day; `XL` is refused:
+  split it); `status` is `todo` and becomes `done` in the task's own PR. The tracker row is
   `| T1 | <title> | app | operator | 6h | — | todo |` under the header
   `| # | Task | Layer | Owner | Estimate | Blocked by | Status |`.
 
@@ -182,15 +206,18 @@ backend's existing API description), `/sdlc:plan-tests <slug>` (which test level
 confirm). You only answer when the agent asks about a disputed point.
 
 **Step 5. Tasks.** `/sdlc:break-tasks <slug>` cuts the feature into tasks: `tasks/T<n>.md`, `tasks/tasks.json`,
-`tasks/tracker.md`. A task is at most one day of work and at most 500 changed lines. Then, as at every gate, the agent
+`tasks/tracker.md`. A task is at most one day of work and at most 500 changed lines. Right after it, in the backend,
+`/mvp-sdlc:task-cards <slug>` gives every task its own Trello card (decision 78): it shows a dry run first, then
+creates each card in `Ready` with the label `task` (or adopts a card already named `<slug> T<n>: …`), records the
+card in `tasks/tasks.json` and adds the task to the feature card's checklist. Then, as at every gate, the agent
 opens **one contracts docs PR** with everything from steps 4 and 5 (the documents keep the status their skill
 gives them; the gate for this phase is the Definition of Ready) and you merge it. If the feature touches the
 frontend, sync the spec copy now (section 4). Check the Definition of Ready: the PRD approved and merged, for M+ the
 SAD and an Accepted ADR merged, every task in `tasks/tasks.json` with criteria from PRD section 5 and a test level
 for each, no task over a day, CI green on `main`, and `task-brief` prints the text for each task without refusing
-(details: [03-dor-dod.md](03-dor-dod.md)). Then you add the checklist `T1…Tn` to the card (one item per task ID)
-and move the card to `Ready`. From `Ready` on, the factory moves the card ([Board flow](03-dor-dod.md#board-flow)):
-you only read its comments.
+(details: [03-dor-dod.md](03-dor-dod.md)), each with its own card. Then move the feature card to `Ready`. From
+`Ready` on, the factory moves each task's card ([Board flow](03-dor-dod.md#board-flow)): you only read its comments;
+the feature card follows the feature's state and you move it.
 
 **Step 6. Code, through the factory.** For each task, in the repository that owns it:
 
@@ -198,10 +225,13 @@ you only read its comments.
    on dev, and after `sync-spec <slug> --from <be checkout> --check` exits 0 in the frontend (section 4).
 2. Write the task text to a file, from the app repository's root:
    `<mvp-sdlc plugin>/bin/task-brief <slug> T<n> > /tmp/<slug>-T<n>.txt` (`<mvp-sdlc plugin>` is `plugins/mvp-sdlc`
-   in a checkout of `1_mvp_sdlc`; in a Claude session `/mvp-sdlc:task-brief <slug> T<n>` prints the same text). The
-   text carries the pull request title `PILOT-<n>: <card title>` and the `Type:` line that `pr-conventions-check.yml`
-   requires. A refusal is a Definition of Ready failure: fix the cause (finish the dependency, split the task, add
-   the missing test level, start the feature from its card), never write the text by hand.
+   in a checkout of `1_mvp_sdlc`; in a Claude session `/mvp-sdlc:task-brief <slug> T<n>` prints the same text). A
+   frontend task is in the backend `tasks/tasks.json`: in the frontend, after `git -C <be checkout> fetch origin`,
+   add `--from <be checkout>`. The text carries the pull request title `PILOT-<task card>: <task title>` and the
+   `Type:` line that `pr-conventions-check.yml` requires. A refusal is a Definition of Ready failure: fix the cause
+   (finish the dependency, split the task, add the missing test level, run `task-cards`, start the feature from its
+   card), never write the text by hand. A warning that the task has no card means the title falls back to the
+   feature card: run `task-cards` first.
 3. Start the run with that whole file, unchanged, as the message (the shell's command substitution of
    `cat /tmp/<slug>-T<n>.txt` in double quotes keeps it one argument):
    `archon workflow run factory --cwd <repo> "<the task text>"`. The command prints the run ID; later,
@@ -213,11 +243,12 @@ you only read its comments.
    `abort`), with the same `archon workflow respond` command.
 6. Without you: three commits on the PR branch — `test(...)` (the test fails) → `feat(...)` (it passes) →
    `refactor(...)`; review by several lenses; CI; **merge into `develop` as one squash commit**; deploy to **dev**;
-   health check. If health is red, the factory rolls dev back and reports. Meanwhile the factory moves the card
-   the task text names: `Blocked` while gate 1 or gate 2 waits for you, `In Progress` once you approve the plan,
-   `Review` when the PR is open, `Test` when the run is delivered. A PR into a base you merge by hand stays in
-   `Review` with the comment "waits for the operator merge" until you merge it.
-7. The agent ticks the task on the card's checklist; `archon workflow get <run-id>` shows the result.
+   health check. If health is red, the factory rolls dev back and reports. Meanwhile the factory moves the task's
+   card, the one the task text names: `Blocked` while gate 1, gate 2 or the visual gate (a UI task's screenshots,
+   after CI) waits for you, `In Progress` once you approve the plan, `Review` when the PR is open, `Test` when the
+   run is delivered. A PR into a base you merge by hand stays in `Review` with the comment "waits for the operator
+   merge" until you merge it.
+7. The agent ticks the task on the feature card's checklist; `archon workflow get <run-id>` shows the result.
 8. **If the run stopped** (a red check, a `BLOCKED` question, a failed deploy): the factory moves the card back to
    `Ready` with a comment naming the reason (after a failed rollback it leaves the card in `Blocked`: dev needs you).
    Read the comment or `archon workflow get <run-id>`, and answer or fix it. Then either
@@ -240,13 +271,16 @@ Findings: P0 (critical), P1 (important), P2 (minor).
 docs PR and merge it like any docs PR, **before** the prod deploy: its merge commit is the one you deploy.
 Today prod takes a **commit**, not a tag. For a feature that touches both apps: backend first, then frontend.
 
-1. Open the release pull request `develop` → `main` (title `PILOT-<n>: <card title>` of the feature's card, and one
-   `Type:` line in the body, for example `Type: feat`: the check requires both on every pull request) and merge it
-   yourself with a **merge commit**; a pull request into `main` is never merged
-   automatically (decision 27). A `main` commit is not deployed to dev by itself (decision 28): dispatch Dev Deploy
-   on `main` with `gh workflow run dev-deploy.yml -R OlegShevtsov1/<repo> --ref main`, wait for it to finish green, then
-   take its sha:
+1. Open the release pull request `develop` → `main` (title `PILOT-<n>: Release vX.Y.Z` with the release's own card,
+   never `PILOT-0` (decision 91, [Board flow](03-dor-dod.md#board-flow)), and one `Type:` line in the body, for
+   example `Type: feat`: the check requires both on every pull request) and merge it yourself with a
+   **merge commit**; a pull request into `main` is never merged automatically (decision 27). A `main` commit is not
+   deployed to dev by itself (decision 28): dispatch Dev Deploy on `main` with
+   `gh workflow run dev-deploy.yml -R OlegShevtsov1/<repo> --ref main`, wait for it to finish green, then take its sha:
    `gh run list -R OlegShevtsov1/<repo> --workflow dev-deploy.yml --branch main --event workflow_dispatch --status success --limit 1 --json headSha`.
+   The body of a release pull request also has `## Changelog` with the full section of the version from
+   `CHANGELOG.md` (decision 64); in `1_mvp_sdlc` the pr-conventions check fails a `PILOT-<n>: Release vX.Y.Z` pull
+   request without it.
 2. Deploy it: in GitHub Actions of the app repository, `kamal-deploy.yml` → Run workflow on `main`, or
    `gh workflow run kamal-deploy.yml -R OlegShevtsov1/<repo> --ref main -f environment=prod -f version=<sha> -f confirm=prod`.
    The confirm word is `confirm=prod`; it runs only from `main`.
@@ -262,8 +296,9 @@ GlitchTip issues for 10 minutes and reports to Telegram. **Rollback is never aut
 
 **Step 9. After the release.** Monitoring (Gatus, Beszel, GlitchTip) and Telegram alerts stay as in the pilot plan
 ([08-observability.md](08-observability.md)). Metrics once per release: section 6. If the brief's success metric
-did not come true, that is a new idea: back to step 0. The card ends in `Done` through the release runs (planned,
-C4); until then you move it from `Test` on and comment the links to the prod deploy runs and the merged PRs.
+did not come true, that is a new idea: back to step 0. The task and feature cards, and the release's own card, end
+in `Done` through the release runs (planned, C4); until then you move them from `Test` (the release card from
+`In Progress`) on and comment the links to the prod deploy runs and the merged PRs.
 
 ### Your time per feature (size M)
 
@@ -291,8 +326,8 @@ contracts as the shared source (M6.6).
    command reads `origin/main` unless told otherwise; the feature documents of the app repositories are on `develop`,
    so pass `--ref origin/develop` (the command: `sync-spec <slug> --from <be checkout> --ref origin/develop`).
 3. Commit the copy on a `feature/PILOT-<n>-<slug>-spec` branch and merge the docs PR into `develop` (title
-   `PILOT-<n>: <card title>`, body line `Type: docs`). The frontend's own `tasks/` live in the frontend
-   repository.
+   `PILOT-<n>: <card title>`, body line `Type: docs`). `sync-spec` does not copy `tasks/`: frontend tasks listed in
+   the backend `tasks/tasks.json` are briefed in the frontend with `task-brief <slug> T<n> --from <be checkout>`.
 4. Never edit a copied file in the frontend: change the backend first, then sync again.
 5. Before each frontend task and in its Definition of Done: `sync-spec <slug> --from <be checkout> --check` must exit
    0. It runs only locally: frontend CI cannot read the private backend repository.
@@ -350,6 +385,7 @@ Course basis: deterministic guards over instructions (M5.4), untrusted agent inp
 /sdlc:map-architecture                 once per app repository, again after large changes
 /mvp-sdlc:feature-start <card link>    every new feature (backend repository)
 /mvp-sdlc:sync-spec <slug>             frontend repository, when the backend documents changed
+/mvp-sdlc:task-cards <slug>            one Trello card per task, after break-tasks (backend repository)
 /mvp-sdlc:task-brief <slug> T<n>       the factory task text
 archon workflow run factory --cwd <repo> "<the task text>"
 archon workflow respond <run-id> approve

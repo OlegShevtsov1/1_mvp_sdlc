@@ -13,6 +13,10 @@
   `SDLC-AC: <AC ids>`.
 - A PR whose body has `Type: feat` or `Type: fix` adds an entry under `[Unreleased]` in `CHANGELOG.md` (a hotfix PR
   into `main` adds its `## [X.Y.Z]` section instead), or carries the label `skip-changelog`; changelog-check enforces it.
+- Release pull request `develop` → `main`: title `<KEY>-<n>: Release vX.Y.Z` (the release's own card, never
+  `<KEY>-0`; decision 91); its body has `## Changelog` followed by the full `## [X.Y.Z]` section of
+  `CHANGELOG.md`, pasted verbatim. The release-prep pull request
+  `<KEY>-<n>: Release X.Y.Z changelog` writes that section first.
 - Never move or delete a published `v*` tag; install the pre-push hook with `git config core.hooksPath scripts/git-hooks`.
 - Stage files by name. Never commit `.env*` files, `config/master.key`, `.claude/*.local.md` or build output.
 - When a task is done, set its row in `docs/features/<slug>/tasks/tracker.md` and its `status` in `tasks.json` to

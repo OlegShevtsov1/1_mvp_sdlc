@@ -133,9 +133,13 @@ describe('Claude setup', () => {
   it('enables the SDLC plugins and denies history rewrites', () => {
     const settings = JSON.parse(read('.claude/settings.json')) as {
       enabledPlugins: Record<string, boolean>
-      permissions: { deny: string[] }
+      permissions: { allow: string[]; deny: string[] }
     }
     expect(settings.enabledPlugins).toMatchObject({ 'sdlc@mvp': true, 'mvp-sdlc@mvp': true })
+    expect(settings.permissions.allow).toEqual([
+      'mcp__plugin_mvp-sdlc_mvp-rag__search',
+      'mcp__plugin_mvp-sdlc_mvp-rag__get',
+    ])
     expect(settings.permissions.deny).toEqual(
       expect.arrayContaining(['Bash(git push --force*)', 'Bash(git reset --hard*)']),
     )

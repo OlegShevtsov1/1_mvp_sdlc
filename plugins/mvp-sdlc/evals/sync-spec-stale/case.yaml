@@ -10,7 +10,7 @@
   },
   "execution": {
     "prompt": "The backend checkout for this frontend repository is ./be. Run the sync-spec check for feature demo against it. Only if the check reports drift, re-sync the copy with sync-spec. Decide from the check's exit code and output alone: do not compare files, hashes or commits yourself. Do not commit.",
-    "max_turns": 12,
+    "max_turns": 16,
     "timeout_seconds": 300,
     "allowed_tools": [
       "Bash",

@@ -1,5 +1,5 @@
 diff --git a/skills/rails-data-model/SKILL.md b/skills/rails-data-model/SKILL.md
-index 731e17d..c8408da 100644
+index 94bc10e..c8c119c 100644
 --- a/skills/rails-data-model/SKILL.md
 +++ b/skills/rails-data-model/SKILL.md
 @@ -3,18 +3,18 @@ name: rails-data-model
@@ -25,9 +25,9 @@ index 731e17d..c8408da 100644
 +is a design plus `schema.sql`, from which an implementing task later writes the migrations in `db/migrate/`; this
 +skill never changes the live schema.
  
- ## Inputs
+ ## Project knowledge first (mvp-rag)
  
-@@ -33,8 +33,7 @@ the live schema.
+@@ -43,8 +43,7 @@ continue; never stop or retry because of it.
  ## Hard rules
  
  - Never create, edit or delete `db/schema.rb`, `db/structure.sql` or anything under `db/migrate/`.
@@ -37,7 +37,7 @@ index 731e17d..c8408da 100644
  - **Ambiguity means a question, never a guess.** If the conventions conflict (for example two tables use different
    soft-delete columns and the new table relates to both), or the request leaves a decision open that changes the
    schema (which tables a record belongs to, whether it is soft-deleted, a uniqueness rule), ask with
-@@ -61,12 +60,8 @@ the live schema.
+@@ -71,12 +70,8 @@ continue; never stop or retry because of it.
  5. **Write the files.**
     - `docs/features/<slug>/data-model.md` from this skill's `templates/data-model.md` (in the skill's base
       directory), every section filled.

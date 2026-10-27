@@ -41,18 +41,15 @@ class TrelloError(Exception):
     pass
 
 
-def setting(name, env_file, environ):
-    if environ.get(name):
-        return environ[name]
-    try:
-        lines = Path(env_file).expanduser().read_text(encoding="utf-8").splitlines()
-    except OSError:
+def task_card(task):
+    """(card id, card number) a tasks.json task records (decision 78), None when it records neither; ValueError
+    when the pair is incomplete or invalid. task-cards writes the pair and task-brief reads it with this one rule."""
+    card_id, number = task.get("trello_card_id"), task.get("trello_card_id_short")
+    if card_id is None and number is None:
         return None
-    for line in lines:
-        match = re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$", line)
-        if match and match.group(1) == name:
-            return match.group(2).strip("'\"") or None
-    return None
+    if not (isinstance(card_id, str) and CARD_ID.fullmatch(card_id) and feature_state.valid_card_number(number)):
+        raise ValueError("invalid trello_card_id/trello_card_id_short")
+    return card_id, number
 
 
 def project_name(root):
@@ -102,8 +99,8 @@ class Trello:
             raise TrelloError("{} {}: response is not JSON".format(method, path))
 
 
-def feature_link(root, slug, base):
-    path = "docs/features/{}".format(slug)
+def github_link(root, path, base, kind="tree"):
+    """The GitHub web link of `path` (`tree` for a folder, `blob` for a file) on `base`, or the bare path."""
     remote = sdlc_common.git(root, "remote", "get-url", "origin") or ""
     match = re.fullmatch(r"(?:git@([\w.-]+):|https://([\w.-]+)/)([\w.-]+/[\w.-]+?)(?:\.git)?/?", remote)
     if not match:
@@ -114,7 +111,11 @@ def feature_link(root, slug, base):
         if not (ssh_host == "github.com" or ssh_host.startswith("github.")):
             return path
         web_host = "github.com"
-    return "https://{}/{}/tree/{}/{}".format(web_host, repo, quote(base), path)
+    return "https://{}/{}/{}/{}/{}".format(web_host, repo, kind, quote(base), path)
+
+
+def feature_link(root, slug, base):
+    return github_link(root, "docs/features/{}".format(slug), base)
 
 
 def untrusted_block(card):
@@ -131,8 +132,10 @@ def untrusted_block(card):
     return "\n".join(lines)
 
 
-def start_from_card(root, card_ref, environ):
+def credentials(root, environ):
+    """(API key, token, board id) from the environment, then TRELLO_ENV_FILE; refused when one is missing."""
     env_file = environ.get("TRELLO_ENV_FILE") or "~/.config/trello/.env"
+    setting = sdlc_common.setting
     key, token = setting("TRELLO_API_KEY", env_file, environ), setting("TRELLO_TOKEN", env_file, environ)
     name = project_name(root)
     board = (name and setting("TRELLO_BOARD_ID_" + name, env_file, environ)) or setting(
@@ -140,6 +143,11 @@ def start_from_card(root, card_ref, environ):
     )
     if not (key and token and board):
         raise Refused("TRELLO_API_KEY, TRELLO_TOKEN and the board id must be set (environment or {})".format(env_file))
+    return key, token, board
+
+
+def start_from_card(root, card_ref, environ):
+    key, token, board = credentials(root, environ)
     lists = sdlc_common.board_lists(root)
     start_name = lists["in_progress"]
     past_ready = {lists[key].strip().lower() for key in sdlc_common.PAST_READY}

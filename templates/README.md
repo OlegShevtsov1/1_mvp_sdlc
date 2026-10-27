@@ -46,6 +46,8 @@ Rules:
 Deliberately not placeholders:
 
 - `PROD_VPN_IP`: a GitHub secret that `project-add` (S5) sets; never a file or a template value.
+- `RAG_MCP_URL`, `RAG_MCP_TOKEN`: repository secrets that `project-add` (S5) sets (the one shared mvp-rag server, not
+  per project); the committed `.claude/` setup reads them only as `${…}` through the mvp-sdlc plugin.
 - The ticket key: `<KEY>` is `PROJECT_NAME` from `config/project.env` in capitals (the Trello board name).
   `bin/pr-conventions-check` (be) and `scripts/pr-conventions.sh` (fe) derive it at run time; prose says `<KEY>-<n>`.
 - Telegram secret names: `TELEGRAM_DEV_ALERTS_*` and `TELEGRAM_PROD_ALERTS_*` with topics `DEV_ALERTS` and
@@ -75,9 +77,8 @@ agent. Dev hosts get their agent from `1_mvp_infra`, not from Kamal.
 ## New project board
 
 `bin/board-lists` prints the nine lists of a project's Trello board in order (decision 53). `bin/project-add`
-(planned, S5) creates the new project's board with exactly these lists, by calling `bin/board-lists`; until S5 the
-operator creates them by hand in that order. The names come from `BOARD_LISTS` in
-`plugins/mvp-sdlc/lib/sdlc_common.py`, the constant `feature-start` uses.
+creates the new project's board with exactly these lists, by calling `bin/board-lists`. The names come from
+`BOARD_LISTS` in `plugins/mvp-sdlc/lib/sdlc_common.py`, the constant `feature-start` uses.
 
 ## Checks
 

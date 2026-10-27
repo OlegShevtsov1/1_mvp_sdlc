@@ -80,6 +80,47 @@ RSpec.describe 'bin/tdd-check' do
     end
   end
 
+  it 'checks only the own commits of a branch that merged the base branch, whose new commit is not test(' do
+    git('branch', 'develop', @base)
+    git('switch', '-q', 'develop')
+    commit('APP-248: tracker (#80)', 'docs/tracker.md' => "done\n", 'spec/b_spec.rb' => "other\n")
+    git('switch', '-q', 'work')
+    git('merge', '-q', '--no-ff', '--no-edit', 'develop')
+    test_sha = commit('test(x): failing spec', 'spec/a_spec.rb' => "red\n")
+    commit('feat(x): make it pass', 'app/a.rb' => "green\n")
+
+    tdd_check('develop') do |output, status, github_output|
+      expect(status).to be_success, output
+      expect(github_output).to eq("test_sha=#{test_sha}\n")
+    end
+  end
+
+  it 'still fails condition 1 when the own first commit after merging the base branch is not test(' do
+    git('branch', 'develop', @base)
+    git('switch', '-q', 'develop')
+    commit('test(y): elsewhere', 'spec/b_spec.rb' => "red\n")
+    git('switch', '-q', 'work')
+    git('merge', '-q', '--no-ff', '--no-edit', 'develop')
+    commit('feat(x): code first', 'app/a.rb' => "green\n")
+    commit('test(x): spec later', 'spec/a_spec.rb' => "red\n")
+    commit('fix(x): follow-up', 'app/a.rb' => "green again\n")
+
+    tdd_check('develop') do |output, status|
+      expect(status.exitstatus).to eq(1)
+      expect(output).to include('::error::condition 1 failed', 'feat(x): code first')
+    end
+  end
+
+  it 'exits 2, naming the base, when the base does not resolve' do
+    commit('test(x): failing spec', 'spec/a_spec.rb' => "red\n")
+    commit('feat(x): make it pass', 'app/a.rb' => "green\n")
+
+    tdd_check('origin/develop') do |output, status|
+      expect(status.exitstatus).to eq(2)
+      expect(output).to include('origin/develop does not resolve')
+    end
+  end
+
   it 'fails condition 1 when the first commit is not test(' do
     commit('feat(x): code first', 'app/a.rb' => "green\n")
     commit('test(x): spec later', 'spec/a_spec.rb' => "red\n")
@@ -272,6 +313,14 @@ RSpec.describe '.github/workflows/tdd-check.yml' do
     expect(check.fetch('env').fetch('PR_BODY')).to eq('${{ github.event.pull_request.body }}')
     expect(check.fetch('run')).not_to include('github.event')
     expect(red.fetch('if')).to include("needs.order.outputs.test_sha != ''")
+  end
+
+  it 'compares against the live base branch, not the base sha GitHub recorded for the event' do
+    check = order.fetch('steps').find { |step| step['run'].to_s.include?('bin/tdd-check') }
+
+    expect(check.fetch('env').fetch('BASE_REF')).to eq('${{ github.event.pull_request.base.ref }}')
+    expect(check.fetch('env')).not_to have_key('BASE_SHA')
+    expect(check.fetch('run')).to eq('bin/tdd-check "origin/${BASE_REF}" "${HEAD_SHA}"')
   end
 
   it 'drops commits already on main and skips the release pull request develop into main' do

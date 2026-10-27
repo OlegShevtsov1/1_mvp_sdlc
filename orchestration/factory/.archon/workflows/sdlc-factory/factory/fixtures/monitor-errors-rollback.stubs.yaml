@@ -3,8 +3,9 @@
 # delivered and the not-delivered cancel node ends it.
 # gate-round executes for real (exec-code); write-profile and load-profile are
 # stubbed because the scratch worktree has no draft and no profile file.
-# Covers Archon v0.10.1 and v0.11.1: the stubs are the union of both versions'
-# archon-deliver inner nodes.
+# Stubs the inner nodes of Archon v0.12.1's archon-plan-block and
+# archon-deliver-block (inside the rounds loop a node id has no `deliver__`
+# prefix).
 profile-check: '{"exists":false}'
 intake:
   summary: "stub: python/fastapi detected; deploy via docker compose over ssh (assumed)"
@@ -28,69 +29,58 @@ load-profile: &profile
   window_minutes: 10
   secret_names: [SENTRY_AUTH_TOKEN]
   manual_merge_bases: ["main"]
+sync-base: { action: "kept", base: "origin/develop", before: "0000000", after: "0000000", reason: "stub: already at origin/develop" }
 
-# Plan loop, the bundled archon-deliver block and the merge. The deliver
-# include arrives with its own `with:` values, which the simulation does not
-# deliver to composed nodes, so every node inside it is stubbed.
 plan__plan:
   ready: true
+  open_questions: []
   summary: "stub: approach chosen and plan ready"
   report: { type: archon_artifact, run_id: "fixture-run", path: "plan.md" }
-plan__assert-intact: "ok"
-deliver__impl__record-start: '{"start":"recorded"}'
-deliver__impl__implement:
+# forge, not gh: the threads node (gh only) is skipped, so nothing reaches GitHub.
+deliver__forge: { source: forge }
+implement__implement:
   done: true
   green: true
   red_cause: ""
-  summary: "stub: implemented and green"
-deliver__impl__assert-changed: "2 files changed"
-deliver__gate-green: '{"gate":"green","red_cause":"","stage":"The implementation","summary":""}'
-deliver__pr__pr: { intent: "stub", repo: { host: "github.com", path: "example/repo" }, number: 3, url: "https://github.com/example/repo/pull/3", head: "fixture-branch", base: "main", is_draft: true }
-deliver__classify:
-  errors: false
-  docs: false
-  reasons: { errors: "stub", docs: "stub" }
-deliver__resolve-scope: '{"errors":"false"}'
-deliver__review__mode: '{"continuation":false}'
-deliver__review__scope: { docs: false, pr: { number: 3 } }
-deliver__review__code: "0 findings"
-deliver__review__seams: "0 findings"
-deliver__review__simplify: "0 findings"
-deliver__review__tests: "0 findings"
-deliver__review__review-complete: "settled"
-deliver__review__synthesize:
+  summary: "stub: implemented; focused checks pass"
+implement__assert-changed: "2 files changed"
+pr__forge: { source: forge }
+pr__prepare: { repo: { host: "github.com", path: "example/repo" }, head_repo: { host: "github.com", path: "example/repo" }, head: "fixture-branch", base: "develop", existing: null, title: "stub: title", body: { type: archon_artifact, run_id: "fixture-run", path: "pr-body.md" }, summary: "stub: target recorded" }
+pr__publish: { schemaVersion: 1, repo: { host: "github.com", path: "example/repo" }, number: 3, url: "https://github.com/example/repo/pull/3", head: "fixture-branch", base: "develop", is_draft: true, state: "open", head_repo: { host: "github.com", path: "example/repo" }, head_revision: "fixturehead", base_revision: "fixturebase", maintainer_can_modify: null }
+review__mode: '{"continuation":false,"light":false,"head":"fixturehead","cursor":"","risks":"fixture-owned-policy","execution":{"path":"review__mode","invocation":{"loopPath":[]}},"seams":false,"code":false,"tests":false,"errors":false,"docs":false,"part":null}'
+review__route: { seams: false, code: true, tests: true, errors: false, docs: false, reason: "stub" }
+review__scope:
+  head_matches: true
+  pr: { repo: { host: "github.com", path: "example/repo" }, number: 3 }
+  report: { type: archon_artifact, run_id: "fixture-run", path: "review/scope.md" }
+review__code: "0 findings"
+review__tests: "0 findings"
+review__prune-scratch: "prune-scratch: removed 0 scratch worktree(s)"
+review__synthesize:
   ready: true
   action: none
   findings_summary: "stub: no open findings"
   report: { type: archon_artifact, run_id: "fixture-run", path: "review/report.md" }
-deliver__gate-ready: '{"gate":"ready"}'
-deliver__validate__validate:
-  green: true
-  red_cause: ""
-  summary: "stub: project gate green"
-deliver__gate-validated: '{"gate":"green","red_cause":"","stage":"The project gate","summary":""}'
-ci-probe: '{"state":"concluded","detail":"all checks green"}'
-deliver__flip-ready: { pr_url: "https://github.com/example/repo/pull/3" }
-deliver__outcome: { pr_url: "https://github.com/example/repo/pull/3", summary: "https://github.com/example/repo/pull/3" }
-# Inner nodes that only Archon v0.11.1's archon-deliver reaches; v0.10.1 reports
-# them as unused stubs.
-deliver__pr__publish: { schemaVersion: 1, repo: { host: "github.com", path: "example/repo" }, number: 3, url: "https://github.com/example/repo/pull/3", head: "fixture-branch", base: "main", is_draft: true, state: open, head_repo: null, head_revision: null, base_revision: null, maintainer_can_modify: null }
-deliver__review__publish:
+  discoveries: []
+  contract_left: []
+review__publish:
   ready: true
   action: none
   findings_summary: "stub: no open findings"
   report: { type: archon_artifact, run_id: "fixture-run", path: "review/report.md" }
-deliver__validate__mode: '{"comparison":false}'
-deliver__validate__discover: { checks: [{ name: "tests", argv: ["true"] }], quarantine: [], notes: "stub" }
-deliver__validate__run: { status: green, summary: "stub: all green" }
-deliver__validate__result: { green: true, red_cause: "", summary: "stub: project gate green", evidence: null }
-deliver__ci-verdict: { state: concluded, detail: "all checks green" }
-deliver__ci-attention-route: { attention: false, red_cause: "" }
+  discoveries: []
+  contract_left: []
+simplify__simplify: { findings: false }
+simplify__prune-scratch: "prune-scratch: removed 0 scratch worktree(s)"
+ci: { state: green, rerun: none, summary: "stub: every check passed; marked ready" }
+deliver__update-pr-body: { changed: false, summary: "stub: the description is still accurate" }
+# pr-body-sync talks to GitHub, so it is stubbed like pr-state.
+pr-body-sync: { pr_url: "https://github.com/example/repo/pull/3", action: unchanged, source: "pr-body-final.md", reason: "stub: the live description matches" }
 # pr-state talks to GitHub, so it is stubbed; merge-gate executes for real
 # against it in the scratch worktree of HEAD, where the profile's test
 # command is `true`.
-pr-state: { pr_url: "https://github.com/example/repo/pull/3", read: true, head: "fixture-branch", base: "develop", state: "OPEN", is_draft: false, checkout_is_head: true, checkout_clean: true, checks: [{ name: "Tests", bucket: "pass" }], checks_read: true }
-merge: { merged: true, merge_sha: "abc1234", head: "fixture-branch" }
+pr-state: { pr_url: "https://github.com/example/repo/pull/3", read: true, head: "fixture-branch", base: "develop", state: "OPEN", mergeable: "MERGEABLE", is_draft: false, checkout_is_head: true, checkout_clean: true, checks: [{ name: "Tests", bucket: "pass" }], checks_read: true }
+merge: { merged: true, merge_sha: "abc1234", head: "fixture-branch", error: "" }
 
 # deploy/health/monitor-check/monitor/rollback are stubbed; decide-rollback and
 # report execute for real.
@@ -100,6 +90,8 @@ monitor-check: '{"enabled":true}'
 monitor: { status: errors, findings: "TypeError in /health handler (12 events, first seen 10:01Z)" }
 rollback: { rolled_back: true, exit_code: 0, log: "rollback.log" }
 
+plan-gate: { decision: approve, text: "" }
+profile-gate: { decision: approve, text: "" }
 exec-code: true
 fixture:
   expect: cancelled

@@ -3,7 +3,8 @@
 The `factory` is an Archon workflow that takes one task and carries it to production: it plans, writes the code,
 reviews it, merges the pull request, deploys to your server, checks health and monitoring, rolls back when something
 is red, and reports honestly. It stops for you twice: the project profile (first run in a repository only) and the
-plan. Everything after the plan is unattended.
+plan. Everything after the plan is unattended, except for a UI task: once its CI is green, it stops a third time so
+you can review its screenshots at the visual gate.
 
 This repository also carries `plan-review` (an interactive, round-by-round review of an existing plan document) and
 `plugin-probe` (checks which `sdlc:` skills an unattended run sees). The process around the factory — which tasks go
@@ -20,11 +21,11 @@ in, in which order, what the cards say — is in [docs/sdlc/00-operator.md](../.
 
 | Tool | Why |
 |---|---|
-| Archon CLI **v0.10.1** (the installed version) | runs the workflows. v0.11.1 is tested in CI on every change and is **not** installed: upgrading is a separate decision |
+| Archon CLI **v0.12.1**, plus `archon provider add claude` | runs the workflows; release binaries from v0.12.0 on ship without providers. CI tests exactly this version |
 | Bun ≥ 1.2.21 | the factory's scripts (`runtime: bun`; they parse YAML with `Bun.YAML.parse`) |
 | uv and Python ≥ 3.10, with `UV_PYTHON` set (for example `3.12`) | Archon's own bundled scripts (`runtime: uv`) |
 | `gh`, logged in as the repository owner (`OlegShevtsov1`) | pull requests, CI status, merge |
-| Claude Code, logged in | the agent inside the AI nodes |
+| Claude Code, logged in | the agent inside the AI nodes. Every run first checks the login with one minimal call (about $0.0001) and stops with a Telegram alert when it has expired |
 | The "Exception: unattended Archon workflow runs" section in the operator's `~/.claude/CLAUDE.md` | without it the agent stops and asks for permission to commit, push or open a pull request |
 
 ## 2. Install, update and roll back
@@ -94,6 +95,13 @@ Knobs (used by the CI check and the installer's tests; leave them unset on a rea
    never their values. A `~/.config/<project>.env` file (mode 600) loaded by the shell's startup file works well.
 5. **CI must be green on `main` before the first task.** The factory merges only green work; a check that is already
    red on `main` stops every run at the merge.
+6. Optional: `RAG_MCP_URL` and `RAG_MCP_TOKEN` in the Archon host's shell environment (the same mode-600 file
+   approach, for example `~/.config/mvp-rag/env`), so the plan stage reads the project knowledge server `mvp-rag`.
+   Without them every run still works, and `rag.log` and the plan say mvp-rag was unavailable.
+7. Optional: `TELEGRAM_MVP_VPN_ALERTS_BOT_TOKEN`, `TELEGRAM_MVP_VPN_ALERTS_CHAT_ID` and
+   `TELEGRAM_MVP_VPN_ALERTS_THREAD_ID` in the environment or in `~/.config/telegram-bots/.env` (mode 600, written by
+   `bin/project-add`), so a run whose Claude login has expired alerts the `MVP_VPN_ALERTS` topic. Without them the run
+   still stops, and `claude-auth.log` says the alert was skipped.
 
 The first run asks the profile questions and, after Gate 1, commits `.archon/factory-profile.yaml`. Later you can
 edit it as text; delete it to be asked again.
@@ -119,13 +127,23 @@ Rollback: switch to the previous release and restart compose.
 
 Too big: "build a shop website" is a dozen tasks. One task is one pull request.
 
+**A UI task** (PILOT-278, decisions 85 and 86). A task is visual when its text has the line `Layer: ui.`
+(`task-brief` prints it for a task whose `layer` in `tasks.json` is `ui`) or a line `Visual review: required`.
+A visual task must name its visual reference on a line `Visual reference: <URL or style>`. Give it as a `dod` item
+of the task in `tasks.json`, which `task-brief` prints as `- Visual reference: …`. Without it the run stops before
+the plan: `Stopped before the plan: … names no visual reference`. The factory adds the screenshot rules to the plan
+and delivery work orders. The build shoots every screen the task changes with the project's e2e tooling, in each
+variant: desktop and mobile, light and dark, with data and empty. It commits the files as
+`docs/screenshots/<card>/<screen>-<desktop|mobile>-<light|dark>-<data|empty>.png` (`<card>` is `PILOT-<n>`, or
+`no-card`) and embeds them in the PR description.
+
 **The task's Trello card.** When the task text names a card — its card link (the card's full URL), or the
 `PILOT-<n>: <card title>` line `task-brief` writes — the factory moves that card through the board
 ([Board flow](../../docs/sdlc/03-dor-dod.md#board-flow)). `PILOT-0` means "no card". The factory reads
 `TRELLO_API_KEY`, `TRELLO_TOKEN` and `TRELLO_BOARD_ID` at run time from `~/.config/trello/.env` on the Archon host;
 without that file, or when the card is not on that board, it only logs a warning and delivers as usual.
 
-## 6. Running and the two gates
+## 6. Running and the gates
 
 In the foreground (the task may also come from a file: `"$(cat task.md)"`):
 
@@ -158,7 +176,26 @@ does not declare red CI checks "out of scope": the factory could not merge then 
 for green CI. The same three answers.
 
 After the plan is approved the factory works alone: code → tests → draft PR → review (several lenses) → corrections
-→ re-review → validation → CI → the factory's own merge gate → merge → deploy → health → monitoring → report.
+→ re-review → validation → CI → (the visual gate, for a UI task) → the factory's own merge gate → merge → deploy →
+health → monitoring → report.
+
+**Visual gate — the screenshots** (UI tasks only, once the delivery is ready and CI is green). The message names the
+round (at most 4), the pull request and the visual reference. It says whether the round is ready to approve and
+lists the screenshot links at the PR head. The round is not ready when it has no screenshots under
+`docs/screenshots/<card>/`, or when a revision ended not ready. A variant that no file name shows, or a description
+that does not embed the folder, is only listed, and you judge it. The same three answers:
+
+- `approve` → the run goes on to the merge, deploy and checks as usual. Approving a round that is not ready stops
+  the run, with the PR left open.
+- `needs-revision "what to change"` → the same run delivers your words on the same pull request. It adds commits,
+  goes through review and CI again, and shoots new screenshots. Then the gate asks again. A `needs-revision` in
+  round 4 ends the run.
+- `abort` → the run stops; the pull request stays open.
+
+This gate replaces the manual visual check. You no longer need a side script that keeps a pending
+`operator/visual-review` commit status on the PR head, or hand-sent screenshots, or a continuation run started by
+hand. Do not keep `operator/visual-review` as a required check: a required status left pending makes GitHub refuse
+the merge, and the run ends `merge refused`.
 
 Useful while it runs:
 
@@ -176,18 +213,29 @@ archon workflow abandon <run-id>                  # close a stuck run
 |---|---|---|
 | `completed`, report `delivered: true` | merged to `main`, deployed, health 200, monitoring not red | nothing; `git pull` your checkout |
 | `completed`, report `status: delivered-pending-operator` | the PR's base is in the profile's `manual_merge_bases` (default `main`, decision 27). Every check was green, but the factory did **not** merge, deploy or check health; it commented `ready for the operator: …` on the PR | review and merge the PR yourself, then deploy as usual. If the summary says the notification could not be posted, the comment is missing but the PR is still waiting |
-| `cancelled`, summary `merge refused (…)` | the factory's merge gate found a red check, or the PR was not open and ready, or the checkout was not the PR head. The PR is open (on Archon v0.10.1 it may already be ready for review) and was **not** merged | fix the cause and start a new run, or close the PR. `resume` does not work for `cancelled` |
+| `cancelled`, summary `Stopped before any work: the Claude CLI login …` | the pre-flight `claude-auth` found the Claude CLI login of the Archon host expired or missing, sent one alert to `MVP_VPN_ALERTS`, and nothing else ran | run `claude /login` on the host, then start a new run |
+| `cancelled`, summary `Not delivered: the Claude CLI login on the Archon host has expired (node …)` | a later AI node failed with a provider auth error; `claude-auth-scan` found it in the run's transcript and sent the alert, once per run | run `claude /login` on the host, then start a new run. The PR, if any, is left open |
+| `cancelled`, summary `merge refused (…)` | the factory's merge gate found a red check, or the PR was not open and ready, or the checkout was not the PR head, or the PR conflicts with its base, or the factory could not republish the PR description, or `gh pr merge` refused it (gh's message is in the summary). The PR is open and was **not** merged | fix the cause and start a new run, or close the PR. `resume` does not work for `cancelled` |
 | `cancelled`, summary `… is merged, but its merge commit could not be read …` | the PR **is** merged; GitHub had not published the merge commit yet, so nothing was deployed | deploy the merge commit the way the profile's deploy command does, or start a new run once `gh pr view <url> --json mergeCommit` shows it |
+| `cancelled`, summary `stopped at the visual gate (…)` | you answered `abort` at the visual gate, approved a round that was not ready, or answered `needs-revision` in its last round; the PR is open and was **not** merged | start a new run on the same task to continue, or close the PR |
+| `cancelled`, reason `Stopped before the plan: … names no visual reference` | a UI task without a `Visual reference:` line | add the `dod` item, run `task-brief` again and start a new run |
+| `cancelled`, summary `the delivery ended not ready (<reason>)` | the bundled delivery stopped (`review_open`, `round_cap`, `replan`, `needs_human`, `ci_*`, `failed`) and nothing was merged; the rest of the summary is the delivery's own | read `review/report.md` in the run's artifacts, then fix the cause or start a new run |
 | `cancelled`, any other "Not delivered: …" | delivery stopped before a mergeable PR, or the deploy, health or monitoring was red (rolled back when needed) | fix the cause and start a new run |
-| `paused`, `archon workflow get` shows `Wait: until …` | the deliver block is waiting for the PR's CI. On Archon v0.10.1 the run's `wait-keeper` resumes it once that time has passed | nothing. If the Archon host rebooted (the keeper died with it), run `archon workflow resume <run-id>` after the `Wait: until` time, again each time it pauses, until the run moves on. `respond`/`approve` do not apply to a time wait |
 | `failed` | a node broke and the run ended without the report's verdict | `archon workflow get <run-id>` names the node; fix it; `archon workflow resume <run-id>` |
 
 Run artifacts: `~/.archon/workspaces/<owner>/<repo>/artifacts/runs/<run-id>/` — `report.json`, `plan.md`,
-`implementation.md`, `review/report.md`, `merge-gate.log`, `wait-keeper.log`, `trello.log`, `deploy.log`,
-`rollback.log`.
+`implementation.md`, `review/report.md`, `sync-base.log`, `rag-context.md`, `rag.log`, `merge-gate.log`,
+`trello.log`, `claude-auth.log`, `deploy.log`, `rollback.log`; for a UI task also `visual-gate.decision`, `visual-gate.text` and
+`visual-gate.decisions` (your answers) and `visual-shots.json` and `visual.log` (each round's screenshots and
+readiness). `report.json` also records `rag_status` and `rag_sources`: whether the
+plan stage got project knowledge from `mvp-rag` (`ok`, `unavailable`, `dry-run`, or `skipped` when the plan stage
+did not run, for example because `sync-base` could not fetch the base) and the sources it was given.
 
 Where the task's card ends: `Test` when delivered; `Review` with "waits for the operator merge" when the PR's base is
-merged by hand; `Blocked` after a failed rollback; `Ready`, with the reason as a comment, for every other stop.
+merged by hand; `Blocked` after a failed rollback; `Ready`, with the reason as a comment, for every other stop. A
+release run — its task names the card's release title `PILOT-<n>: Release X.Y.Z changelog` or
+`PILOT-<n>: Release vX.Y.Z` — keeps the release card in `In Progress` instead of `Review` and `Test` (decision 91).
+While a gate waits for you (gate 1, gate 2 or the visual gate) the card is in `Blocked`.
 `trello.log` has one line per move, with the warning when Trello could not be reached.
 
 ## 8. Troubleshooting
@@ -200,9 +248,6 @@ merged by hand; `Blocked` after a failed rollback; `Ready`, with the reason as a
   `gh repo set-default OlegShevtsov1/<repo>`.
 - **The run ends with `merge refused`**: read `merge-gate.log` in the run's artifacts. Often a check that is red on
   `main` too (lint, security audit): make CI green in a separate PR first.
-- **"Workflow paused — waiting for approval" with no gate, right after `[ci-probe] Completed`**: Archon v0.10.1's CLI
-  prints this for every pause, a durable time wait included, and `respond` then fails with "missing approval context".
-  The run is waiting for the PR's CI; see `paused` in section 7.
 - **The agent asks for permission to push or open a PR**: check the unattended-runs exception in
   `~/.claude/CLAUDE.md`.
 - **Health is always red**: request the health URL from the Archon host with `curl -i`; check the route to the
@@ -211,55 +256,98 @@ merged by hand; `Blocked` after a failed rollback; `Ready`, with the reason as a
   `git config --show-origin --get-regexp '^url\.'`.
 - **`archon validate` complains about `.archon/mcp/monitoring.json`**: create that file with `{}` in the checkout you
   validate from; runs are not affected.
+- **`provider reported auth` / `OAuth session expired and could not be refreshed`** in a node's error: the Claude CLI
+  login of the Archon host has expired. Run `claude /login` on the host and start a new run. `claude-auth.log` in the
+  run's artifacts says whether the Telegram alert was sent.
 - **`resume` refuses because of a digest**: never change anything inside `artifacts/runs/<id>/workflow-source/`.
 
 ## 9. Known Archon issues the factory handles
 
-- **Merge despite red validation (Archon v0.10.1).** In the bundled `archon-deliver`, a failed `gate-validated` only
-  skips `await-checks`; `flip-ready` still runs when the PR body was resynced after corrections, so the deliver block
-  resolves with a ready PR. The factory's nodes cannot depend on nodes inside the deliver block, so the factory has
-  its own merge guard. `pr-state` reads the PR, its CI checks and the checkout from GitHub and git; `merge-gate`
-  re-runs the profile's test and build commands on the exact PR head (verified against GitHub, with no uncommitted
-  changes) and `merge` runs only when it is green. The lint command runs too, unless the PR has a passing CI check
-  whose name contains the word lint (`Lint`, `Rails CI / Lint`; not `Actionlint` or `ESLint`): run in the run's
-  worktree, under a path that contains `.archon/`, RuboCop's excludes miss and it refused a PR whose CI Lint was green.
-  **`merge-gate` refuses any red command and any failed or cancelled CI check**, including red that the deliver block
-  would have accepted as `inherited` or `environment`; test and build run twice on the happy path. On v0.10.1 the PR
-  may still be flipped ready before the refusal; v0.11.1 blocks the flip itself.
-- **Durable CI wait never resumes (Archon v0.10.1 CLI).** While the PR's CI is still running, the bundled
-  `archon-deliver`'s `await-checks` suspends the run on a five-minute `wait:` (`ci-pause`). On v0.10.1 only the
-  `archon serve` continuation scan resumes such a wait; the CLI prints "Workflow paused — waiting for approval." and
-  exits, and `resume` before the deadline only pauses again. The factory's `wait-keeper` node, which runs right before
-  `deliver`, starts a detached keeper (`setsid`) that polls `archon workflow get <run-id> --json` once a minute and runs
-  `archon workflow resume` when the run is paused on a time wait that is due. It never touches an approval pause or
-  another run, logs to `wait-keeper.log`, and exits when the run ends (or after 12 h). It reports itself off on v0.11.1,
-  whose CLI resumes the wait at its deadline, and in dry runs.
-- **The deliver output changed shape in v0.11.1** (`{pr_url}` instead of the PR record). `pr-state` accepts both and
-  `merge-gate` hands `merge` and `report` the URL and head branch read from GitHub.
-- **Cascade skips in v0.11.1** would block a `none_failed_min_one_success` report after a failed delivery; `report`
-  runs on `all_done`, so a failed delivery still ends `cancelled` with a report on both versions.
+- **Run worktree cut from the default branch.** Archon cuts the run's worktree from `origin/HEAD`
+  (or a `--from` flag, or `worktree.baseBranch` in the repository's `.archon/config.yaml`) and never reads the profile,
+  so a repository whose `base_branch` is not its default branch started the run on stale code. The factory's
+  `sync-base` node, right after `load-profile` and before the plan, fetches `<remote>/<base_branch>` and hard-resets a
+  run branch that has no commits of its own. The profile and `.archon/mcp/monitoring.json` are carried over the reset
+  when the base does not track them yet, and so is the first run's profile commit. It leaves a published branch, a
+  checkout that is not a linked worktree, a dirty tree or a branch with work untouched and says why. It fails the run
+  when the base cannot be fetched or a git check it relies on fails, and logs every decision to `sync-base.log`.
+- **Interim review verdict (Archon < v0.12, PILOT-163).** The bundled review's structured verdict was taken from the
+  agent's first turn while background work still ran, so a `ready: false, action: none` interim verdict reached
+  `recheck-action` ("invalid review verdict") although `review/report.md` later said ready. Fixed upstream in v0.12.0
+  (an AI node finishes when its provider settles, #3530); the `review-interim-verdict` fixture guards the factory's
+  reaction should a not-ready verdict still arrive.
+- **A failed delivery still reports (v0.12).** `archon-deliver-block` completes its report after a failed inner node,
+  so `pr-state` runs only when that report says `ready`, and otherwise the run ends `cancelled` with the delivery's
+  reason and summary quoted.
+- **The factory's own merge guard.** The factory's nodes cannot depend on nodes inside the deliver block, and the
+  bundled delivery judges red with an agent. `pr-state` reads the PR, its CI checks and the checkout from GitHub and
+  git; `merge-gate` re-runs the profile's test and build commands on the exact PR head (verified against GitHub, with
+  no uncommitted changes) and `merge` runs only when it is green. The lint command runs too, unless the PR has a
+  passing CI check whose name contains the word lint (`Lint`, `Rails CI / Lint`; not `Actionlint` or `ESLint`): run in
+  the run's worktree, under a path that contains `.archon/`, RuboCop's excludes miss and it refused a PR whose CI Lint
+  was green. **`merge-gate` refuses any red command and any failed or cancelled CI check**, including red that the
+  deliver block would have accepted as `inherited` or `environment`; test and build run twice on the happy path.
+- **The visual gate's loop (v0.12.1, PILOT-278).** A wait node must be the last node of its loop, and nothing outside
+  a loop can read a node inside it. The `visual-cycle` loop therefore follows the PILOT-217 pattern of the other
+  gates: its `until_bash` saves each answer to `visual-gate.decision`, `visual-gate.text` and
+  `visual-gate.decisions`. The next round's `visual-turn` reads them, because `$LOOP_PREV` in a `when:` does not
+  parse on the first round. `visual-shots` saves the round's readiness to `visual-shots.json`, which `visual-round`
+  reads after the loop. A revision is a second include of the bundled `archon-deliver-block`, given the pull
+  request's number, so it continues the same PR; the block is composed, never forked.
+- **Stale pull-request description (v0.12.1, PILOT-219).** The bundled delivery publishes the PR description only
+  when it opens the pull request, so corrections later rounds write to the run's body files never reached the live
+  PR, and the squash commit carries the live description. `pr-body-sync`, after `deliver` and before `pr-state`,
+  takes the run's latest body and, when it differs from the live description, replaces it with `gh pr edit` and reads
+  it back. The latest body is this run's `pr-body.md`, unless the run opened the PR with it and no round rewrote it
+  since (it is not newer than the bundled `pr-create-started` marker); a run that continues an existing pull request
+  writes no marker, and the bundled publish never puts its `pr-body.md` on that PR. The bundled `update-pr-body`
+  node builds `pr-body-final.*` from the stale live description, so everything it added is dropped when
+  `pr-body.md` wins: its claim fixes, its "Left open" section and a closing keyword it set. The body's own "After
+  merge (operator)" section is what carries operator checks. Otherwise it is the newest of `pr-body-final.md`, the
+  `body` of `pr-body-final.json` and `pr-body.md`. It never blanks a description (no or an empty body file is
+  skipped), and it overwrites a live edit made after the bundled `update-pr-body` node ran. The Archon check fails when the pinned binary stops naming these files or the marker.
+  `merge-gate` refuses when the description could not be republished. Per-round reviews inside the deliver block
+  still read the live description; only a sentence in the deliver work order tells them not to block on a stale
+  one, which is not enforced.
 
 ## 10. Testing
 
 ```sh
 bash scripts/ci/check.sh factory   # the factory's bun unit tests
-bash scripts/ci/check.sh archon    # install + validate + fixtures + trace assertions + dry runs, on both versions
+bash scripts/ci/check.sh archon    # install + validate + fixtures + trace assertions + dry runs, on the pinned version
 ```
 
-`check.sh archon` downloads the pinned Archon v0.10.1 and v0.11.1 release binaries into `.tools/bin/` (gitignored,
-sha256-checked, pinned in `scripts/ci/tools.sh`) and never installs them. Every Archon call in the check uses a
-throwaway `ARCHON_HOME`, so it never reads or writes your live `~/.archon`. For each version it runs `install.sh`,
-`archon workflow test factory` (seven fixtures; each stubs the union of both versions' inner deliver nodes), asserts on
-each fixture's dry-run trace (`merge-gate` executes in every fixture and `pr-state` is stubbed, because
-`workflow test factory` also runs on an operator's host with a real `gh`; the red-validation fixture fails exactly at
-`deliver__gate-validated`, and on v0.10.1 `merge-gate` refuses on its own test run and `merge` is skipped; the
-environment-red fixture passes `deliver__gate-validated`, defers lint to the PR's passing `Lint` check and merges),
-runs the green fixture again with `pr-state`, `merge-gate` and `merge` executing for real against the engine's own
-deliver output (a fake `gh` answers for the PR, a local bare repository is `origin`) — once with a readable merge
-commit, once with one GitHub has not published yet, which must end `cancelled` with a report and no deploy — then
-really runs (not a dry run) a probe workflow that pauses once on a durable `wait:` the way `await-checks` does: it must
-complete, on v0.10.1 because `wait-keeper` resumed it (a `resume` line in `wait-keeper.log`), on v0.11.1 with the keeper
-off; on v0.10.1 the same probe without the keeper must still be `paused` 15 s later. Last, it dry-runs every
+`check.sh archon` downloads the pinned Archon v0.12.1 release binary into `.tools/bin/` (gitignored, sha256-checked,
+pinned in `scripts/ci/tools.sh`) and never installs it. Every Archon call in the check uses a throwaway
+`ARCHON_HOME`, so it never reads or writes your live `~/.archon`; the check first runs `archon provider add claude`
+in that home. It then runs `install.sh`, `archon workflow test factory` (fifteen fixtures; each stubs the inner nodes of
+`archon-plan-block` and `archon-deliver-block`), and asserts on each fixture's dry-run trace: `merge-gate` executes in
+every fixture and `pr-state` and `pr-body-sync` are stubbed or skipped, because `workflow test factory` also runs on an operator's host
+with a real `gh`; `sync-base` is stubbed in every fixture, because it fetches and resets the checkout; `rag-context`
+executes in every fixture as a dry run (no request) before the plan, and the report records `rag_status` `dry-run`;
+`claude-auth` (before `profile-check`) and `claude-auth-scan` (before the report) run as dry runs in every fixture,
+and the claude-login-expired fixture stops at `claude-auth-stop` before the profile;
+in the red fixture the delivery ends ready and `merge-gate` refuses on its own test run, so `merge` is skipped; the environment-red fixture is handed on to review and CI, defers lint to the PR's passing `Lint` check
+and merges; in the interim-verdict fixture the delivery ends `review_open`, `pr-state` and `merge-gate` are skipped,
+and the report quotes `review_open`; in the merge-refused-by-github fixture `merge` reports gh's refusal, `deploy` is
+skipped and the report carries gh's words; in the pr-body-sync-failed fixture `merge-gate` refuses the description
+that could not be republished. `visual-scope` executes in every fixture that is not visual, and the visual gate is
+skipped there. The three visual fixtures stub `visual-scope` visual, with its folder pointed at screenshots
+committed beside the fixtures. In the approved fixture `visual-shots` lists them as links at the head and the run
+merges. In the revised fixture a revision delivers on the same pull request before the gate, then approve merges.
+A dry run executes one loop iteration only, so that fixture stubs `visual-turn` as round 2 after a
+`needs-revision` answer. In the aborted fixture the run stops before the merge path with the operator's words. It
+runs the green fixture again with `pr-body-sync`, `pr-state`, `merge-gate` and `merge`
+executing for real against the engine's own deliver output (a fake `gh` answers for the PR, a local bare repository
+is `origin`) — once with a readable merge commit, where `pr-body-sync` replaces a stale description before `pr-state`, once with one GitHub has not published yet, which must end
+`cancelled` with a report and no deploy — and four more that must each end `cancelled` with a report: a failed edit of the description, which
+`merge-gate` refuses, `gh pr merge`
+refusing the merge, the pull request reading back not `MERGED` after the merge, and GitHub reporting the pull request
+as conflicting with its base (refused by `merge-gate` before any merge). Then it runs it with `sync-base` executing for
+real in a run worktree cut from `origin/main` of a scratch repository whose `develop` has diverged: the run branch must
+be at `develop` before the plan starts. It runs the green fixture once more with a UI task that names no visual
+reference: `visual-scope` executes, `abort-visual-scope` cancels the run, and neither the plan nor the delivery
+starts. Last, it dry-runs every
 `orchestration/workflows/*.yaml` with its stubs from `orchestration/tests/dry-run/<name>.stubs.yaml` — a new workflow
 without a stub file fails the check.
 
@@ -267,7 +355,14 @@ without a stub file fails the check.
 
 The `mvp-ops` pack (the `post-merge` workflow) is versioned in the private plan repository `1_mvp_prompt` under
 `orchestration/` and installed by that repository's own `install.sh`. It is not managed here, and this repository's
-installer never touches it.
+installer never touches it. The helper it calls after a merge is `bin/rag reindex` (or the installed
+`~/.archon/workflows/sdlc-factory/factory/scripts/rag-cli.ts` run with `bun`): it refreshes the `mvp-rag` index and
+only warns when the server is unavailable. The Claude login checks are the same kind of helper:
+`bun ~/.archon/workflows/sdlc-factory/factory/scripts/claude-auth.ts preflight post-merge` as its first node, and
+`… claude-auth.ts scan post-merge` in a final `all_done` node. Each prints one JSON line
+`{status, node, alert, message}` (`status` is `ok`, `auth_failed`, `unknown` or `dry-run`) and always exits 0; on
+`auth_failed` it has already alerted `MVP_VPN_ALERTS` once for the run (`ARTIFACTS_DIR` must end in the run id).
+Wiring them into `post-merge` is that repository's change.
 
 ## 12. From a Claude Code chat
 

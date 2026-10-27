@@ -200,6 +200,8 @@ grep -A1 -xF -- "--title" <<<"${args}" | grep -qxF "PILOT-0: Sync prod infra fro
 [ "$(grep '^Type: ' "${tmp}/gh/create-body")" = "Type: chore" ] ||
   fail "first sync" "PR body Type line: $(cat "${tmp}/gh/create-body")"
 grep -qF "Not auto-merged" "${tmp}/gh/create-body" || fail "first sync" "PR body lacks the no-auto-merge note"
+grep -qxF "## Changes since the last promotion" "${tmp}/gh/create-body" || fail "first sync" "PR body lacks the changes"
+grep -q '^First promotion: ' "${tmp}/gh/create-body" || fail "first sync" "PR body lacks the first-promotion line"
 if grep -v '^GH_TOKEN=test-token ' "${tmp}/gh/log" | grep -q .; then fail "first sync" "gh call without the token"; fi
 if grep -qE '^GH_TOKEN=[^ ]* auth' "${tmp}/gh/log"; then fail "first sync" "gh auth was called"; fi
 if grep -qi merge "${tmp}/gh/log"; then fail "first sync" "a merge call was made"; fi
@@ -251,15 +253,39 @@ echo "PASS nothing to sync"
 
 # --- next sync builds on the current env/prod
 primary_commit infra/projects/pilot-prod/outputs.tf 'output "x" { value = 1 }\n'
+g -C "${tmp}/primary" commit -q --allow-empty -m "PILOT-9: prod outputs (#7)"
 new_short=$(git -C "${tmp}/primary" rev-parse --short=7 env/dev)
 publish
 [ "${rc}" -eq 0 ] || fail "next sync" "exit ${rc}: ${err}"
+want="Merged into env/dev since the last promotion (${short}), up to ${new_short}:"$'\n\n'"- change infra/projects/pilot-prod/outputs.tf"$'\n'"- PILOT-9: prod outputs"
+got=$(sed -n '/^## Changes since the last promotion$/,/^Not auto-merged/p' "${tmp}/gh/create-body" | sed '1,2d;$d' | sed '$d')
+[ "${got}" = "${want}" ] || fail "next sync" "changes since the last promotion: '${got}', want '${want}'"
 [ "$(git -C "${tmp}/target.git" rev-parse "sync/prod-infra-${new_short}^")" = "${sync_sha}" ] ||
   fail "next sync" "parent is not the current env/prod"
 [ "$(target_sha env/prod)" = "${sync_sha}" ] || fail "next sync" "env/prod moved"
 git -C "${tmp}/target.git" ls-tree -r --name-only "sync/prod-infra-${new_short}" |
   grep -qxF infra/projects/pilot-prod/outputs.tf || fail "next sync" "new file missing"
 echo "PASS next sync builds on env/prod"
+
+# --- env/prod records a primary_sha the primary does not have: the PR still opens, the changes are not listed
+git clone -q -b env/prod "${tmp}/target.git" "${tmp}/edit"
+python3 - "${tmp}/edit/INFRA_PROD_SOURCE.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["primary_sha"] = "0123456789abcdef0123456789abcdef01234567"
+json.dump(d, open(sys.argv[1], "w"), indent=2)
+PY
+g -C "${tmp}/edit" commit -q -am "hand-edited marker"
+g -C "${tmp}/edit" push -q origin env/prod
+rm -rf "${tmp}/edit"
+g -C "${tmp}/primary" commit -q --allow-empty -m "PILOT-10: more (#8)"
+n=$(creates)
+publish
+[ "${rc}" -eq 0 ] || fail "unknown primary_sha" "exit ${rc}: ${err}"
+[ "$(creates)" -eq $((n + 1)) ] || fail "unknown primary_sha" "no PR created"
+grep -qxF "Not listed: env/prod records 0123456, which is not a commit of the primary." "${tmp}/gh/create-body" ||
+  fail "unknown primary_sha" "PR body: $(cat "${tmp}/gh/create-body")"
+echo "PASS an unknown primary_sha in env/prod leaves the changes unlisted"
 
 # --- explicit ref
 new_fixture
@@ -338,6 +364,8 @@ kept=$(sed -n 's/^dry run: not pushed; inspect //p' <<<"${err}")
 [ -d "${kept}" ] || fail "dry run" "kept directory not named: ${err}"
 [ "$(git -C "${kept}" ls-tree -r --name-only HEAD)" = "${expected_files}" ] || fail "dry run" "kept HEAD is not the commit"
 [ "$(git -C "${kept}" rev-parse HEAD^)" = "$(target_sha env/dev)" ] || fail "dry run" "not built on target env/dev"
+grep -qxF "publish-prod-infra: dry run: PR body:" <<<"${err}" || fail "dry run" "PR body not printed: ${err}"
+grep -qxF "## Changes since the last promotion" <<<"${err}" || fail "dry run" "PR body lacks the changes: ${err}"
 rm -rf "$(dirname "${kept}")"
 echo "PASS dry run"
 

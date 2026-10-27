@@ -41,11 +41,11 @@ This repository is the Claude Code plugin marketplace `mvp` (`.claude-plugin/mar
 - `plugins/sdlc/` is the course plugin, copied from upstream unchanged and never edited; source, version, tree sha256
   and the update procedure are in [plugins/sdlc/UPSTREAM.md](plugins/sdlc/UPSTREAM.md). Adaptations go to
   `plugins/mvp-sdlc/`.
-- `plugins/mvp-sdlc/` (0.1.1) holds the pilot's adaptations: `rails-data-model` (Rails/ActiveRecord instead of
+- `plugins/mvp-sdlc/` (0.4.0) holds the pilot's adaptations: `rails-data-model` (Rails/ActiveRecord instead of
   SQL-first), `feature-start` (a feature starts from a Trello card), `sync-spec` (backend → frontend spec copy),
-  `task-brief` (generated factory task texts), `bootstrap-project` (app-repo `.claude/` setup), and deterministic
-  guards: the phase gate `sdlc-gate`, `lint-prd`, script-only `state.json`, and hooks that protect `main`, secrets
-  and published tags. Details and the gate table: [plugins/mvp-sdlc/README.md](plugins/mvp-sdlc/README.md).
+  `task-cards` (one Trello card per task), `task-brief` (generated factory task texts), `bootstrap-project`
+  (app-repo `.claude/` setup), and deterministic guards: the phase gate `sdlc-gate`, `lint-prd`, script-only
+  `state.json`, and hooks that protect `main`, secrets and published tags. Details and the gate table: [plugins/mvp-sdlc/README.md](plugins/mvp-sdlc/README.md).
 - `plugins/contracts.yaml` is the agent tool contract; `scripts/lint_plugins.py` enforces it together with skill
   frontmatter, hook definitions, marketplace/manifest versions and the vendored tree sha256 (evals layer 0,
   blocking in CI).
@@ -79,16 +79,31 @@ bin/render-template <be|fe> <name> <dest>
 which fills in the project name and the values derived from it. Sources, placeholders, checks, the differences from
 the pilot workflows and the update procedure: [templates/README.md](templates/README.md).
 
+## New project
+
+```sh
+bin/project-add --dry-run <name>   # the plan; calls nothing
+bin/project-add <name>
+```
+
+turns a name into a working project: the `1_mvp_infra` registry entry and infrastructure, the backend and frontend
+repositories rendered from the templates with `main` and `develop`, their environments and secrets, Telegram topics,
+the Trello board, the Notion page and a report. It pauses where only the operator can act and continues from there
+on the next run: [docs/project-add.md](docs/project-add.md).
+
 ## Branches and releases
 
 - `develop` is the working branch: factory and task PRs merge there, and changes are tested from it (`install.sh`,
   `make eval`).
 - `main` is the released plugins and factory. It stays the default branch, which marketplace consumers read; install
   the factory from `main`.
-- A release is a PR `develop → main` that the operator merges with a merge commit, followed by an annotated tag
-  `vX.Y.Z` equal to the `mvp-sdlc` version in `plugins/mvp-sdlc/.claude-plugin/plugin.json`.
+- A release is a PR `develop → main`, titled `PILOT-<n>: Release vX.Y.Z` with the release's own card (decision
+  91), whose body carries `## Changelog` with the version's section of [CHANGELOG.md](CHANGELOG.md); the operator
+  merges it with a merge commit, followed by an annotated tag `vX.Y.Z` equal to the `mvp-sdlc` version in
+  `plugins/mvp-sdlc/.claude-plugin/plugin.json`.
 - Every change goes through a PR, no direct pushes (decision 54). `pr-conventions-check.yml` checks the branch name,
-  the `PILOT-<n>: …` title and the single `Type:` line of every PR into `develop` and `main`.
+  the `PILOT-<n>: …` title and the single `Type:` line of every PR into `develop` and `main`, and that a release PR
+  carries a non-empty changelog section for its version (decision 64).
 
 Details: [docs/sdlc/05-git-pr-review.md](docs/sdlc/05-git-pr-review.md).
 
@@ -103,7 +118,7 @@ bash scripts/ci/check.sh plugins    # plugin lint, evals layer 0, eval runner te
 bash scripts/ci/check.sh mvp_sdlc   # mvp-sdlc plugin tests: hooks, phase gate, scripts
 bash scripts/ci/check.sh docs       # SDLC docs: links, references that exist, English only
 bash scripts/ci/check.sh factory    # the factory's bun unit tests (bun >= 1.2.21)
-bash scripts/ci/check.sh archon     # install, validate, fixtures and dry runs on Archon v0.10.1 and v0.11.1 (bun, uv)
+bash scripts/ci/check.sh archon     # install, validate, fixtures and dry runs on Archon v0.12.1 (bun)
 ```
 
 `check.sh` runs locally exactly what CI runs. `scripts/ci/tools.sh` fetches the pinned actionlint and gitleaks
@@ -117,8 +132,8 @@ The hygiene check and gitleaks look at tracked files and committed history, so r
 `scripts/ci/hygiene-check.sh` is the public-repo rule shared with the app repositories. Tracked files must not
 contain: internal or private IP addresses, internal hostnames, AWS account IDs, Route53 hosted zone IDs,
 Trello or Notion links or IDs, Telegram links or chat IDs, or local home directory paths. It prints only `file:line`,
-never the matching text. Three exceptions: `scripts/ci/notify-telegram.sh` may name the Telegram Bot API host,
-`plugins/mvp-sdlc/bin/feature-start` may name the Trello API host, and the vendored
+never the matching text. Four exceptions: `scripts/ci/notify-telegram.sh` may name the Telegram Bot API host,
+`plugins/mvp-sdlc/bin/feature-start` may name the Trello API host, `bin/project-add` may name both, and the vendored
 `plugins/sdlc/skills/generate-data-model/SKILL.md` is exempt from the 12-digit rule only (a UUID example). The
 project templates have their own IPv4 rule: loopback, the bind-all address and the RFC 5737 documentation ranges are allowed
 there, and the backend `Gemfile`, `Gemfile.lock` and `config/brakeman.ignore` may carry four-part gem versions.

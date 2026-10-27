@@ -56,17 +56,17 @@ function run(repo: string, env: Record<string, string>): Result {
 }
 
 function prJson(head: string, extra: Record<string, unknown> = {}): string {
-  return JSON.stringify({ headRefOid: head, headRefName: "feature-x", isDraft: false, state: "OPEN", baseRefName: "develop", ...extra });
+  return JSON.stringify({ headRefOid: head, headRefName: "feature-x", isDraft: false, state: "OPEN", baseRefName: "develop", mergeable: "MERGEABLE", ...extra });
 }
 
 const DELIVERY = JSON.stringify({ pr_url: PR_URL });
 
 describe("pr-state", () => {
-  test("Archon v0.10.1 delivery (PR record with url) reads the PR and its checks", () => {
+  test("a delivery report ({ready, reason, pr_url}) reads the PR and its checks", () => {
     const { repo, head } = newRepo();
     const checks = [{ name: "Lint", bucket: "pass" }, { name: "Tests", bucket: "pending" }];
     const r = run(repo, {
-      INPUTS_DELIVERY: JSON.stringify({ url: PR_URL, head: "feature-x", number: 3 }),
+      INPUTS_DELIVERY: JSON.stringify({ ready: true, reason: "delivered", pr_url: PR_URL, ci_rerun: "none", threads_checked: true, summary: "x" }),
       FAKE_GH_JSON: prJson(head),
       FAKE_GH_CHECKS: JSON.stringify(checks),
     });
@@ -76,6 +76,7 @@ describe("pr-state", () => {
       head: "feature-x",
       base: "develop",
       state: "OPEN",
+      mergeable: "MERGEABLE",
       is_draft: false,
       checkout_is_head: true,
       checkout_clean: true,
@@ -83,19 +84,13 @@ describe("pr-state", () => {
       checks_read: true,
     });
     const args = readFileSync(join(r.bin, "gh.args"), "utf8");
-    expect(args).toContain(`pr view ${PR_URL} --json headRefOid,headRefName,isDraft,state,baseRefName`);
+    expect(args).toContain(`pr view ${PR_URL} --json headRefOid,headRefName,isDraft,state,baseRefName,mergeable`);
     expect(args).toContain(`pr checks ${PR_URL} --json name,bucket`);
-  });
-
-  test("Archon v0.11.1 delivery ({pr_url}) reads the PR", () => {
-    const { repo, head } = newRepo();
-    const r = run(repo, { INPUTS_DELIVERY: DELIVERY, FAKE_GH_JSON: prJson(head) });
-    expect(r.doc).toMatchObject({ pr_url: PR_URL, read: true, head: "feature-x", base: "develop" });
   });
 
   test("a delivery with no GitHub pull request URL never calls gh", () => {
     const { repo, head } = newRepo();
-    for (const delivery of ["{}", "not json", JSON.stringify({ url: "https://example.com/pull/3" }), JSON.stringify({ pr_url: `${PR_URL}; rm -rf /` })]) {
+    for (const delivery of ["{}", "not json", JSON.stringify({ url: PR_URL }), JSON.stringify({ pr_url: `${PR_URL}; rm -rf /` })]) {
       const r = run(repo, { INPUTS_DELIVERY: delivery, FAKE_GH_JSON: prJson(head) });
       expect(r.doc).toMatchObject({ pr_url: "", read: false, head: "" });
       expect(existsSync(join(r.bin, "gh.args"))).toBe(false);
@@ -105,7 +100,7 @@ describe("pr-state", () => {
   test("an unreadable pull request is reported unread", () => {
     const { repo, head } = newRepo();
     const r = run(repo, { INPUTS_DELIVERY: DELIVERY, FAKE_GH_JSON: prJson(head), FAKE_GH_EXIT: "1" });
-    expect(r.doc).toMatchObject({ pr_url: PR_URL, read: false, head: "", base: "" });
+    expect(r.doc).toMatchObject({ pr_url: PR_URL, read: false, head: "", base: "", mergeable: "" });
   });
 
   test("a pull request whose base branch is missing is reported unread", () => {
@@ -118,6 +113,12 @@ describe("pr-state", () => {
     const { repo, head } = newRepo();
     expect(run(repo, { INPUTS_DELIVERY: DELIVERY, FAKE_GH_JSON: prJson(head, { isDraft: true }) }).doc).toMatchObject({ read: true, is_draft: true });
     expect(run(repo, { INPUTS_DELIVERY: DELIVERY, FAKE_GH_JSON: prJson(head, { state: "MERGED" }) }).doc).toMatchObject({ read: true, state: "MERGED" });
+  });
+
+  test("mergeable is reported as GitHub states it, empty when missing", () => {
+    const { repo, head } = newRepo();
+    expect(run(repo, { INPUTS_DELIVERY: DELIVERY, FAKE_GH_JSON: prJson(head, { mergeable: "CONFLICTING" }) }).doc).toMatchObject({ read: true, mergeable: "CONFLICTING" });
+    expect(run(repo, { INPUTS_DELIVERY: DELIVERY, FAKE_GH_JSON: prJson(head, { mergeable: undefined }) }).doc).toMatchObject({ read: true, mergeable: "" });
   });
 
   test("a checkout that is not the PR head is reported", () => {

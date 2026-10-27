@@ -39,6 +39,8 @@ scripts and the workflows read it. The app answers on `https://{{PROJECT_ZONE}}`
 Names only; values never go into the repository.
 
 - Repository secrets: `AWS_ROLE_ARN`, `VPN_CI_OVPN`, `SRV_DEPLOY_SSH_KEY`, `ANTHROPIC_API_KEY` (AI review only).
+- Repository secrets set by `project-add` (S5): `RAG_MCP_URL`, `RAG_MCP_TOKEN` — the address and token of the
+  shared project knowledge server `mvp-rag` that the `mvp-sdlc` plugin connects to (decision 61 b).
 - Environment `dev`: `SECRET_KEY_BASE`, `POSTGRES_PASSWORD` (URL-safe, never changed after the first deploy),
   `SENTRY_DSN`, `SENTRY_ALLOWED_FE_DSN`, `SMOKE_TOKEN`, `TELEGRAM_DEV_ALERTS_BOT_TOKEN`,
   `TELEGRAM_DEV_ALERTS_CHAT_ID`, `TELEGRAM_DEV_ALERTS_THREAD_ID`.
@@ -60,9 +62,10 @@ Short version; the rules are in `CLAUDE.md` ("Conventions", "Hard Rules").
   one `Type:` line in the body. `<KEY>` is `PROJECT_NAME` from `config/project.env` in capitals.
 - Every commit on `develop` or `hotfix/*` that Rails Tests and Rails CI passed is deployed to dev by Dev Deploy.
 - Release: a release-prep PR moves `[Unreleased]` in `CHANGELOG.md` into `## [X.Y.Z] - YYYY-MM-DD`
-  (`scripts/next-version.sh`), the release PR `develop` → `main` is merged by hand with a merge commit, the operator
-  tags the commit dev tested with an annotated `vX.Y.Z`, `Release` drafts the GitHub Release, and prod is deployed
-  only from that tag:
+  (`scripts/next-version.sh`), the release PR `develop` → `main`, titled `<KEY>-<n>: Release vX.Y.Z`, whose body has
+  `## Changelog` with the version's CHANGELOG section (both PRs carry the release's own card, never `<KEY>-0`), is
+  merged by hand with a merge commit, the operator tags the commit dev tested with an annotated `vX.Y.Z`, `Release`
+  drafts the GitHub Release, and prod is deployed only from that tag:
   `gh workflow run "Kamal Deploy" --ref main -f environment=prod -f version=vX.Y.Z -f confirm=prod`.
   `release-watch` then watches `/health` and GlitchTip for 10 minutes; it never rolls back by itself.
 - Rollback: `gh workflow run "Kamal Manage" --ref main -f action=rollback -f confirm=ROLLBACK-prod`.

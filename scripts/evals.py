@@ -10,7 +10,8 @@ Usage:
 run: the GREEN arm evaluates a copy of the plugin; the RED arm evaluates, per case, a copy with
 evals/broken/<case>.patch applied. Raw CLI output stays in DIR (it holds local paths, never commit it).
 results: writes the verdict file (no paths, prompts or traces). A case is PASS when GREEN passed 3 of 3 runs and
-RED failed 3 of 3, every run without an error; a run with an error never counts as passed.
+RED failed 3 of 3, every run without an error; a run with an error never counts as passed, and in a case of
+TOOL_CALL_CASES neither does a run whose tool-call log shows no successful call of a mocked MCP tool.
 Exit codes: run 0 at least one invocation ran and every one produced a result (also when the budget stopped it
 early), 1 otherwise,
 2 usage or preflight error; results 0 PASS, 1 FAIL, 2 no run directory.
@@ -27,7 +28,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PLUGIN = REPO / "plugins" / "mvp-sdlc"
-ALLOW_TOOLS = ["Bash", "Write", "Edit"]
+ALLOW_TOOLS = ["Bash", "Write", "Edit", "mcp__plugin_mvp-sdlc_mvp-rag__search"]
+# Cases that assert a call of a mocked MCP tool (evals/mocks/), read from the CLI's per-run tool-call log.
+TOOL_CALL_CASES = {"task-brief-consults-rag"}
 REQUIRED = ["claude", "bwrap", "socat", "git"]
 SANDBOX_TOOLS = {"bwrap", "socat"}
 RUNS_PER_CASE = 3
@@ -183,11 +186,20 @@ def arm_cases(aggregate):
     return {case["name"]: case for case in (aggregate or {}).get("cases", [])}
 
 
+def called_a_mock(run):
+    calls = (run.get("mocks") or {}).get("calls") or {}
+    return (calls.get("total") or 0) >= 1 and (calls.get("errors") or 0) == 0
+
+
 def arm_summary(case):
     runs = ((case or {}).get("arms") or {}).get("with") or []
+    needs_call = (case or {}).get("name") in TOOL_CALL_CASES
     return {
         "runs": len(runs),
-        "passed": sum(1 for r in runs if r.get("passed") is True and r.get("error") is None),
+        "passed": sum(
+            1 for r in runs
+            if r.get("passed") is True and r.get("error") is None and (not needs_call or called_a_mock(r))
+        ),
         "errors": sum(1 for r in runs if r.get("error") is not None),
         "max_turns_used": max([r.get("turns") or 0 for r in runs] or [0]),
         "duration_seconds": round(sum(r.get("durationSeconds") or 0 for r in runs), 1),

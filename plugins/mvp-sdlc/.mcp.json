@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mvp-rag": {
+      "type": "http",
+      "url": "${RAG_MCP_URL}",
+      "headers": { "Authorization": "Bearer ${RAG_MCP_TOKEN}" }
+    }
+  }
+}

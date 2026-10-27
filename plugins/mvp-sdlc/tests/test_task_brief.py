@@ -1,11 +1,14 @@
 """bin/task-brief: the factory task text for one task, generated so gate 2 needs no operator edits."""
 import json
 import re
+import shutil
 
 from support import AppRepo, TempTestCase
 
 FEATURE = "docs/features/demo/"
 CARD_ID = "c0ffee" * 4
+TASK_CARD = "a1" * 12
+CARD_LINK = "trello" + ".com/c/"
 
 
 class TaskBriefTest(TempTestCase):
@@ -150,7 +153,7 @@ class TaskBriefTest(TempTestCase):
         result = self.brief()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("  PILOT-7: demo: From be\n", result.stdout)
-        self.assertIn("Trello card " + CARD_ID, result.stdout)
+        self.assertIn("Trello feature card " + CARD_ID, result.stdout)
 
     def test_brief_never_names_a_branch(self):
         self.assertNotIn("branch", self.brief().stdout.lower())
@@ -164,6 +167,12 @@ class TaskBriefTest(TempTestCase):
         self.assertRefused(self.brief("T3"), "split the task")
         self.edit_tasks(lambda tasks: tasks["T1"].update(estimate="12h"))
         self.assertRefused(self.brief("T1"), "split the task")
+
+    def test_one_day_task_is_briefed(self):
+        for estimate in ("L", "8h"):
+            self.edit_tasks(lambda tasks: tasks["T1"].update(estimate=estimate))
+            result = self.brief("T1")
+            self.assertEqual(result.returncode, 0, estimate + ": " + result.stderr)
 
     def test_unknown_task_is_refused(self):
         self.assertRefused(self.brief("T9"), "T9")
@@ -198,3 +207,113 @@ class TaskBriefTest(TempTestCase):
         result = self.brief()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.count("profile gate"), 3, result.stdout)
+
+    def title_lines(self, out):
+        return [line for line in out.splitlines() if re.match(r"^\s*PILOT-[1-9][0-9]{0,5}:", line)]
+
+    def test_task_card_titles_the_pull_request(self):
+        self.edit_tasks(lambda tasks: tasks["T1"].update(trello_card_id=TASK_CARD, trello_card_id_short=250))
+        result = self.brief()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.title_lines(result.stdout),
+                         ["  PILOT-250: Export a shop's orders for a period as a spreadsheet file"])
+        self.assertEqual(result.stderr, "")
+        self.assertIn("Trello feature card {} (from {}state.json)".format(CARD_ID, FEATURE), result.stdout)
+        self.assertNotIn(CARD_LINK, result.stdout)
+
+    def test_task_without_card_falls_back_to_the_feature_card_with_a_warning(self):
+        result = self.brief()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.title_lines(result.stdout), ["  PILOT-42: demo: Monthly order export"])
+        self.assertIn("warning", result.stderr)
+        self.assertIn("task-cards demo", result.stderr)
+        self.assertNotIn(CARD_LINK, result.stdout)
+
+    def test_task_card_needs_no_feature_card(self):
+        state = json.loads(self.repo.read(FEATURE + "state.json"))
+        for key in ("trello_card_id", "trello_card_id_short", "trello_card_title"):
+            state[key] = None
+        self.repo.write(FEATURE + "state.json", json.dumps(state))
+        self.edit_tasks(lambda tasks: tasks["T1"].update(trello_card_id=TASK_CARD, trello_card_id_short=250))
+        result = self.brief()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("  PILOT-250: ", result.stdout)
+        self.assertNotIn("Trello feature card", result.stdout)
+
+    def test_invalid_task_card_fields_are_refused(self):
+        for invalid in (
+            {"trello_card_id": TASK_CARD, "trello_card_id_short": 0},
+            {"trello_card_id": "a1", "trello_card_id_short": 250},
+            {"trello_card_id_short": 250},
+            {"trello_card_id": TASK_CARD},
+        ):
+            with self.subTest(invalid=invalid):
+                self.repo.git("checkout", "-q", "--", FEATURE)
+                self.edit_tasks(lambda tasks: tasks["T1"].update(invalid))
+                self.assertRefused(self.brief(), "T1", "task-cards")
+
+
+class TaskBriefFromBackendTest(TempTestCase):
+    """A frontend task is briefed in the frontend from the backend's committed tasks/ (sync-spec does not copy it)."""
+
+    def setUp(self):
+        super().setUp()
+        self.be = AppRepo(self.tmp, "feature-demo", name="be")
+        self.be.commit("feature")
+        self.be.push()
+        self.fe = AppRepo(self.tmp, "feature-demo", name="fe")
+        shutil.rmtree(str(self.fe.path / FEATURE / "tasks"))
+        self.fe.commit("feature without tasks")
+
+    def brief(self, task="T1", *options):
+        return self.fe.bin("task-brief", "demo", task, *options)
+
+    def assertRefused(self, result, *needles):
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for needle in needles:
+            self.assertIn(needle, result.stderr)
+
+    def test_frontend_brief_reads_the_backend_tasks(self):
+        self.assertRefused(self.brief(), "tasks.json not found", "--from")
+        result = self.brief("T1", "--from", self.be.path, "--ref", "origin/main")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Feature demo, task T1: Export a shop's orders", result.stdout)
+        self.assertIn("live in the backend repository", result.stdout)
+        self.assertNotIn("tracker.md", result.stdout)
+
+    def test_backend_tasks_are_read_at_the_ref_not_the_working_tree(self):
+        path = FEATURE + "tasks/tasks.json"
+        tasks = json.loads(self.be.read(path))
+        tasks["tasks"][0]["status"] = "done"
+        self.be.write(path, json.dumps(tasks))
+        self.assertEqual(self.brief("T2", "--from", self.be.path).returncode, 1)
+        self.be.commit("T1 done")
+        self.assertEqual(self.brief("T2", "--from", self.be.path).returncode, 1)
+        self.be.push()
+        result = self.brief("T2", "--from", self.be.path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_local_tasks_are_never_shadowed_by_the_backend(self):
+        shutil.copytree(str(self.be.path / FEATURE / "tasks"), str(self.fe.path / FEATURE / "tasks"))
+        self.assertRefused(self.brief("T1", "--from", self.be.path), "tasks/tasks.json exists here", "drop --from")
+        self.assertEqual(self.brief("T1").returncode, 0)
+
+    def test_default_ref_follows_the_profile_base_branch(self):
+        self.fe.replace(".archon/factory-profile.yaml", 'base_branch: "main"', 'base_branch: "develop"')
+        result = self.brief("T1", "--from", self.be.path)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("origin/develop does not resolve", result.stderr)
+        self.assertIn("fetch origin", result.stderr)
+
+    def test_bad_options_are_refused(self):
+        for options, needle in (
+            (["--from", self.tmp / "nowhere"], "not a git checkout"),
+            (["--from", self.be.path, "--ref", "origin/nosuch"], "does not resolve"),
+            (["--ref", "origin/main"], "usage"),
+            (["--from"], "usage"),
+            (["--into", self.be.path], "usage"),
+        ):
+            with self.subTest(options=options):
+                result = self.brief("T1", *options)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(needle, result.stderr)

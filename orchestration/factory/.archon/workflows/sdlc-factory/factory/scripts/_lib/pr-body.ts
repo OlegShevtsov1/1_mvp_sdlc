@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseJsonObject } from "./io.ts";
 
@@ -56,4 +56,19 @@ export function newestBody(dir: string): { source: string; body: string } | null
     if (newest === null || mtime > newest.mtime) newest = { source: name, body, mtime };
   }
   return newest && { source: newest.source, body: newest.body };
+}
+
+// Adds a section to the body newestBody picks, so pr-body-sync publishes it; the
+// file's name, or null when the run has no body file.
+export function appendToNewestBody(dir: string, section: string): string | null {
+  const newest = newestBody(dir);
+  if (newest === null) return null;
+  const path = join(dir, newest.source);
+  const body = `${normaliseBody(newest.body)}\n\n${section}`;
+  if (newest.source.endsWith(".json")) {
+    writeFileSync(path, JSON.stringify({ ...parseJsonObject(readFileSync(path, "utf8")), body }));
+  } else {
+    writeFileSync(path, body);
+  }
+  return newest.source;
 }

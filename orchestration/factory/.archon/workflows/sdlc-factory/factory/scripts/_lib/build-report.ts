@@ -8,13 +8,21 @@ export interface ReportInput {
   rollback: string; rolled_back: string; rollback_reason: string;
   merge_refused: string;
   merge_action: string; merge_base: string; notified: string; notify_reason: string;
+  // review-followup's report (PILOT-300), which passes the last delivery's
+  // through; deliver_* is last-delivery's own, read when review-followup was
+  // skipped because review-state or followup-judge failed.
   delivery_ready: string; delivery_reason: string; delivery_summary: string;
+  deliver_ready: string; deliver_reason: string; deliver_summary: string;
   // rag_sources is the rag-context node's sources as a raw JSON string.
   rag_status: string; rag_sources: string;
   // visual-round's verdict: "true", "false", or "skipped" when it did not run.
   visual_proceed: string; visual_stop: string; visual_pr_url: string;
+  // review-followup's cards as a raw JSON string (PILOT-300).
+  followups: string;
   // claude-auth-scan's verdict on the run's transcript and the node it names.
   claude_auth: string; claude_auth_node: string;
+  // last-delivery's note on the retry of a failed delivery, empty when the delivery was not retried.
+  retry_note: string;
 }
 
 export type ReportStatus = "delivered" | "delivered-pending-operator" | "not-delivered";
@@ -58,7 +66,42 @@ function pendingOperator(i: ReportInput): ReportDoc {
   };
 }
 
-export function buildReport(i: ReportInput): ReportDoc {
+const CARD_STATE: Record<string, string> = { "dry-run": "(dry run)", failed: "(not created)" };
+
+// Every follow-up card review-followup reported, whatever the run's outcome.
+function followUpSentence(raw: string): string {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    return "";
+  }
+  const cards = (Array.isArray(doc) ? doc : []).filter(
+    (c): c is { finding: string; url: string; status: string } =>
+      typeof c?.finding === "string" && typeof c?.url === "string" && typeof c?.status === "string",
+  );
+  if (cards.length === 0) return "";
+  return ` Follow-up cards: ${cards.map((c) => `${c.finding} → ${CARD_STATE[c.status] ?? c.url}`).join("; ")}.`;
+}
+
+function withDelivery(i: ReportInput): ReportInput {
+  if (i.delivery_ready !== "skipped" || i.deliver_ready === "skipped") return i;
+  return {
+    ...i,
+    delivery_ready: i.deliver_ready,
+    delivery_reason: i.deliver_reason,
+    delivery_summary: `${i.deliver_summary}\n\nNot followed up: review-state or followup-judge failed.`,
+  };
+}
+
+export function buildReport(input: ReportInput): ReportDoc {
+  const i = withDelivery(input);
+  const doc = outcome(i);
+  const retried = i.retry_note ? ` Retried the delivery once: ${i.retry_note}.` : "";
+  return { ...doc, summary: doc.summary + followUpSentence(i.followups) + retried };
+}
+
+function outcome(i: ReportInput): ReportDoc {
   const pr_url = i.pr_url || i.visual_pr_url;
   if (i.merge_action === "notify") return pendingOperator(i);
   const merged = i.merged === "true";

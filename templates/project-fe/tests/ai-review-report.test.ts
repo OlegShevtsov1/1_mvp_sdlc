@@ -1,156 +1,134 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { calls, fakeCommand, runScript, tempDir } from './support.ts'
 
 interface Finding {
   severity: string
-  file: string
-  line?: number
+  path: string
+  line: number
   title: string
-  detail: string
+  body: string
 }
 
 const marker = '<!-- ai-review -->'
 let bin: string
 let work: string
 
-function fakeGh(tail = '') {
-  fakeCommand(
-    bin,
-    'gh',
-    `case "$*" in
-  *--paginate*) if [ -f "${bin}/comments.json" ]; then cat "${bin}/comments.json"; else echo '[]'; fi ;;
-  *) cat > "${bin}/gh.input" ;;
-esac
-${tail}`,
-  )
-}
-
 function result(findings: Finding[] | unknown, summary = 'Looks fine overall.'): string {
   return JSON.stringify({ summary, findings })
 }
 
-function report(RESULT: string, env: Record<string, string> = {}) {
+function gate(RESULT: string) {
   return runScript(
     'scripts/ai-review-report.sh',
     [],
-    {
-      PATH: `${bin}:${process.env.PATH}`,
-      REPO: 'owner/repo',
-      PR_NUMBER: '7',
-      RUN_URL: 'https://example.test/run/1',
-      RESULT,
-      ...env,
-    },
+    { PATH: `${bin}:${process.env.PATH}`, RUN_URL: 'https://example.test/run/1', RESULT },
     work,
   )
 }
 
-function body(): string {
-  const input = JSON.parse(readFileSync(join(bin, 'gh.input'), 'utf8')) as { body: string }
-  return input.body
+function output(name: string): string {
+  return readFileSync(join(work, 'ai-review', name), 'utf8')
 }
 
 function counts(): unknown {
-  return JSON.parse(readFileSync(join(work, 'ai-review', 'result.json'), 'utf8'))
+  return JSON.parse(output('result.json'))
 }
 
-const p2 = (title: string): Finding => ({ severity: 'P2', file: 'src/App.tsx', line: 4, title, detail: 'Minor.' })
+const p2 = (title: string): Finding => ({ severity: 'P2', path: 'src/App.tsx', line: 4, title, body: 'Minor.' })
 
 beforeEach(() => {
   bin = tempDir('ai-review-bin-')
   work = tempDir('ai-review-work-')
-  fakeGh()
+  fakeCommand(bin, 'gh')
 })
 
 describe('scripts/ai-review-report.sh', () => {
-  it('passes with only P2 findings and records the counts', () => {
-    const run = report(result([p2('Name'), p2('Comment')]))
+  it('passes with only P2 findings and records the counts, the summary and the findings', () => {
+    const findings = [p2('Name'), p2('Comment')]
+    const run = gate(result(findings))
     expect(run.status, run.stdout + run.stderr).toBe(0)
     expect(counts()).toEqual({ p0: 0, p1: 0, p2: 2 })
-    expect(calls(bin, 'gh')).toContainEqual(expect.stringContaining('POST repos/owner/repo/issues/7/comments'))
-    expect(body().startsWith(marker)).toBe(true)
-    expect(body()).toContain('AI-REVIEW: P0=0 P1=0 P2=2')
+    expect(JSON.parse(output('findings.json'))).toEqual(findings)
+    expect(output('comment.md').startsWith(marker)).toBe(true)
+    expect(output('comment.md')).toContain('AI-REVIEW: P0=0 P1=0 P2=2')
+    expect(output('comment.md')).toContain('Looks fine overall.')
+    expect(output('comment.md')).not.toContain('- **P2**')
+    expect(calls(bin, 'gh')).toEqual([])
   })
 
-  it('fails on a P1 and names its file and line', () => {
-    const run = report(
-      result([{ severity: 'P1', file: 'scripts/x.js', line: 3, title: 'XSS', detail: 'innerHTML from the URL.' }]),
+  it('fails on a P1 and lists it in the log, with model text kept inert', () => {
+    const run = gate(
+      result([
+        { severity: 'P1', path: 'scripts/x.js', line: 3, title: 'XSS\nfrom the URL', body: 'innerHTML from the URL.\nEscape it.' },
+        p2('Rename'),
+      ]),
     )
     expect(run.status).toBe(1)
     expect(run.stdout).toContain('review required before merge')
-    expect(body()).toContain('scripts/x.js:3')
-    expect(counts()).toEqual({ p0: 0, p1: 1, p2: 0 })
+    // scripts/ai-review-submit.sh lists the findings, each once; the summary carries none of them.
+    expect(output('comment.md')).not.toContain('scripts/x.js:3')
+    expect(output('comment.md')).not.toContain('XSS')
+    expect(counts()).toEqual({ p0: 0, p1: 1, p2: 1 })
+
+    const lines = run.stdout.split('\n')
+    const listed = lines.indexOf('AI review P1 scripts/x.js:3 - XSS from the URL')
+    expect(listed).toBeGreaterThan(0)
+    expect(lines.slice(listed + 1, listed + 3)).toEqual(['  | innerHTML from the URL.', '  | Escape it.'])
+    expect(run.stdout).not.toContain('Rename')
+    const start = lines.findIndex((line) => line.startsWith('::stop-commands::'))
+    const token = lines[start]?.slice('::stop-commands::'.length) ?? ''
+    expect(token).not.toBe('')
+    expect(start).toBeLessThan(listed)
+    const end = lines.indexOf(`::${token}::`)
+    expect(end).toBeGreaterThan(listed + 2)
+    expect(end).toBeLessThan(lines.findIndex((line) => line.startsWith('::error::')))
   })
 
-  it('fails on a P0', () => {
-    const run = report(result([{ severity: 'P0', file: 'src/config.ts', title: 'Secret', detail: 'A key.' }]))
+  it('fails on a P0 and names a finding on no file line PR', () => {
+    const run = gate(result([{ severity: 'P0', path: '', line: 0, title: 'Secret in the body', body: 'A key.' }]))
     expect(run.status).toBe(1)
     expect(counts()).toEqual({ p0: 1, p1: 0, p2: 0 })
+    expect(run.stdout.split('\n')).toContain('AI review P0 PR - Secret in the body')
   })
 
-  it('updates its earlier comment instead of adding one', () => {
-    writeFileSync(
-      join(bin, 'comments.json'),
-      JSON.stringify([
-        { id: 41, user: { login: 'someone' }, body: `${marker}\nquoted` },
-        { id: 42, user: { login: 'github-actions[bot]' }, body: `${marker}\n### AI review` },
-        { id: 43, user: { login: 'github-actions[bot]' }, body: 'Another bot comment' },
-      ]),
-    )
-    const run = report(result([]))
-    expect(run.status, run.stdout + run.stderr).toBe(0)
-    const gh = calls(bin, 'gh')
-    expect(gh).toContainEqual(expect.stringContaining('PATCH repos/owner/repo/issues/comments/42'))
-    expect(gh.some((line) => line.includes('POST'))).toBe(false)
-  })
-
-  it('fails closed without a review summary', () => {
-    const run = report('')
+  it('fails closed without a review summary and leaves no stale output', () => {
+    mkdirSync(join(work, 'ai-review'))
+    for (const name of ['comment.md', 'result.json', 'findings.json']) writeFileSync(join(work, 'ai-review', name), '{}')
+    const run = gate('')
     expect(run.status).toBe(1)
     expect(run.stdout).toContain('no review summary')
-    expect(existsSync(join(work, 'ai-review', 'result.json'))).toBe(false)
-    expect(body()).toContain('AI-REVIEW: no summary')
+    for (const name of ['comment.md', 'result.json', 'findings.json'])
+      expect(existsSync(join(work, 'ai-review', name)), name).toBe(false)
   })
 
   it.each([
     ['findings that are not a list', JSON.stringify({ summary: 's', findings: 'x' })],
-    ['an unknown severity', result([{ severity: 'P5', file: 'a', title: 't', detail: 'd' }])],
+    ['an unknown severity', result([{ severity: 'P5', path: 'a', line: 1, title: 't', body: 'd' }])],
     ['text that is not JSON', 'not json'],
     ['a missing summary', JSON.stringify({ findings: [] })],
     ['a null summary', JSON.stringify({ summary: null, findings: [] })],
     ['an empty summary', result([], '')],
-    ['a finding without a title', JSON.stringify({ summary: 's', findings: [{ severity: 'P2', file: 'a', detail: 'd' }] })],
-    ['a finding without a detail', JSON.stringify({ summary: 's', findings: [{ severity: 'P2', file: 'a', title: 't' }] })],
+    ['a finding without a title', result([{ severity: 'P2', path: 'a', line: 1, body: 'd' }])],
+    ['a finding without a body', result([{ severity: 'P2', path: 'a', line: 1, title: 't' }])],
+    ['a finding without a path', result([{ severity: 'P2', line: 1, title: 't', body: 'd' }])],
+    ['a finding without a line', result([{ severity: 'P2', path: 'a', title: 't', body: 'd' }])],
+    ['a negative line', result([{ severity: 'P2', path: 'a', line: -1, title: 't', body: 'd' }])],
+    ['a fractional line', result([{ severity: 'P2', path: 'a', line: 1.5, title: 't', body: 'd' }])],
   ])('fails closed on %s', (_, value) => {
-    const run = report(value)
+    const run = gate(value)
     expect(run.status).toBe(1)
+    expect(run.stdout).toContain('no review summary')
     expect(existsSync(join(work, 'ai-review', 'result.json'))).toBe(false)
-    expect(body()).toContain('AI-REVIEW: no summary')
-  })
-
-  it('fails when the review cannot be posted', () => {
-    fakeGh('exit 1')
-    const run = report(result([]))
-    expect(run.status).not.toBe(0)
-    expect(run.stdout).toContain('could not post the review comment')
+    expect(existsSync(join(work, 'ai-review', 'findings.json'))).toBe(false)
   })
 
   it('treats the findings as data', () => {
     const touched = join(work, 'touched')
-    const run = report(result([p2(`\`touch ${touched}\` $(touch ${touched})`)], `$(touch ${touched})`))
+    const run = gate(result([p2(`\`touch ${touched}\` $(touch ${touched})`)], `$(touch ${touched})`))
     expect(run.status, run.stdout + run.stderr).toBe(0)
     expect(existsSync(touched)).toBe(false)
-    expect(body()).toContain(`$(touch ${touched})`)
-  })
-
-  it.each([
-    ['PR_NUMBER', '7; rm -rf /'],
-    ['REPO', 'owner/repo/../x'],
-  ])('rejects a malformed %s', (name, value) => {
-    const run = report(result([]), { [name]: value })
-    expect(run.status).toBe(2)
-    expect(calls(bin, 'gh')).toEqual([])
+    expect(output('comment.md')).toContain(`$(touch ${touched})`)
   })
 })

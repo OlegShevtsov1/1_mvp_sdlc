@@ -122,6 +122,7 @@ Every hunk must be one of the rows below; files not listed are identical.
 | be, fe | `pr-conventions-check.yml` | header comment says `<KEY>-<n>:` instead of `PILOT-<n>:` | the key comes from `config/project.env` |
 | be, fe | `ai-review.yml` | the "Conventions" item of the prompt says `<KEY>` and explains it | same |
 | be | `ai-review.yml` | taken from `04c85d79`, not the tag; the security item no longer names CanCanCan and the authentication hard rule | the AI review landed after the tag; the template has neither CanCanCan nor that rule |
+| be, fe | `ai-review.yml` | the review is posted as a GitHub pull request review with inline comments from the workflow's own scripts (`.ai-review-base`), and factory PRs are reviewed (PILOT-369, decision 103 a) | made the same way by each app repository's own PILOT-369 pull request after the source commits above; update the Sources table to those commits once both have merged |
 
 No actionlint fix was needed.
 

@@ -19,7 +19,8 @@ this repository ships both plugins (S2, S3). Not yet done: the brownfield start 
 - The agent writes the documents. You **tell the idea, answer questions and approve**.
 - Code is written by the Archon **factory**, test first (TDD): it opens the pull request, reviews it, merges it into
   `develop` (the app repositories' integration branch) and deploys to dev. You approve only the **task plan** before
-  it starts.
+  it starts. When you want to drive the code yourself, `/sdlc:implement-tasks` in a Claude session does it instead,
+  and you do the pull request, merge, deploy and card moves by hand (step 6).
 - **You** merge releases (`develop` → `main`) and hotfixes into `main`; **prod** gets a release only after your typed
   confirm word.
 
@@ -219,7 +220,19 @@ for each, no task over a day, CI green on `main`, and `task-brief` prints the te
 `Ready` on, the factory moves each task's card ([Board flow](03-dor-dod.md#board-flow)): you only read its comments;
 the feature card follows the feature's state and you move it.
 
-**Step 6. Code, through the factory.** For each task, in the repository that owns it:
+**Step 6. Code: the factory, or `implement-tasks` in a session.** Two supported ways, the same for backend and
+frontend tasks:
+
+- **The factory (the default).** One task per run, unattended after your plan approval: the three commits, review
+  by several lenses, CI, the squash merge into `develop`, the dev deploy and health check, and the card moves. Use
+  it unless you have a reason to drive the code yourself. Points 1–8 below.
+- **`/sdlc:implement-tasks <slug>` in a Claude session.** You watch and steer the code as it is written (a UI task
+  you want to look at while it takes shape, or the factory is unavailable). It reads `docs/features/<slug>/tasks/`
+  of the repository it runs in: in the backend its own `tasks/`, in the frontend the copy of the frontend's tasks
+  that `sync-spec` makes (section 4). You do by hand what the factory does for you; see "Without the factory" below.
+
+Never run both on one task. Whichever way: one task per pull request, and the task text from `task-brief` (point 2)
+must print without refusing first (the Definition of Ready).
 
 1. Order: backend tasks first. Start a frontend task only after the backend tasks it needs are merged and healthy
    on dev, and after `sync-spec <slug> --from <be checkout> --check` exits 0 in the frontend (section 4).
@@ -255,6 +268,27 @@ the feature card follows the feature's state and you move it.
    `archon workflow resume <run-id>` (continues from the completed nodes) or, if the task itself had to change,
    start a new run with the new `task-brief` text; the new run moves the card again. A run that ends
    `cancelled` with `merge refused` cannot be resumed — see [the factory guide](../../orchestration/docs/archon-factory.md).
+
+**Without the factory: `implement-tasks`.** For one task `T<n>`, in the repository that owns it:
+
+1. Points 1 and 2 above: the order, a fresh `sync-spec --check` in the frontend, and the task text from
+   `task-brief` (in the frontend with `--from <be checkout>`; `task-brief` refuses the frontend's copy of
+   `tasks.json` without it, because the backend owns the task status). Keep the text: you need its pull request
+   title and description lines.
+2. Move the task card to `In Progress` and cut a branch from `develop` named after the task card:
+   `git checkout -b feature/PILOT-<task card>-<slug> origin/develop`.
+3. `/clear`, then `/sdlc:implement-tasks <slug>` and say in the same message to implement only `T<n>`. It writes the
+   failing test first, makes it pass, refactors and commits with the `SDLC-Task:` and `SDLC-AC:` trailers. The
+   course skill also marks the task `done` in `tasks/tracker.md`: in the backend that row and `"status": "done"` in
+   `tasks/tasks.json` go into this pull request; in the frontend there is no tracker and the copy is read-only, so
+   the agent must not create or edit either (`sync-spec --check` fails on it).
+4. Open the pull request into `develop` with the title line and the `Type:`, `SDLC-Task:` and `SDLC-AC:` lines of
+   the task text; move the card to `Review`. CI and the AI review run as on any pull request; fix what they find on
+   the same branch.
+5. Merge it (squash), then deploy to dev and check health with the commands in sections B and C of the task text,
+   and move the card to `Test`. Tick `T<n>` on the feature card's checklist.
+6. A frontend task: mark `T<n>` done in the backend (`tasks/tracker.md` and `tasks/tasks.json`, a docs pull
+   request), then re-run `sync-spec` in the frontend so the copy shows it before the next task.
 
 Self-correction rule (RULE-LOOP): if review misses a serious (P0/P1) problem twice in a row, tasks labelled
 `migration`, `auth` or `security` switch to manual merge (R-C1) and their review to the large model (R-C12). You
@@ -325,12 +359,20 @@ contracts as the shared source (M6.6).
    "do not edit" and records the source commit and the card number in `docs/features/<slug>/.spec-source`. The
    command reads `origin/main` unless told otherwise; the feature documents of the app repositories are on `develop`,
    so pass `--ref origin/develop` (the command: `sync-spec <slug> --from <be checkout> --ref origin/develop`).
+   It also copies the frontend's own tasks into `tasks/`: `tasks.json` with only the tasks whose `"repo"` is this
+   repository (named after its `origin` remote; `--repo <name>` overrides), their task files `tasks/t<n>-*.md` and
+   the epic `tasks/_epic.md`. A dependency on a backend task moves from `"deps"` to `"external_deps"`.
+   `tasks/tracker.md` is never copied: the backend owns the status of every task.
 3. Commit the copy on a `feature/PILOT-<n>-<slug>-spec` branch and merge the docs PR into `develop` (title
-   `PILOT-<n>: <card title>`, body line `Type: docs`). `sync-spec` does not copy `tasks/`: frontend tasks listed in
-   the backend `tasks/tasks.json` are briefed in the frontend with `task-brief <slug> T<n> --from <be checkout>`.
-4. Never edit a copied file in the frontend: change the backend first, then sync again.
+   `PILOT-<n>: <card title>`, body line `Type: docs`).
+4. Never edit a copied file in the frontend: change the backend first, then sync again. That includes task status:
+   a frontend task is marked done in the backend, then synced.
 5. Before each frontend task and in its Definition of Done: `sync-spec <slug> --from <be checkout> --check` must exit
-   0. It runs only locally: frontend CI cannot read the private backend repository.
+   0. It also fails when a file under `tasks/` here is not a copy (a tracker written by an agent, say). It runs only
+   locally: frontend CI cannot read the private backend repository.
+6. Frontend tasks are implemented from this copy: by the factory with the text of
+   `task-brief <slug> T<n> --from <be checkout>` (always `--from`: the copy's status may lag the backend), or by
+   `/sdlc:implement-tasks <slug>` in a session (step 6).
 
 ## 5. Hotfix and rollback
 
@@ -386,9 +428,10 @@ Course basis: deterministic guards over instructions (M5.4), untrusted agent inp
 /mvp-sdlc:feature-start <card link>    every new feature (backend repository)
 /mvp-sdlc:sync-spec <slug>             frontend repository, when the backend documents changed
 /mvp-sdlc:task-cards <slug>            one Trello card per task, after break-tasks (backend repository)
-/mvp-sdlc:task-brief <slug> T<n>       the factory task text
+/mvp-sdlc:task-brief <slug> T<n>       the factory task text (frontend: --from <be checkout>)
 archon workflow run factory --cwd <repo> "<the task text>"
 archon workflow respond <run-id> approve
+/sdlc:implement-tasks <slug>           instead of the factory, one task per pull request (step 6)
 /sdlc:review-feature <slug>            when every task is done
 /sdlc:ship-feature <slug>              changelog entry and PR body for the release
 ```

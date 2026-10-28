@@ -1,11 +1,16 @@
 name: ai-review
 
-# AI review of pull requests (decision 32), switched by the repository variable AI_REVIEW: anything
-# but "on" ends green in seconds without starting the review. When on, Claude reviews the PR with
-# read-only tools and returns its findings as structured output; scripts/ai-review-report.sh posts
-# them as one PR comment, writes ai-review/result.json and fails on any P0 or P1. Factory branches
-# (the factory reviews its own PRs, R-C5), Dependabot, drafts and the release PR develop -> main are
-# skipped. A comment "@claude review" by a writer asks for a re-review.
+# AI review of pull requests (decisions 32, 103 a), switched by the repository variable AI_REVIEW:
+# anything but "on" ends green in seconds without starting the review. When on, Claude reviews the PR
+# with read-only tools and returns its findings as structured output; scripts/ai-review-report.sh writes
+# ai-review/result.json, lists every P0/P1 in the job log and fails on any P0 or P1 or a missing summary.
+# scripts/ai-review-submit.sh, run from this workflow's own revision because it holds a write token, then
+# posts one pull request review per head commit as github-actions[bot]: inline comments on the changed
+# lines, the other findings in the body, Request changes on P0/P1 and Comment otherwise; a later clean
+# review dismisses the earlier Request changes of this workflow (body starting <!-- ai-review -->), not
+# those of another github-actions[bot] review. Factory branches are reviewed too; Dependabot,
+# drafts and the release PR develop -> main are skipped. A comment "@claude review" by a writer asks for a
+# re-review, which posts nothing new on an unchanged head.
 on:
   pull_request:
     types: [opened, reopened, ready_for_review, synchronize, review_requested]
@@ -31,7 +36,6 @@ jobs:
       (github.event_name == 'pull_request'
       && !github.event.pull_request.draft
       && github.event.pull_request.user.login != 'dependabot[bot]'
-      && !startsWith(github.event.pull_request.head.ref, 'archon/task-factory-')
       && !(github.event.pull_request.head.ref == 'develop' && github.event.pull_request.base.ref == 'main'))
       || (github.event_name == 'issue_comment'
       && github.event.issue.pull_request
@@ -59,6 +63,17 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || format('refs/pull/{0}/head', github.event.issue.number) }}
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Collect the pull request
+        if: steps.switch.outputs.enabled == 'true'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rm -rf ai-review && mkdir ai-review
+          git rev-parse HEAD > ai-review/head_sha
+          gh pr diff "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" > ai-review/pr.diff
 
       - name: Review the pull request (read-only)
         id: review
@@ -101,22 +116,41 @@ jobs:
               without a test, a weakened test or check, a public-repo violation, a convention violation, a call outside the
               contract.
             - P2: worth improving; does not block.
-            Report each problem once, with the file path relative to the repository root and the line in the new version.
+            Report each problem once. Each finding has severity, path (relative to the repository root), line (the line
+            number in the PR head version of the file, on a line the PR changes whenever the finding is about changed
+            code), title (one line) and body (the problem and the fix). A finding not on a file line, such as one about the
+            PR title, body or branch, uses path "" and line 0.
             Do not report style preferences already enforced by ESLint or TypeScript. When there is nothing to report, return
             an empty findings list. Put a one-paragraph overall assessment in summary.
+            Do not post anything; the workflow posts the review.
           claude_args: |
             --model claude-sonnet-5
             --max-turns 20
             --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*)"
-            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch,Task"
-            --json-schema '{"type":"object","properties":{"summary":{"type":"string"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string","enum":["P0","P1","P2"]},"file":{"type":"string"},"line":{"type":"integer"},"title":{"type":"string"},"detail":{"type":"string"}},"required":["severity","file","title","detail"]}}},"required":["summary","findings"]}'
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch,Task,mcp__github_inline_comment__create_inline_comment"
+            --json-schema '{"type":"object","properties":{"summary":{"type":"string"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string","enum":["P0","P1","P2"]},"path":{"type":"string"},"line":{"type":"integer","minimum":0},"title":{"type":"string"},"body":{"type":"string"}},"required":["severity","path","line","title","body"]}}},"required":["summary","findings"]}'
 
-      - name: Post the review and fail on P0 or P1
+      - name: Block the merge on P0/P1 (decision 32)
         if: ${{ !cancelled() && steps.switch.outputs.enabled == 'true' }}
         env:
           RESULT: ${{ steps.review.outputs.structured_output }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          GH_TOKEN: ${{ github.token }}
         run: bash scripts/ai-review-report.sh
+
+      - name: Check out the workflow's own scripts
+        if: ${{ !cancelled() && steps.switch.outputs.enabled == 'true' && hashFiles('ai-review/findings.json') != '' }}
+        continue-on-error: true
+        uses: actions/checkout@v7
+        with:
+          path: .ai-review-base
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      # Only the gate decides the check; a review that cannot be posted leaves a warning.
+      - name: Post the AI review (decision 103 a)
+        if: ${{ !cancelled() && steps.switch.outputs.enabled == 'true' && hashFiles('ai-review/findings.json') != '' }}
+        continue-on-error: true
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash .ai-review-base/scripts/ai-review-submit.sh ai-review

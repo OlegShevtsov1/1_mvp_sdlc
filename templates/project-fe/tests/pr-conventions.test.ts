@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -131,6 +132,19 @@ describe('scripts/pr-conventions.sh', () => {
 
   it('accepts a body edited on the web with CRLF line ends', () => {
     const result = check({ PR_BODY: 'What\r\n\r\nType: fix\r\n' })
+    expect(result.status, result.stdout + result.stderr).toBe(0)
+  })
+
+  // grep -q may exit at its first match; under pipefail a body piped into it then dies of SIGPIPE.
+  it('accepts a valid Type line when grep -q stops reading at its first match', () => {
+    const grep = execFileSync('bash', ['-c', 'command -v grep'], { encoding: 'utf8' }).trim()
+    fakeCommand(
+      bin,
+      'grep',
+      `case " $* " in *" -q"*) while IFS= read -r line; do ${grep} "$@" <<<"$line" && exit 0; done; exit 1 ;; esac\nexec ${grep} "$@"`,
+    )
+    // More than the 64 KiB a pipe buffers, so the body cannot be written before grep exits.
+    const result = check({ PR_BODY: `Type: fix\n${'x'.repeat(99).concat('\n').repeat(700)}` })
     expect(result.status, result.stdout + result.stderr).toBe(0)
   })
 

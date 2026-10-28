@@ -13,9 +13,12 @@ const base = {
   rollback: "false", rolled_back: "skipped", rollback_reason: "", merge_refused: "",
   merge_action: "merge", merge_base: "develop", notified: "skipped", notify_reason: "",
   delivery_ready: "true", delivery_reason: "delivered", delivery_summary: "",
+  deliver_ready: "true", deliver_reason: "delivered", deliver_summary: "",
   rag_status: "ok", rag_sources: JSON.stringify([SOURCE]),
   visual_proceed: "skipped", visual_stop: "", visual_pr_url: "",
+  followups: "[]",
   claude_auth: "ok", claude_auth_node: "",
+  retry_note: "",
 };
 
 const notReady = {
@@ -61,8 +64,19 @@ describe("buildReport", () => {
     expect(r.summary).toContain("(no reason given)");
   });
   test("a skipped delivery changes no summary", () => {
-    const r = buildReport({ ...base, merged: "skipped", merge_sha: "", deployed: "skipped", healthy: "skipped", monitor_status: "skipped", pr_url: "", delivery_ready: "skipped", delivery_reason: "" });
+    const r = buildReport({ ...base, merged: "skipped", merge_sha: "", deployed: "skipped", healthy: "skipped", monitor_status: "skipped", pr_url: "", delivery_ready: "skipped", delivery_reason: "", deliver_ready: "skipped", deliver_reason: "" });
     expect(r.summary).toBe("Not delivered: PR (none) was not merged.");
+  });
+  test("a skipped review-followup falls back to the deliver block's own report", () => {
+    const summary = "Not ready: Round 3: replan. R6 re-raised.\nhttps://github.com/o/r/pull/7";
+    const r = buildReport({
+      ...notReady, delivery_ready: "skipped", delivery_reason: "", delivery_summary: "",
+      deliver_ready: "false", deliver_reason: "replan", deliver_summary: summary,
+    });
+    expect(r.status).toBe("not-delivered");
+    expect(r.summary).toBe(
+      `Not delivered: the delivery ended not ready (replan). ${summary}\n\nNot followed up: review-state or followup-judge failed.`,
+    );
   });
   test("a merge gh refused is not delivered and carries gh's words", () => {
     const r = buildReport({ ...base, merged: "false", merge_sha: "", deployed: "skipped", healthy: "skipped", monitor_status: "skipped", merge_refused: "merge: gh pr merge failed: X Pull request o/r#7 is not mergeable: the merge commit cannot be cleanly created." });
@@ -159,6 +173,20 @@ describe("buildReport", () => {
       expect(buildReport({ ...input, visual_proceed: "true" })).toEqual(skipped);
     }
   });
+  const RETRY_NOTE = "the first delivery ended failed (a node inside the bundled delivery broke; the run's record " +
+    "names it), so the factory ran one more delivery on the run's branch and https://github.com/o/r/pull/7, which ended ready";
+  test("a delivered retry says it retried and why", () => {
+    const r = buildReport({ ...base, retry_note: RETRY_NOTE });
+    expect(r.status).toBe("delivered");
+    expect(r.summary.startsWith("Delivered:")).toBe(true);
+    expect(r.summary.endsWith(` Retried the delivery once: ${RETRY_NOTE}.`)).toBe(true);
+  });
+  test("a retry that failed again is not delivered and says so", () => {
+    const note = RETRY_NOTE.replace("which ended ready", "which ended not ready (failed)");
+    const r = buildReport({ ...notReady, delivery_reason: "failed", delivery_summary: "", retry_note: note });
+    expect(r.status).toBe("not-delivered");
+    expect(r.summary).toBe(`Not delivered: the delivery ended not ready (failed). Retried the delivery once: ${note}.`);
+  });
   test("a run stopped by an expired Claude login says so first and names the fix", () => {
     const r = buildReport({ ...notReady, delivery_ready: "skipped", claude_auth: "auth_failed", claude_auth_node: "plan__plan" });
     expect(r.status).toBe("not-delivered");
@@ -184,6 +212,27 @@ describe("buildReport", () => {
   for (const raw of ["", "not json", "{}", JSON.stringify([{ repo: "r" }])]) {
     test(`unreadable rag_sources ${JSON.stringify(raw)} records none`, () => {
       expect(buildReport({ ...base, rag_sources: raw }).rag_sources).toEqual([]);
+    });
+  }
+  test("a follow-up delivery names its cards, created or dry run", () => {
+    const followups = JSON.stringify([
+      { finding: "R6", url: "https://example.test/c/x", status: "created" },
+      { finding: "R7", url: "", status: "dry-run" },
+    ]);
+    const r = buildReport({ ...base, followups });
+    expect(r.status).toBe("delivered");
+    expect(r.summary).toEndWith(" Follow-up cards: R6 → https://example.test/c/x; R7 → (dry run).");
+  });
+  test("a not-delivered run still names the follow-up cards it left", () => {
+    const followups = JSON.stringify([{ finding: "R6", url: "https://example.test/c/x", status: "created" }, { finding: "R7", url: "", status: "failed" }]);
+    const r = buildReport({ ...notReady, delivery_reason: "replan", followups });
+    expect(r.status).toBe("not-delivered");
+    expect(r.summary).toEndWith(" Follow-up cards: R6 → https://example.test/c/x; R7 → (not created).");
+  });
+  for (const raw of ["[]", "", "not json"]) {
+    test(`followups ${JSON.stringify(raw)} add nothing`, () => {
+      const without = buildReport(base);
+      expect(buildReport({ ...base, followups: raw })).toEqual(without);
     });
   }
 });

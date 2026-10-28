@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { appendToNewestBody } from "../.archon/workflows/sdlc-factory/factory/scripts/_lib/pr-body.ts";
 
 const PR_BODY_SYNC = join(import.meta.dir, "..", ".archon", "workflows", "sdlc-factory", "factory", "scripts", "pr-body-sync.ts");
 const PR_URL = "https://github.com/example/repo/pull/3";
@@ -172,5 +173,34 @@ describe("pr-body-sync", () => {
     const dir = artifacts([["pr-body-final.md", "corrected"]]);
     const r = run(dir, { FAKE_GH_LIVE: "stale" });
     expect(r.doc).toMatchObject({ action: "failed", reason: "the pull request description still differs from pr-body-final.md after the update" });
+  });
+});
+
+describe("appendToNewestBody", () => {
+  const section = "## Follow-up cards\n\n- R6: https://example.test/c/x — claim\n";
+
+  test("appends the section to the newest .md body", () => {
+    const dir = artifacts([["pr-body.md", "opening"], ["pr-create-started", ""], ["pr-body-final.md", "## Problem\nfinal\n"]]);
+    expect(appendToNewestBody(dir, section)).toBe("pr-body-final.md");
+    expect(readFileSync(join(dir, "pr-body-final.md"), "utf8")).toBe(`## Problem\nfinal\n\n${section}`);
+    expect(readFileSync(join(dir, "pr-body.md"), "utf8")).toBe("opening");
+  });
+
+  test("appends the section to the body of the newest .json and keeps its other fields", () => {
+    const json = JSON.stringify({ ref: { number: 3 }, body: "## Problem\nforge" });
+    const dir = artifacts([["pr-body.md", "opening"], ["pr-create-started", ""], ["pr-body-final.json", json]]);
+    expect(appendToNewestBody(dir, section)).toBe("pr-body-final.json");
+    expect(JSON.parse(readFileSync(join(dir, "pr-body-final.json"), "utf8"))).toEqual({ ref: { number: 3 }, body: `## Problem\nforge\n\n${section}` });
+  });
+
+  test("a pr-body.md written after pr-create-started takes the section, as pr-body-sync publishes it", () => {
+    const dir = artifacts([["pr-create-started", ""], ["pr-body-final.md", "final"], ["pr-body.md", "round 2"]]);
+    expect(appendToNewestBody(dir, section)).toBe("pr-body.md");
+    expect(readFileSync(join(dir, "pr-body.md"), "utf8")).toBe(`round 2\n\n${section}`);
+    expect(readFileSync(join(dir, "pr-body-final.md"), "utf8")).toBe("final");
+  });
+
+  test("no body file, nothing appended", () => {
+    expect(appendToNewestBody(artifacts([]), section)).toBeNull();
   });
 });

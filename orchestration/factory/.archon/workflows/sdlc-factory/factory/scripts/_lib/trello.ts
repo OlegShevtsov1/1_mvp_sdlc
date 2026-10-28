@@ -180,9 +180,11 @@ interface Card {
 export type Move = { target: ListKey; comment: string };
 export type ApplyResult = { status: "done" | "warning"; warning: string };
 
+type Call = (method: string, path: string, body?: unknown) => Promise<unknown>;
+
 // The key and token travel in a header only, never in a URL that an error message might repeat.
-export async function applyMove(fetchFn: typeof fetch, creds: Creds, lists: Lists, ref: CardRef, move: Move): Promise<ApplyResult> {
-  const call = async (method: string, path: string, body?: unknown): Promise<unknown> => {
+function caller(fetchFn: typeof fetch, creds: Creds): Call {
+  return async (method, path, body) => {
     const res = await fetchFn(API_BASE + path, {
       method,
       headers: {
@@ -195,6 +197,19 @@ export async function applyMove(fetchFn: typeof fetch, creds: Creds, lists: List
     if (!res.ok) throw new Error(`${method} ${path.split("?")[0]}: HTTP ${res.status}`);
     return res.json();
   };
+}
+
+async function boardList(call: Call, board: string, name: string): Promise<{ id: unknown } | { warning: string }> {
+  const boardLists = await call("GET", `/boards/${board}/lists?fields=name`);
+  const named = (Array.isArray(boardLists) ? boardLists : []).map(obj);
+  const list = named.find((l) => l.name === name);
+  return list === undefined
+    ? { warning: `list '${name}' not found on the board (lists: ${named.map((l) => String(l.name)).join(", ")})` }
+    : { id: list.id };
+}
+
+export async function applyMove(fetchFn: typeof fetch, creds: Creds, lists: Lists, ref: CardRef, move: Move): Promise<ApplyResult> {
+  const call = caller(fetchFn, creds);
   const board = encodeURIComponent(creds.board);
   try {
     let card: Card | undefined;
@@ -211,12 +226,10 @@ export async function applyMove(fetchFn: typeof fetch, creds: Creds, lists: List
     }
     if (card === undefined) return { status: "warning", warning: `card ${cardLabel(ref)} not found on the configured board` };
 
-    const boardLists = await call("GET", `/boards/${board}/lists?fields=name`);
-    const named = (Array.isArray(boardLists) ? boardLists : []).map(obj);
-    const list = named.find((l) => l.name === lists[move.target]);
+    const list = await boardList(call, board, lists[move.target]);
     let warning = "";
-    if (list === undefined) {
-      warning = `list '${lists[move.target]}' not found on the board (lists: ${named.map((l) => String(l.name)).join(", ")})`;
+    if ("warning" in list) {
+      warning = list.warning;
     } else if (card.idList !== list.id) {
       await call("PUT", `/cards/${card.id}`, { idList: list.id });
     }
@@ -224,6 +237,51 @@ export async function applyMove(fetchFn: typeof fetch, creds: Creds, lists: List
     return warning === "" ? { status: "done", warning: "" } : { status: "warning", warning };
   } catch (e) {
     return { status: "warning", warning: redact(e instanceof Error ? e.message : String(e), creds) };
+  }
+}
+
+// Board labels match by name case-insensitively, as bin/task-cards matches them.
+const FOLLOW_UP_LABEL = "task";
+
+export interface NewCard {
+  finding: string;
+  name: string;
+  desc: string;
+}
+
+export interface CardResult {
+  finding: string;
+  url: string;
+  status: "created" | "dry-run" | "failed";
+}
+
+// One card per finding in the Ready list with the task label. The list and label
+// are checked before the first card; the first failure stops the rest, and every
+// card not created is reported failed.
+export async function createFollowUpCards(
+  fetchFn: typeof fetch, creds: Creds, lists: Lists, cards: NewCard[],
+): Promise<{ cards: CardResult[]; warning: string }> {
+  const call = caller(fetchFn, creds);
+  const board = encodeURIComponent(creds.board);
+  const results: CardResult[] = [];
+  const finish = (warning: string) => ({
+    cards: [...results, ...cards.slice(results.length).map((c): CardResult => ({ finding: c.finding, url: "", status: "failed" }))],
+    warning,
+  });
+  try {
+    const list = await boardList(call, board, lists.ready);
+    if ("warning" in list) return finish(list.warning);
+    const labels = await call("GET", `/boards/${board}/labels?fields=name&limit=1000`);
+    const label = (Array.isArray(labels) ? labels : []).map(obj)
+      .find((l) => typeof l.name === "string" && l.name.toLowerCase() === FOLLOW_UP_LABEL);
+    if (label === undefined) return finish(`label '${FOLLOW_UP_LABEL}' not found on the board`);
+    for (const card of cards) {
+      const created = obj(await call("POST", "/cards", { idList: list.id, idLabels: [label.id], name: card.name, desc: card.desc }));
+      results.push({ finding: card.finding, url: String(created.shortUrl ?? created.url ?? ""), status: "created" });
+    }
+    return finish("");
+  } catch (e) {
+    return finish(redact(e instanceof Error ? e.message : String(e), creds));
   }
 }
 

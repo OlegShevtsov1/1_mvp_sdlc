@@ -24,8 +24,8 @@ retry because of it.
 ## Steps
 
 1. In the repository of the task, run `task-brief <slug> <task-id>`. Backend tasks: in the backend repository.
-   Frontend tasks live in the backend `tasks/tasks.json` too (`sync-spec` does not copy `tasks/`): in the frontend
-   repository, after `git -C <backend checkout> fetch origin`, run `task-brief <slug> <task-id> --from <backend
+   Frontend tasks live in the backend `tasks/tasks.json` too, which owns their status (the frontend's
+   `tasks/tasks.json` is only the `sync-spec` copy, refused without `--from`): in the frontend repository, after `git -C <backend checkout> fetch origin`, run `task-brief <slug> <task-id> --from <backend
    checkout>` (add `--ref <ref>` when the feature docs are not on `origin/<repo.base_branch>` of the factory profile).
 2. A non-zero exit is a Definition of Ready failure: show the message and fix the cause where it lives (finish
    the dependency, split the task in `break-tasks`, add the missing test level to the test plan, run

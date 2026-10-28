@@ -1,15 +1,17 @@
 # Task execution and TDD
 
-Phase 5 runs on the existing Archon factory, one task per run, not on the course `implement-tasks` (rewriting a
-working engine is not an adaptation). Course basis: Plan → Execute → Verify → Repeat (M7.1), TDD as execution
+Phase 5 runs on the existing Archon factory, one task per run (rewriting a working engine is not an adaptation).
+The course `implement-tasks` is the supported alternative when the operator drives a task in a Claude session; the
+operator then does the pull request, merge, dev deploy and card moves by hand ([00-operator.md](00-operator.md)
+step 6). In the frontend it works on the copy of the frontend's tasks that `sync-spec` makes. Course basis: Plan → Execute → Verify → Repeat (M7.1), TDD as execution
 discipline (M7.7), feedback loops (M7.6).
 
 ## The task text: `task-brief`
 
 The factory's gate 2 must be approvable without editing the task text, so the text is generated, not written.
 `task-brief <slug> <task-id>` (or `/mvp-sdlc:task-brief`), run in the repository of the task, prints it in the
-factory guide's form. A frontend task lives in the backend `tasks/tasks.json`, which `sync-spec` does not copy: in
-the frontend, add `--from <be checkout>` (it reads `tasks/` as committed at `origin/<repo.base_branch>`, or
+factory guide's form. A frontend task lives in the backend `tasks/tasks.json`, which owns its status (`sync-spec` copies
+only a read-only part of it): in the frontend, add `--from <be checkout>` (it reads `tasks/` as committed at `origin/<repo.base_branch>`, or
 `--ref <ref>`).
 
 - **A. What to do and how to tell it works**: the task title, layer and likely files; its acceptance criteria

@@ -8,8 +8,10 @@ instead of asking again (M6.1). The depth of each artifact grows with the featur
 - **Backend repository** owns every feature artifact: `docs/features/<slug>/` (R-B2).
 - **Frontend repository** holds a read-only copy of `PRD.md`, `sad.md`, `adr/`, `contracts/`, `CONTEXT.md` and
   `test-plan.md` (whichever exist, so an S feature without `sad.md` is fine), made by `sync-spec`, each file marked
-  "do not edit", with the source commit recorded in `docs/features/<slug>/.spec-source`. `tasks/` is not copied: frontend tasks in
-  the backend `tasks/tasks.json` are briefed in the frontend with `task-brief <slug> T<n> --from <be checkout>`.
+  "do not edit", with the source commit recorded in `docs/features/<slug>/.spec-source`. It also holds the frontend's
+  own tasks: `tasks/tasks.json` reduced to the tasks whose `"repo"` is the frontend, their task files and the epic,
+  never `tasks/tracker.md` (the backend owns task status). Frontend tasks are briefed with
+  `task-brief <slug> T<n> --from <be checkout>`, or implemented from the copy with `implement-tasks`.
 - **Repository level**: `docs/architecture-map.md` (from `map-architecture`, with the commit it reflects), the root
   `CONTEXT.md`, `CLAUDE.md`, `.claude/`, `CHANGELOG.md` (planned, C4 backend, C5 frontend).
 - All of it is English (R-C14, R-C8.5).

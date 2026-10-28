@@ -34,7 +34,8 @@ commits=$(git rev-list --reverse --no-merges "${base}..${head_sha}") || exit 2
 [ -n "${commits}" ] || { echo "tdd-check: no commits between ${base} and ${head_sha}" >&2; exit 2; }
 
 changed=$(git diff --name-only "${base}...${head_sha}") || exit 2
-if ! grep -E "${code_path}" <<<"${changed}" | grep -qvE "${test_path}"; then
+code_changed=$(grep -E "${code_path}" <<<"${changed}" | grep -vE "${test_path}")
+if [ -z "${code_changed}" ]; then
   echo "tdd-check: not applicable (no code under src/ bin/ deploy/ scripts/ docker/ changed)"
   exit 0
 fi

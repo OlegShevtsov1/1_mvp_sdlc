@@ -17,6 +17,13 @@
 # pass visual-round straight on; the three visual fixtures stub it visual and assert the visual gate's
 # path for approve, for a needs-revision round on the same pull request, and for abort; one more run
 # gives visual-scope a UI task with no visual reference and asserts the run stops before the plan.
+# review-state and followup-judge (PILOT-300) are stubbed or skipped in every fixture and review-followup
+# executes in every one; two fixtures assert a round-3 replan followed up with a dry-run card and one
+# the judge calls a new defect, and the unstubbed runs assert a ready delivery passes it untouched. Each
+# binary must still embed the bundled text review-followup reads (_lib/follow-up.ts BUNDLED_LITERALS).
+# A delivery that ends failed is delivered once more (PILOT-301): one fixture asserts a failed first
+# delivery the retry delivers and merges, one a review route with no structured output that fails both
+# deliveries and ends not delivered, and every other fixture asserts the retry was skipped.
 # Needs the binaries from `tools.sh archon` and bun on PATH.
 # Every Archon call runs with a throwaway ARCHON_HOME: without one a binary reads and writes the
 # operator's live ~/.archon.
@@ -46,6 +53,14 @@ pr_body_lib=orchestration/factory/.archon/workflows/sdlc-factory/factory/scripts
 visual_approved_fixture=visual-review-approved
 visual_revised_fixture=visual-review-revised
 visual_aborted_fixture=visual-review-aborted
+# The follow-up fixtures (PILOT-300): a round-3 replan re-raising R6 on a narrower case, followed up
+# and delivered; and the same delivery the judge calls a new defect, which ends not delivered.
+followup_fixture=review-followup-ready
+followup_new_fixture=review-followup-new-defect
+# The retry fixtures (PILOT-301): a failed delivery the retry delivers, and one that fails twice.
+retry_fixture=delivery-failed-then-delivered
+retry_twice_fixture=delivery-failed-twice
+follow_up_lib=orchestration/factory/.archon/workflows/sdlc-factory/factory/scripts/_lib/follow-up.ts
 # The green fixture the unstubbed merge runs start from.
 green_fixture=existing-profile
 
@@ -55,6 +70,11 @@ pr_body_literals_text=$(bun -e '
   console.log([...CANDIDATES.map((name) => `$ARTIFACTS_DIR/${name}`), `\x27${PR_CREATE_STARTED}\x27`].join("\n"));
 ' "${root}/${pr_body_lib}")
 mapfile -t pr_body_literals <<<"${pr_body_literals_text}"
+follow_up_literals_text=$(bun -e '
+  const { BUNDLED_LITERALS } = await import(process.argv[1]);
+  console.log(BUNDLED_LITERALS.join("\n"));
+' "${root}/${follow_up_lib}")
+mapfile -t follow_up_literals <<<"${follow_up_literals_text}"
 
 work=$(mktemp -d)
 trap 'rm -rf "${work}"' EXIT
@@ -103,7 +123,8 @@ check_trello_moves() {
     ;;
   esac
   case "${name}" in
-  existing-profile | fresh-profile | "${env_fixture}" | "${visual_approved_fixture}" | "${visual_revised_fixture}") final=Test ;;
+  existing-profile | fresh-profile | "${env_fixture}" | "${visual_approved_fixture}" | "${visual_revised_fixture}" | \
+    "${followup_fixture}" | "${retry_fixture}") final=Test ;;
   "${manual_fixture}") final=Review ;;
   esac
   expect_move "${version}" "${name}" "${trace}" trello-done "${final}"
@@ -196,13 +217,63 @@ check_visual_trace() {
   fi
 }
 
+check_retry_trace() {
+  local version=$1 name=$2 trace=$3 out node at previous=0 want
+  out=$(node_output "${trace}" last-delivery)
+  case "${name}" in
+  "${retry_fixture}")
+    grep -qF '"ready":true' <<<"$(node_output "${trace}" redeliver__report)" &&
+      grep -qF '"pr_url":"https://github.com/example/repo/pull/3"' <<<"$(node_output "${trace}" redeliver__report)" ||
+      fail "${version} ${name}" "the retry must deliver on the run's pull request: $(node_output "${trace}" redeliver__report)"
+    [ "$(grep -cE '^[A-Z]+ +implement__implement \(' "${trace}")" -eq 2 ] ||
+      fail "${version} ${name}" "the retry must run its own implement round"
+    for node in deliver__report redeliver__report last-delivery review-followup; do
+      at=$(line_of "${trace}" "${node}")
+      [ -n "${at}" ] && [ "${previous}" -lt "${at}" ] || fail "${version} ${name}" "${node} is out of order around the retry"
+      previous=${at}
+    done
+    grep -qF '"ready":true' <<<"${out}" && grep -qE '"retry_note":"[^"]+' <<<"${out}" ||
+      fail "${version} ${name}" "last-delivery must hand on the retry's ready report with a note: ${out:-none}"
+    for want in 'STUBBED +merge' 'SKIPPED +not-delivered'; do
+      grep -qE "^${want} \\(" "${trace}" || fail "${version} ${name}" "trace lacks ${want}"
+    done
+    grep -qF 'Retried the delivery once: the first delivery ended failed' <<<"$(node_output "${trace}" report)" ||
+      fail "${version} ${name}" "the report does not say it retried and why: $(node_output "${trace}" report)"
+    ;;
+  "${retry_twice_fixture}")
+    [ "$(grep -cE '^FAILED +review__route \(' "${trace}")" -eq 2 ] ||
+      fail "${version} ${name}" "the review route must fail in both deliveries"
+    for node in deliver__report redeliver__report; do
+      grep -qF '"reason":"failed"' <<<"$(node_output "${trace}" "${node}")" ||
+        fail "${version} ${name}" "${node} must end failed: $(node_output "${trace}" "${node}")"
+    done
+    [ "$(grep -cE '^[A-Z]+ +(deliver|redeliver)__report \(' "${trace}")" -eq 2 ] ||
+      fail "${version} ${name}" "exactly two deliveries may run"
+    grep -qF '"reason":"failed"' <<<"${out}" || fail "${version} ${name}" "last-delivery must hand on the failed retry: ${out:-none}"
+    for want in 'SKIPPED +pr-state' 'SKIPPED +merge-gate' 'SKIPPED +merge' 'COMPLETED +not-delivered'; do
+      grep -qE "^${want}( |\$)" "${trace}" || fail "${version} ${name}" "trace lacks ${want}"
+    done
+    grep -qF 'the delivery ended not ready (failed)' "${trace}" && grep -qF 'Retried the delivery once:' "${trace}" ||
+      fail "${version} ${name}" "the report does not say both deliveries failed"
+    ;;
+  *)
+    # Every other reason (delivered, review_open, replan) skips the retry.
+    expect_skipped "${version}" "${name}" "${trace}" redeliver__forge
+    ! grep -qE '^(COMPLETED|STUBBED|FAILED) +redeliver__' "${trace}" ||
+      fail "${version} ${name}" "a delivery that did not fail was retried: $(grep -E '^[A-Z]+ +redeliver__' "${trace}")"
+    grep -qF '"retry_note":""' <<<"${out}" || fail "${version} ${name}" "last-delivery must pass the delivery through: ${out:-none}"
+    ;;
+  esac
+}
+
 check_fixture_trace() {
   local version=$1 name=$2 trace=$3
-  local gate_lines state_lines body_lines notify_lines sync_lines rag_line plan_line
+  local gate_lines state_lines body_lines notify_lines sync_lines rag_line plan_line node lines out allowed
   check_claude_auth "${version}" "${name}" "${trace}"
   [ "${name}" != "${auth_fixture}" ] || return 0
   check_trello_moves "${version}" "${name}" "${trace}"
   check_visual_trace "${version}" "${name}" "${trace}"
+  check_retry_trace "${version}" "${name}" "${trace}"
   # rag-context executes in every fixture, as a dry run (no request), before the plan reads its file.
   rag_line=$(grep -nE '^COMPLETED +rag-context \(' "${trace}" | cut -d: -f1 || true)
   [ -n "${rag_line}" ] || fail "${version} ${name}" "rag-context must execute, never be stubbed: $(grep -E '^[A-Z]+ +rag-context' "${trace}" || true)"
@@ -227,6 +298,43 @@ check_fixture_trace() {
   [ -n "${body_lines}" ] || fail "${version} ${name}" "no pr-body-sync line in the trace"
   ! grep -vE '^(STUBBED|SKIPPED) ' <<<"${body_lines}" >/dev/null ||
     fail "${version} ${name}" "pr-body-sync must be stubbed or skipped in a test: ${body_lines}"
+  # review-state reads GitHub and followup-judge is an agent; a fixture must never reach either.
+  for node in review-state followup-judge; do
+    lines=$(grep -E "^[A-Z]+ +${node} \\(" "${trace}" || true)
+    [ -n "${lines}" ] || fail "${version} ${name}" "no ${node} line in the trace"
+    ! grep -vE '^(STUBBED|SKIPPED) ' <<<"${lines}" >/dev/null ||
+      fail "${version} ${name}" "${node} must be stubbed or skipped in a test: ${lines}"
+  done
+  # review-followup executes in every fixture and follows up only in the follow-up fixture.
+  out=$(node_output "${trace}" review-followup)
+  case "${name}" in
+  "${followup_fixture}")
+    grep -qF '"ready":true' <<<"${out}" && grep -qF '"reason":"follow_up"' <<<"${out}" &&
+      grep -qF '"cards":[{"finding":"R6","url":"","status":"dry-run"}]' <<<"${out}" ||
+      fail "${version} ${name}" "review-followup must follow R6 up with a dry-run card: ${out:-none}"
+    for want in 'COMPLETED +visual-round' 'STUBBED +pr-state' 'COMPLETED +merge-gate' 'STUBBED +merge' 'COMPLETED +report' \
+      'SKIPPED +not-delivered'; do
+      grep -qE "^${want} \\(" "${trace}" || fail "${version} ${name}" "trace lacks ${want}"
+    done
+    grep -qF 'Follow-up cards: R6 → (dry run).' <<<"$(node_output "${trace}" report)" ||
+      fail "${version} ${name}" "the report does not name the follow-up card: $(node_output "${trace}" report)"
+    ;;
+  "${followup_new_fixture}")
+    grep -qF '"ready":false' <<<"${out}" && grep -qF '"reason":"replan"' <<<"${out}" && grep -qF '"cards":[]' <<<"${out}" ||
+      fail "${version} ${name}" "review-followup must pass the replan through not ready: ${out:-none}"
+    for want in 'SKIPPED +pr-state' 'SKIPPED +merge-gate' 'SKIPPED +merge' 'COMPLETED +not-delivered'; do
+      grep -qE "^${want}( |\$)" "${trace}" || fail "${version} ${name}" "trace lacks ${want}"
+    done
+    grep -qF 'the delivery ended not ready (replan). Not ready: Round 3: replan.' "${trace}" &&
+      grep -qF 'Not followed up: the judge found R6 new, not a narrower case of an earlier finding.' "${trace}" ||
+      fail "${version} ${name}" "the report does not quote the replan and why it was not followed up"
+    ;;
+  *)
+    [ -n "${out}" ] && grep -qF '"followed_up":false' <<<"${out}" && grep -qF '"cards":[]' <<<"${out}" &&
+      ! grep -qF 'Not followed up' <<<"${out}" ||
+      fail "${version} ${name}" "review-followup must execute and pass the delivery through: ${out:-none}"
+    ;;
+  esac
   # sync-base fetches and hard-resets the checkout; a fixture must never reach it.
   sync_lines=$(grep -E '^[A-Z]+ +sync-base \(' "${trace}" || true)
   [ -n "${sync_lines}" ] || fail "${version} ${name}" "no sync-base line in the trace"
@@ -256,7 +364,11 @@ check_fixture_trace() {
       fail "${version} ${name}" "merge-gate did not lead to the merge: ${gate_lines}"
     grep -qE '^SKIPPED +not-delivered' "${trace}" || fail "${version} ${name}" "the run was not delivered"
   fi
-  ! grep -q '^FAILED' "${trace}" || fail "${version} ${name}" "unexpected failure: $(grep '^FAILED' "${trace}")"
+  # The failed-twice fixture's route defect fails the route, what reads it, and both rounds loops.
+  allowed='^$'
+  [ "${name}" != "${retry_twice_fixture}" ] || allowed='^FAILED +(review__route|review__synthesize|deliver__rounds|redeliver__rounds) \('
+  ! grep '^FAILED' "${trace}" | grep -qvE "${allowed}" ||
+    fail "${version} ${name}" "unexpected failure: $(grep '^FAILED' "${trace}" | grep -vE "${allowed}")"
   local want
   if [ "${name}" = "${merge_failed_fixture}" ]; then
     for want in 'STUBBED +merge' 'SKIPPED +deploy' 'COMPLETED +report' 'COMPLETED +not-delivered'; do
@@ -307,7 +419,8 @@ case "$*" in
   "pr view "*" --json headRefOid,headRefName,isDraft,state,baseRefName,mergeable")
     printf '{"headRefOid":"%s","headRefName":"fixture-branch","isDraft":false,"state":"OPEN","baseRefName":"%s","mergeable":"%s"}\n' \
       "${FAKE_GH_HEAD_OID}" "${FAKE_GH_BASE:-develop}" "${FAKE_GH_MERGEABLE:-MERGEABLE}" ;;
-  "pr checks "*" --json name,bucket") printf '%s\n' "${FAKE_GH_CHECKS:-[]}" ;;
+  "pr view "*" --json statusCheckRollup") printf '%s\n' '{"statusCheckRollup":[]}' ;;
+  "api repos/example/repo/actions/runs?head_sha="*) echo 0 ;;
   "pr merge "*) [ -z "${FAKE_GH_MERGE_ERROR:-}" ] || { printf '%s\n' "${FAKE_GH_MERGE_ERROR}" >&2; exit 1; } ;;
   "pr comment "*) printf '%s\n' "$*" >>"${FAKE_GH_COMMENTS}" ;;
   *"--json state --jq .state") echo "${FAKE_GH_STATE_AFTER_MERGE:-MERGED}" ;;
@@ -379,6 +492,12 @@ check_unstubbed_merge() {
   expect_trace "${label}" '^SKIPPED +notify-operator \('
   expect_trace "${label}" '^STUBBED +deploy \('
   expect_trace "${label}" '^SKIPPED +not-delivered \('
+  # A ready delivery is never considered: no GitHub read, and the report passes through.
+  expect_trace "${label}" '^SKIPPED +review-state \('
+  expect_trace "${label}" '^SKIPPED +followup-judge \('
+  grep -qF '"ready":true,"reason":"delivered"' <<<"$(node_output "${work}/trace.out" review-followup)" &&
+    grep -qF '"followed_up":false' <<<"$(node_output "${work}/trace.out" review-followup)" ||
+    fail "${label}" "review-followup must pass the ready delivery through: $(node_output "${work}/trace.out" review-followup)"
   # The task names no card, so no Trello node may act.
   grep -qF '"status":"none"' <<<"$(node_output "${work}/trace.out" trello-start)" ||
     fail "${label}" "trello-start must report no card: $(node_output "${work}/trace.out" trello-start)"
@@ -536,6 +655,10 @@ for version in "${versions[@]}"; do
     grep -aqF -- "${literal}" "${archon_bin}" ||
       fail "${version}" "the bundled delivery no longer names ${literal}; pr-body-sync (_lib/pr-body.ts) reads it"
   done
+  for literal in "${follow_up_literals[@]}"; do
+    grep -aqF -- "${literal}" "${archon_bin}" ||
+      fail "${version}" "the bundled delivery no longer embeds ${literal}; review-followup (_lib/follow-up.ts) reads it"
+  done
   home="${work}/home-${version}"
   mkdir -p "${home}"
   export ARCHON_HOME="${home}"
@@ -576,5 +699,5 @@ for version in "${versions[@]}"; do
     dry_runs=$((dry_runs + 1))
   done
 
-  echo "archon ${version}: install+validate ok, ${fixture_count} fixtures passed, traces ok, unstubbed merge ok, sync-base ok, visual reference check ok, ${dry_runs} dry-runs ok, pr-body names ok"
+  echo "archon ${version}: install+validate ok, ${fixture_count} fixtures passed, traces ok, unstubbed merge ok, sync-base ok, visual reference check ok, ${dry_runs} dry-runs ok, pr-body names ok, follow-up literals ok"
 done

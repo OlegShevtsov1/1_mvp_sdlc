@@ -31,9 +31,10 @@ automatic dev deploy, prod with a typed confirm and a ref check, rollback, Glitc
 drills, Trello cards), and the factory already is a Plan → Execute → Verify loop with a human gate on the plan. The
 SDLC addendum adds phases 1–7 for pilot features: artifacts, DoR and DoD, TDD discipline in factory tasks, releases,
 the changelog, hotfixes, `main` protection and metrics. Deliberately not taken: marketplace governance and managed
-settings (a one-person team, M5.6, M11.6), Agent Teams (they do not run headless, M10.4), Managed Code Review and
-`claude-code-action` in CI (R-C5), Ralph and `/goal` as a separate loop (the factory is the loop), `scaffold` (we
-have our own templates), git flow and trunk-based, and `generate-data-model` as is (SQL-first; the pilot is
+settings (a one-person team, M5.6, M11.6), Agent Teams (they do not run headless, M10.4), Managed Code Review in
+CI (R-C5; `claude-code-action` runs in CI only as the read-only AI PR review, which posts a GitHub pull request
+review, decisions 32, 103 a), Ralph and `/goal` as a separate loop (the factory is the loop), `scaffold` (we have
+our own templates), git flow and trunk-based, and `generate-data-model` as is (SQL-first; the pilot is
 ActiveRecord, so `rails-data-model` replaces it).
 
 ## Phases and gates for the pilot
@@ -47,7 +48,7 @@ Course phase, feature size, who does what, the artifact and where it lives, the 
 | 1. Idea | S, M+ | `/mvp-sdlc:feature-start <card link>` → `/sdlc:interview <slug>` (S: `--depth=easy`), `/sdlc:classify-size` | be: `docs/features/<slug>/` with `idea-brief.md`, `CONTEXT.md`, `.size` | operator: brief `status: Confirmed` | `Backlog` |
 | 2. Requirements | S, M+ | `/sdlc:write-prd` → `/sdlc:clarify-prd` | be: `PRD.md` (acceptance criteria in GWT, no technical tokens) | operator: `status: Approved` + merged PR (R-C8.9) | `Backlog` |
 | 3. Architecture | M+ (S: an ADR only if needed) | `/sdlc:architecture-design`, `/sdlc:decide-adr` | be: `sad.md`, `adr/NNNN-*.md` (Accepted) | operator: ADR `Accepted`, merged PR | `Backlog` |
-| 4. Contracts | S, M+ | `/mvp-sdlc:rails-data-model`, `/sdlc:api-forge`, `/sdlc:break-tasks` (M+), `/sdlc:plan-tests` | be: `data-model.md`, `migrations/*.rb` (staged), `contracts/openapi.yaml` (checked against `swagger/v1`), `tasks/tasks.json` and `tasks/tracker.md`, `test-plan.md`; fe: `/mvp-sdlc:sync-spec` (frontend tasks stay in the backend `tasks/tasks.json`) | **DoR** ([03-dor-dod.md](03-dor-dod.md)) met; PR merged | `Ready` |
+| 4. Contracts | S, M+ | `/mvp-sdlc:rails-data-model`, `/sdlc:api-forge`, `/sdlc:break-tasks` (M+), `/sdlc:plan-tests` | be: `data-model.md`, `migrations/*.rb` (staged), `contracts/openapi.yaml` (checked against `swagger/v1`), `tasks/tasks.json` and `tasks/tracker.md`, `test-plan.md`; fe: `/mvp-sdlc:sync-spec` (frontend tasks are owned by the backend `tasks/tasks.json`; the frontend gets a read-only copy of its own) | **DoR** ([03-dor-dod.md](03-dor-dod.md)) met; PR merged | `Ready` |
 | 5. Code | all | factory, one task per run: `archon workflow run factory --cwd <repo> "<task-brief output>"` | code, tests, `tracker.md` row → `done`, in the same PR | factory gate 2: plan approved; then automatic merge (R-C1) | `In Progress` |
 | 6. Review | all; M+ also per feature | factory review (lenses) on every PR; at the end of the feature `/sdlc:review-feature` | `_review/review-<date>.md` | PASS, no P0/P1 | `Review` |
 | 7. QA | all | CI (rspec, rubocop, brakeman, bundler-audit, gitleaks; fe: lint, build) + deploy to dev + `project-e2e.sh` | E2E report, CI logs | deterministic: everything green | `Test` |

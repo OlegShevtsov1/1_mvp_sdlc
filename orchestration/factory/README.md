@@ -92,7 +92,12 @@ again. The same three responses apply, with up to 3 revision rounds.
 After gate 2 the run is hands-off: implement, review, merge, deploy, health
 check, monitoring check, rollback if red, report. A UI task stops once more
 after CI, at the visual gate, for the operator to review its screenshots
-(see [archon-factory.md](../docs/archon-factory.md), section 6).
+(see [archon-factory.md](../docs/archon-factory.md), section 6). A delivery that
+stops from round 3 on with only narrower re-raises of earlier review findings
+open, every other contract item met and CI green, is merged with a Trello
+follow-up card per such finding instead of stopping (same section). A
+delivery that broke (ends `failed`) is run once more in the same run, on the
+same branch and pull request, before the run stops (same section).
 
 If you forgot the run id, list the paused runs:
 
@@ -220,7 +225,9 @@ refuses when it could not. The `pr-state` node then reads the pull request,
 its CI checks and the checkout, and the `merge-gate` node re-runs the profile's test and build commands on the exact
 pull request head. The lint command runs too, unless the pull request has a
 passing CI check named lint, which stands in for it. On any red command, any
-failed or cancelled CI check, or when the pull request is not open and ready, is
+CI check whose latest run on the head failed or was cancelled (`pr-state` waits up
+to 20 minutes for queued or in-progress runs first), or when the pull request is
+not open and ready, is
 not what the checkout holds, or GitHub reports it as conflicting with its base,
 it refuses. The merge is skipped and the run ends `cancelled` with
 `Not delivered: merge refused (…)`: the pull request stays open and unmerged
@@ -279,7 +286,7 @@ bash scripts/ci/check.sh factory
 The unit tests include the Trello card reference parser, the move for every
 point of the run, and the Trello calls against a stubbed `fetch`.
 
-Install, validation, the fifteen dry-run fixtures with trace assertions (each
+Install, validation, the nineteen dry-run fixtures with trace assertions (each
 Trello move at its node, in dry-run mode, with no network), a run in
 which `sync-base` moves a run worktree cut from a diverged default branch to
 `develop`, a run in which a UI task without a visual reference stops before

@@ -112,6 +112,26 @@ run_case "release card: card-less mirror sync" 0 HEAD_REF=develop BASE_REF=main 
   PR_TITLE='PILOT-0: Sync main (abc1234)' PR_BODY=$'Sync\n\nType: chore' -- "pr-conventions: ok"
 run_case "release card: card-less chore" 0 PR_TITLE='PILOT-0: Fix a typo' PR_BODY=$'Typo\n\nType: chore' --
 
+# Under pipefail a body piped into a reader that stops early dies of SIGPIPE and fails a valid PR (PILOT-336).
+# The body is longer than the 64 KiB a pipe buffers, so a writer cannot finish before its reader exits.
+line=$(printf '%*s' 99 '' | tr ' ' x)
+long=$(for _ in $(seq 1200); do echo "${line}"; done)
+real_grep=$(command -v grep)
+mkdir "${tmp}/early-grep"
+cat > "${tmp}/early-grep/grep" <<STUB
+#!/usr/bin/env bash
+# grep -q that stops reading at its first matching line, as grep -q may.
+case " \$* " in
+  *" -q"*) while IFS= read -r line; do "${real_grep}" "\$@" <<<"\${line}" && exit 0; done; exit 1 ;;
+esac
+exec "${real_grep}" "\$@"
+STUB
+chmod +x "${tmp}/early-grep/grep"
+run_case "Type line when grep -q stops at its first match" 0 PATH="${tmp}/early-grep:${PATH}" \
+  PR_BODY="Type: fix"$'\n'"${long}" -- "pr-conventions: ok"
+run_case "release: changelog first in a long body" 0 "${release[@]}" \
+  PR_BODY=$'## Changelog (v1.2.3)\n\n- A thing\n\nType: chore\n'"${long}" -- "pr-conventions: ok"
+
 run_case "every violated rule" 1 HEAD_REF=wip-test PR_TITLE=wip PR_BODY= --
 errors=$(grep '^::error::pr-conventions:' <<<"${out}" || true)
 [ "$(wc -l <<<"${errors}")" -eq 3 ] || fail "every violated rule" "want 3 errors: ${out}"

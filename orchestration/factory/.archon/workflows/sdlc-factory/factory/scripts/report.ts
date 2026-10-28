@@ -24,13 +24,18 @@ const doc = buildReport({
   delivery_ready: process.env.INPUTS_DELIVERY_READY ?? "skipped",
   delivery_reason: process.env.INPUTS_DELIVERY_REASON ?? "",
   delivery_summary: process.env.INPUTS_DELIVERY_SUMMARY ?? "",
+  deliver_ready: process.env.INPUTS_DELIVER_READY ?? "skipped",
+  deliver_reason: process.env.INPUTS_DELIVER_REASON ?? "",
+  deliver_summary: process.env.INPUTS_DELIVER_SUMMARY ?? "",
   rag_status: process.env.INPUTS_RAG_STATUS ?? "skipped",
   rag_sources: process.env.INPUTS_RAG_SOURCES ?? "[]",
   visual_proceed: process.env.INPUTS_VISUAL_PROCEED ?? "skipped",
   visual_stop: process.env.INPUTS_VISUAL_STOP ?? "",
   visual_pr_url: process.env.INPUTS_VISUAL_PR_URL ?? "",
+  followups: process.env.INPUTS_FOLLOWUPS ?? "[]",
   claude_auth: process.env.INPUTS_CLAUDE_AUTH ?? "skipped",
   claude_auth_node: process.env.INPUTS_CLAUDE_AUTH_NODE ?? "",
+  retry_note: process.env.INPUTS_RETRY_NOTE ?? "",
 });
 const artifacts = process.env.ARTIFACTS_DIR;
 if (artifacts) writeFileSync(`${artifacts}/report.json`, JSON.stringify(doc, null, 2) + "\n");

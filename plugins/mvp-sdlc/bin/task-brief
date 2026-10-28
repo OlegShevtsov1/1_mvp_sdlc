@@ -3,10 +3,10 @@
 
 Usage: task-brief <slug> <task-id> [--from <backend checkout> [--ref <ref>]]   (run in the repository of the task)
 Reads docs/features/<slug>/{PRD.md, test-plan.md, tasks/tasks.json, tasks/tracker.md, state.json},
-.claude/sdlc.local.md and .archon/factory-profile.yaml at run time. With --from (a frontend task: sync-spec does not
-copy tasks/), tasks/tasks.json and tasks/tracker.md come from the backend checkout as committed at <ref> (default
+.claude/sdlc.local.md and .archon/factory-profile.yaml at run time. With --from (a frontend task: the backend owns its
+status), tasks/tasks.json and tasks/tracker.md come from the backend checkout as committed at <ref> (default
 origin/<repo.base_branch of the factory profile>), never from its working tree; --from is refused where this
-repository has its own tasks/tasks.json. Refuses (exit 1) when the task is not ready: unknown task, unfinished
+repository has its own tasks/tasks.json, and required where that file is the sync-spec copy. Refuses (exit 1) when the task is not ready: unknown task, unfinished
 dependency, larger than one day, an AC missing from PRD section 5 or without a test level, invalid task card fields,
 no Trello card number at all, a task "type" outside PR_TYPES, or no .claude/sdlc.local.md.
 The text carries the pull request title `PILOT-<task card number>: <task title>` from the
@@ -157,15 +157,28 @@ def task_card(task):
                        "task-cards".format(task["id"]))
 
 
+def synced_tasks(feature):
+    """True when tasks/tasks.json here is the copy sync-spec made (recorded in .spec-source), not this repo's own."""
+    try:
+        files = json.loads((feature / ".spec-source").read_text(encoding="utf-8"))["files"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return isinstance(files, dict) and "tasks/tasks.json" in files
+
+
 def task_files(feature, rel, backend):
     """(tasks.json text, tracker.md lines) from this repository or, with --from, from the backend at its ref."""
     tasks_rel, tracker_rel = rel + "/tasks/tasks.json", rel + "/tasks/tracker.md"
+    copy = synced_tasks(feature)
+    if backend is None and copy:
+        raise NotReady("{} is the sync-spec copy of the backend's; its status may be stale: add --from "
+                       "<be checkout>".format(tasks_rel))
     if backend is None:
         tracker = feature / "tasks" / "tracker.md"
         tracker_lines = tracker.read_text(encoding="utf-8").splitlines() if tracker.is_file() else []
         missing = "{} not found (a frontend task: add --from <be checkout>)".format(tasks_rel)
         return read(feature / "tasks" / "tasks.json", missing), tracker_lines
-    if (feature / "tasks" / "tasks.json").exists():
+    if (feature / "tasks" / "tasks.json").exists() and not copy:
         raise NotReady("{} exists here: its tasks are briefed from it, drop --from".format(tasks_rel))
     text = backend.read(tasks_rel)
     if text is None:

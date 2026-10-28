@@ -23,6 +23,66 @@ release pull request `PILOT-<n>: Release vX.Y.Z` carries that section under `## 
 
 ### Security
 
+## [0.5.0] - 2026-10-28
+
+### Added
+
+- `sync-spec` copies the frontend's own tasks (PILOT-397, mvp-sdlc 0.5.0): `tasks/tasks.json` reduced to the tasks
+  whose `"repo"` is the frontend (deps on backend tasks move to `"external_deps"`), their task files and the epic, so
+  `/sdlc:implement-tasks <slug>` runs in the frontend. `tasks/tracker.md` stays in the backend, which owns task
+  status. `--check` also covers the task copy and fails on a file under `tasks/` that is not a copy; a re-sync
+  removes a copied file that is no longer a source. `task-brief --from` works next to the copy and is required for
+  it. The operator guide makes the factory the default for code and `implement-tasks` the supported alternative, with
+  the steps the operator then does by hand.
+- A blocker re-raised on a narrower case from round 3 on becomes a follow-up card (PILOT-300, decisions 93, 99, 100):
+  when the bundled delivery ends `replan` at round 3 or later, or at the round cap, and its only open blockers
+  re-raise earlier findings on narrower cases, every other contract item is met and CI is green, the factory creates
+  a Trello card per such finding (label `task`, in `Ready`), links the cards in the PR description and the run
+  report, marks the PR ready and goes on to the merge gate. New nodes `review-state`, `followup-judge` and
+  `review-followup`; two fixtures cover both paths.
+
+### Changed
+
+- The AI PR review of the be and fe templates posts a GitHub pull request review (PILOT-369, decision 103 a): one
+  review per head commit as `github-actions`, with findings as inline comments on the changed lines (others in the
+  review body), *Request changes* on P0/P1, otherwise *Comment*, and the bot's earlier *Request changes* dismissed
+  once a review is clean. The posting script runs from the workflow's own revision. Factory PRs are now reviewed
+  too. The issue comment is gone. The check stays red on P0/P1 or a missing summary, and the job log lists every
+  P0/P1.
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- A failed delivery is re-run once (PILOT-301, decision 100): when the bundled delivery ends `failed`, for example
+  because the review's `route` node got no structured output from Claude, the factory runs one more delivery on the
+  same branch and pull request (new nodes `redeliver` and `last-delivery`) and the report says it retried and why; a
+  second failure or any other reason ends the run as before. Two fixtures cover both paths.
+- pr-conventions never dies on SIGPIPE under `pipefail` (PILOT-336): the Type-line check of this repository and of
+  the fe template, and this repository's release-changelog check, piped the PR body into a reader that stops at its
+  first match, so the writer could die of SIGPIPE and a valid pull request failed the check. They now read the body
+  from a here-string. Found in 1_mvp_pilot_fe (PILOT-306); the be template already used here-strings.
+- The fe template's TDD check never skips the gate on a large change list (PILOT-339): it piped the changed files
+  into `grep -q`, so on a list larger than the pipe buffer the upstream `grep` died of SIGPIPE under `pipefail`
+  and the check printed "not applicable" and passed. It now reads the whole list before deciding. Found and fixed
+  in 1_mvp_pilot_fe (PILOT-117); the be template has no such pipe.
+- The merge gate no longer refuses a pull request whose check has a cancelled run superseded by a newer green one
+  (PILOT-372): `pr-state` reads every run on the head (`statusCheckRollup`), judges each check by its latest run per
+  workflow and name, and waits, bounded like `review-state` (20 min), while a check or a workflow run on the head is
+  queued or in progress; a latest run that failed, timed out or was cancelled with nothing newer still refuses.
+  Found on 1_mvp_pilot_be#108 (run dacea56f) and 1_mvp_pilot_fe#65.
+- The AI PR review of the be and fe templates lists each finding once (PILOT-399): inline on a changed line,
+  otherwise in the review body; the summary no longer repeats them (fe report, be prompt). The review body and every
+  inline comment are capped at 60000 characters with a truncation note, as GitHub rejects more than 65536. Only a
+  `github-actions` review whose body starts with `<!-- ai-review -->` counts as the AI review's own, for the
+  same-head no-op and for the dismissal, so another workflow's review on the same token is left alone. The fe
+  PR-head checkout no longer persists the token, as in be (PILOT-396). Found by the review of fe parity run
+  0e711247.
+
+### Security
+
 ## [0.4.0] - 2026-10-27
 
 ### Added

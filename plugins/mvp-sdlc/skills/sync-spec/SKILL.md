@@ -2,14 +2,21 @@
 name: sync-spec
 description: >-
   Use in the frontend repository to copy a feature's spec artifacts (PRD, SAD, ADRs, contracts, CONTEXT, test plan)
-  from a local checkout of the backend repository, or to check that the copy is still in sync. Triggers:
+  and the frontend's own tasks from a local checkout of the backend repository, or to check that the copy is still in sync. Triggers:
   "/mvp-sdlc:sync-spec <slug>", "sync spec for <slug>", "is the spec copy for <slug> up to date".
 ---
 
 # sync-spec
 
 The backend repository owns the feature artifacts; the frontend repository keeps a read-only copy under
-`docs/features/<slug>/`, each file marked "Copied from be@<sha> ... Do not edit here.".
+`docs/features/<slug>/`, each file marked "Copied from be@<sha> ... Do not edit here." (in `tasks/tasks.json`, the
+`copied_from` key).
+
+The copy includes this repository's tasks, so `/sdlc:implement-tasks <slug>` works here: `tasks/tasks.json` holds
+only the tasks whose `"repo"` is this repository (the name of its `origin` remote; `--repo <name>` overrides), a
+dependency on another repository's task moves from `"deps"` to `"external_deps"`, and their task files and the epic
+(`tasks/_*.md`) come along. `tasks/tracker.md` is never copied: the backend owns the status of every task. A task is
+marked done in the backend, then synced again; never create or edit a tracker or a task status here.
 
 ## Project knowledge first (mvp-rag)
 
@@ -30,12 +37,12 @@ unavailable (<reason>)` instead and continue; never stop or retry because of it.
    the copy changes nothing else. In the pilot app repositories that branch is `feature/PILOT-<n>-<slug>-spec`,
    the pull request goes into `develop` with the title `PILOT-<n>: <card title>` and the body line `Type: docs`.
    The record also carries the card number and title from the backend `state.json`, which `task-brief` needs for
-   frontend tasks.
+   frontend tasks. A sync after a task changed status in the backend goes the same way.
 4. Never edit a copied file in the frontend repository. A needed change goes to the backend repository first, then
    is synced again.
 
 ## Check
 
-`sync-spec <slug> --from <be checkout> --check` exits 1 when a source file changed or appeared, or a copy was edited
-locally. Running it and getting exit 0 is part of the Definition of Done of every frontend task of the feature. It
+`sync-spec <slug> --from <be checkout> --check` exits 1 when a source file changed, appeared or was removed (a task
+of this repository included), a copy was edited locally, or a file under `tasks/` here is not a copy. Running it and getting exit 0 is part of the Definition of Done of every frontend task of the feature. It
 runs locally only: frontend CI cannot read the private backend repository.

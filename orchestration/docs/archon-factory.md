@@ -192,6 +192,38 @@ that does not embed the folder, is only listed, and you judge it. The same three
   round 4 ends the run.
 - `abort` → the run stops; the pull request stays open.
 
+**Follow-up instead of another round** (PILOT-300, decisions 93, 99, 100). A review that keeps re-raising one
+invariant on ever narrower edge cases used to run the delivery into its 4-round cap. Now, when the bundled delivery
+stops at round 3 or later with `replan`, or at the cap, the factory takes the delivery as ready when all of these
+hold:
+
+- every open blocking finding re-raises an earlier finding on a narrower case: the same id carried from an earlier
+  round, or a new id narrowing one an earlier round raised. An agent (`followup-judge`, read-only) judges each one
+  `narrower`, `unfixed` or `new`, and the factory checks its answer against `review/findings.json`;
+- no open blocker is a contract finding raised in the last review round (review and rereview each count a round,
+  so it is the highest `review/report-round-N.md`, not the delivery's round), and every contract item the review
+  left open is unmet only on the evidence of those findings;
+- CI on the pull request head is green (the factory waits up to 20 minutes for pending checks), and the review
+  comment judged that head.
+
+The factory then creates one card per such finding in `Ready`, with the label `task`, titled
+`Follow-up PILOT-<n>: R<k> <claim>`, holding the finding, why it is narrower and the links to the PR and the review
+report. It adds a `## Follow-up cards` section to the PR description, marks the draft PR ready, and goes on to the
+merge gate as usual; the run's report names the cards. A new defect class, an `unfixed` blocker, any other unmet
+contract item or red or pending CI keeps today's behaviour: the run ends not delivered, and the summary says
+`Not followed up: <why>`. The rule acts after the bundled delivery has ended, because the factory never forks
+Archon's bundled blocks, so a delivery whose review stays open still runs to round 4. Stopping inside the loop at
+round 3 needs a round-policy hook in Archon itself; that is an operator follow-up. The board needs a label named
+`task`: without it, or without the Trello credentials file, the rule creates nothing and the run ends not
+delivered, with the reason in the summary.
+
+**One retry of a failed delivery** (PILOT-301, decision 100). When the bundled delivery ends `failed` (a node inside
+it broke, most often the review's `route`, see §9), the same run delivers once more (`redeliver`, a second include of
+`archon-deliver-block`) on the same branch, continuing its pull request when one is open, and every later node reads
+the retry's report. A second failure, or any other reason, ends the run as before: there is never a third attempt,
+and `review_open`, `round_cap`, `replan`, `needs_human` and `ci_*` are never retried. The report's summary then ends
+`Retried the delivery once: …`, saying why and how the retry ended.
+
 This gate replaces the manual visual check. You no longer need a side script that keeps a pending
 `operator/visual-review` commit status on the PR head, or hand-sent screenshots, or a continuation run started by
 hand. Do not keep `operator/visual-review` as a required check: a required status left pending makes GitHub refuse
@@ -212,6 +244,7 @@ archon workflow abandon <run-id>                  # close a stuck run
 | Status | Meaning | What to do |
 |---|---|---|
 | `completed`, report `delivered: true` | merged to `main`, deployed, health 200, monitoring not red | nothing; `git pull` your checkout |
+| `completed`, report `delivered: true`, summary `… Follow-up cards: R<k> → <card> …` | the delivery ended `replan` or at the round cap with only narrower re-raises of earlier findings open (§6). The factory created the follow-up cards in `Ready`, linked them in the PR description, and merged and deployed as usual | pick the follow-up cards up like any other task |
 | `completed`, report `status: delivered-pending-operator` | the PR's base is in the profile's `manual_merge_bases` (default `main`, decision 27). Every check was green, but the factory did **not** merge, deploy or check health; it commented `ready for the operator: …` on the PR | review and merge the PR yourself, then deploy as usual. If the summary says the notification could not be posted, the comment is missing but the PR is still waiting |
 | `cancelled`, summary `Stopped before any work: the Claude CLI login …` | the pre-flight `claude-auth` found the Claude CLI login of the Archon host expired or missing, sent one alert to `MVP_VPN_ALERTS`, and nothing else ran | run `claude /login` on the host, then start a new run |
 | `cancelled`, summary `Not delivered: the Claude CLI login on the Archon host has expired (node …)` | a later AI node failed with a provider auth error; `claude-auth-scan` found it in the run's transcript and sent the alert, once per run | run `claude /login` on the host, then start a new run. The PR, if any, is left open |
@@ -219,9 +252,10 @@ archon workflow abandon <run-id>                  # close a stuck run
 | `cancelled`, summary `… is merged, but its merge commit could not be read …` | the PR **is** merged; GitHub had not published the merge commit yet, so nothing was deployed | deploy the merge commit the way the profile's deploy command does, or start a new run once `gh pr view <url> --json mergeCommit` shows it |
 | `cancelled`, summary `stopped at the visual gate (…)` | you answered `abort` at the visual gate, approved a round that was not ready, or answered `needs-revision` in its last round; the PR is open and was **not** merged | start a new run on the same task to continue, or close the PR |
 | `cancelled`, reason `Stopped before the plan: … names no visual reference` | a UI task without a `Visual reference:` line | add the `dod` item, run `task-brief` again and start a new run |
-| `cancelled`, summary `the delivery ended not ready (<reason>)` | the bundled delivery stopped (`review_open`, `round_cap`, `replan`, `needs_human`, `ci_*`, `failed`) and nothing was merged; the rest of the summary is the delivery's own | read `review/report.md` in the run's artifacts, then fix the cause or start a new run |
+| `cancelled`, summary `the delivery ended not ready (<reason>)` | the bundled delivery stopped (`review_open`, `round_cap`, `replan`, `needs_human`, `ci_*`, `failed`) and nothing was merged; the rest of the summary is the delivery's own. After a `replan` from round 3 on or a `round_cap`, `Not followed up: <why>` at its end says why the follow-up rule (§6) did not apply. With `failed` and `Retried the delivery once: …`, both the delivery and its one retry failed | read `review/report.md` in the run's artifacts, then fix the cause or start a new run |
 | `cancelled`, any other "Not delivered: …" | delivery stopped before a mergeable PR, or the deploy, health or monitoring was red (rolled back when needed) | fix the cause and start a new run |
-| `failed` | a node broke and the run ended without the report's verdict | `archon workflow get <run-id>` names the node; fix it; `archon workflow resume <run-id>` |
+| `failed`, report.json `delivered: true`, summary `… Retried the delivery once: …` | the first delivery broke, the retry (§6) delivered, and the factory merged and deployed as usual. Archon keeps the run's status `failed` because one node failed | nothing. Do **not** `resume` it: that re-runs the failed node and everything that depends on it |
+| `failed`, report.json missing or not delivered | a node broke and the run ended without the report's verdict | `archon workflow get <run-id>` names the node; fix it; `archon workflow resume <run-id>` |
 
 Run artifacts: `~/.archon/workspaces/<owner>/<repo>/artifacts/runs/<run-id>/` — `report.json`, `plan.md`,
 `implementation.md`, `review/report.md`, `sync-base.log`, `rag-context.md`, `rag.log`, `merge-gate.log`,
@@ -278,15 +312,26 @@ While a gate waits for you (gate 1, gate 2 or the visual gate) the card is in `B
   reaction should a not-ready verdict still arrive.
 - **A failed delivery still reports (v0.12).** `archon-deliver-block` completes its report after a failed inner node,
   so `pr-state` runs only when that report says `ready`, and otherwise the run ends `cancelled` with the delivery's
-  reason and summary quoted.
+  reason and summary quoted; a `failed` report is first retried once (§6).
+- **The review route's missing structured output (v0.12.1, PILOT-301).** The `route` node of the bundled
+  `archon-review-block` (in a run's record `deliver__rounds.review__route`) picks the review lenses. When Claude's reply
+  carries no schema-valid structured output, it fails with `output_format declared but the provider returned no
+  schema-valid structured output` on the first try: v0.12.1 re-asks (3 times) only providers whose structured output
+  is `best-effort`, and Claude's is not. That fails the rounds loop, and the delivery reports `failed` (runs
+  ddb63036, 53bd05a7, 55e90696, each merged by hand). The factory may not fork the block (`rulings.md`), so it retries
+  the whole delivery once (§6). The fix belongs upstream (re-ask native providers too, or fall back to every lens);
+  filing it is deferred by the operator. The `delivery-failed-twice` fixture reproduces the defect by stubbing `route`
+  with prose.
 - **The factory's own merge guard.** The factory's nodes cannot depend on nodes inside the deliver block, and the
   bundled delivery judges red with an agent. `pr-state` reads the PR, its CI checks and the checkout from GitHub and
-  git; `merge-gate` re-runs the profile's test and build commands on the exact PR head (verified against GitHub, with
+  git, waiting (bounded, 20 min) until the head's checks and workflow runs settle and keeping the latest run of each
+  check; `merge-gate` re-runs the profile's test and build commands on the exact PR head (verified against GitHub, with
   no uncommitted changes) and `merge` runs only when it is green. The lint command runs too, unless the PR has a
   passing CI check whose name contains the word lint (`Lint`, `Rails CI / Lint`; not `Actionlint` or `ESLint`): run in
   the run's worktree, under a path that contains `.archon/`, RuboCop's excludes miss and it refused a PR whose CI Lint
-  was green. **`merge-gate` refuses any red command and any failed or cancelled CI check**, including red that the
-  deliver block would have accepted as `inherited` or `environment`; test and build run twice on the happy path.
+  was green. **`merge-gate` refuses any red command and any CI check whose latest run failed or was cancelled** (a
+  cancelled run superseded by a newer run is ignored), including red that the deliver block would have accepted as
+  `inherited` or `environment`; test and build run twice on the happy path.
 - **The visual gate's loop (v0.12.1, PILOT-278).** A wait node must be the last node of its loop, and nothing outside
   a loop can read a node inside it. The `visual-cycle` loop therefore follows the PILOT-217 pattern of the other
   gates: its `until_bash` saves each answer to `visual-gate.decision`, `visual-gate.text` and
@@ -309,6 +354,19 @@ While a gate waits for you (gate 1, gate 2 or the visual gate) the card is in `B
   `merge-gate` refuses when the description could not be republished. Per-round reviews inside the deliver block
   still read the live description; only a sentence in the deliver work order tells them not to block on a stale
   one, which is not enforced.
+- **Review rounds that narrow one invariant (v0.12.1, PILOT-300).** The bundled block owns the rounds and the
+  synthesizer returns `replan` for a blocker raised a second time, so the factory cannot stop the loop at round 3. It
+  acts once the block has ended (§6): `review-state` reads the round from the deliver report's
+  `Not ready: Round <N>: ` summary, the PR head, its checks, the canonical review comment
+  (`<!-- archon-review-report -->`, `Reviewed commit: `), `review/findings.json` and the latest review round, the
+  highest `review/report-round-N.md` (a finding's `round` counts review rounds, not delivery rounds);
+  `followup-judge` judges the open blockers; `review-followup` decides and writes, and every node that read the
+  deliver report reads its report instead. When `review-state` or `followup-judge` fails, Archon skips
+  `review-followup`, so the report quotes the deliver report itself, ending in
+  `Not followed up: review-state or followup-judge failed.` The deliver report has no field for the contract items
+  left open, so they are read from its `Left open, so the pull request does not close its issue` bullets. The Archon
+  check fails when the pinned binary stops embedding any of this text (`BUNDLED_LITERALS` in
+  `scripts/_lib/follow-up.ts`).
 
 ## 10. Testing
 
@@ -320,9 +378,9 @@ bash scripts/ci/check.sh archon    # install + validate + fixtures + trace asser
 `check.sh archon` downloads the pinned Archon v0.12.1 release binary into `.tools/bin/` (gitignored, sha256-checked,
 pinned in `scripts/ci/tools.sh`) and never installs it. Every Archon call in the check uses a throwaway
 `ARCHON_HOME`, so it never reads or writes your live `~/.archon`; the check first runs `archon provider add claude`
-in that home. It then runs `install.sh`, `archon workflow test factory` (fifteen fixtures; each stubs the inner nodes of
+in that home. It then runs `install.sh`, `archon workflow test factory` (nineteen fixtures; each stubs the inner nodes of
 `archon-plan-block` and `archon-deliver-block`), and asserts on each fixture's dry-run trace: `merge-gate` executes in
-every fixture and `pr-state` and `pr-body-sync` are stubbed or skipped, because `workflow test factory` also runs on an operator's host
+every fixture and `pr-state`, `pr-body-sync`, `review-state` and `followup-judge` are stubbed or skipped, because `workflow test factory` also runs on an operator's host
 with a real `gh`; `sync-base` is stubbed in every fixture, because it fetches and resets the checkout; `rag-context`
 executes in every fixture as a dry run (no request) before the plan, and the report records `rag_status` `dry-run`;
 `claude-auth` (before `profile-check`) and `claude-auth-scan` (before the report) run as dry runs in every fixture,
@@ -331,7 +389,15 @@ in the red fixture the delivery ends ready and `merge-gate` refuses on its own t
 and merges; in the interim-verdict fixture the delivery ends `review_open`, `pr-state` and `merge-gate` are skipped,
 and the report quotes `review_open`; in the merge-refused-by-github fixture `merge` reports gh's refusal, `deploy` is
 skipped and the report carries gh's words; in the pr-body-sync-failed fixture `merge-gate` refuses the description
-that could not be republished. `visual-scope` executes in every fixture that is not visual, and the visual gate is
+that could not be republished. `review-followup` executes in every fixture and passes every other delivery through;
+in the review-followup-ready fixture a round-3 `replan` whose only open blocker R6 re-raises a round-2 finding on a
+narrower case is followed up with a dry-run card and merges, and the report names the card; in the
+review-followup-new-defect fixture the judge calls R6 new, so the run ends not delivered and the report quotes
+`replan` and `Not followed up:`. Every other fixture skips the retry of a failed delivery (`redeliver`) and
+`last-delivery` passes its delivery through; in the delivery-failed-then-delivered fixture the first report is stubbed
+`failed`, the retry delivers on the same pull request and the run merges with `Retried the delivery once:` in the
+report; in the delivery-failed-twice fixture the review's `route` gets prose instead of JSON, both deliveries fail,
+no third one runs and the run ends not delivered. `visual-scope` executes in every fixture that is not visual, and the visual gate is
 skipped there. The three visual fixtures stub `visual-scope` visual, with its folder pointed at screenshots
 committed beside the fixtures. In the approved fixture `visual-shots` lists them as links at the head and the run
 merges. In the revised fixture a revision delivers on the same pull request before the gate, then approve merges.
@@ -339,7 +405,8 @@ A dry run executes one loop iteration only, so that fixture stubs `visual-turn` 
 `needs-revision` answer. In the aborted fixture the run stops before the merge path with the operator's words. It
 runs the green fixture again with `pr-body-sync`, `pr-state`, `merge-gate` and `merge`
 executing for real against the engine's own deliver output (a fake `gh` answers for the PR, a local bare repository
-is `origin`) — once with a readable merge commit, where `pr-body-sync` replaces a stale description before `pr-state`, once with one GitHub has not published yet, which must end
+is `origin`) — once with a readable merge commit, where `pr-body-sync` replaces a stale description before `pr-state`
+and the ready delivery skips `review-state` and passes `review-followup` untouched, once with one GitHub has not published yet, which must end
 `cancelled` with a report and no deploy — and four more that must each end `cancelled` with a report: a failed edit of the description, which
 `merge-gate` refuses, `gh pr merge`
 refusing the merge, the pull request reading back not `MERGED` after the merge, and GitHub reporting the pull request

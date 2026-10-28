@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Copy a feature's spec artifacts from the be checkout into this (fe) repository, or check the copy for drift.
 
-Usage: sync-spec <slug> --from <be checkout> [--ref <ref>] [--check]
+Usage: sync-spec <slug> --from <be checkout> [--ref <ref>] [--repo <name>] [--check]
 Copies PRD.md, sad.md, adr/, contracts/, CONTEXT.md and test-plan.md (whichever exist) from the commit <ref>
 (default origin/main) of the be checkout, never from its working tree, into docs/features/<slug>/ with a
 "do not edit" header, and records the source in docs/features/<slug>/.spec-source. The record also carries the
 Trello card fields of the be state.json (id, number, title) that task-brief needs for the pull request title.
---check exits 1 when a source file changed, appeared or was removed at <ref>, a copy was edited here, or there is no record.
+The tasks of this repository come too, so the course implement-tasks finds them here: tasks/tasks.json reduced to
+the tasks whose "repo" is this repository (--repo, default the name of the origin remote, else of the checkout),
+their deps on other repositories' tasks moved to "external_deps", plus their task files and the epic files
+(tasks/_*.md). tasks/tracker.md is never copied: task status lives in be. A file copied earlier that is no longer a
+source is removed. --check exits 1 when a source file changed, appeared or was removed at <ref>, a copy was edited
+here, a file under tasks/ here is not a copy, or there is no record.
 Exit 0 in sync, 1 drift or failure, 2 usage error.
 """
 import argparse
@@ -21,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import sdlc_common  # noqa: E402
 
 ARTIFACTS = ("PRD.md", "sad.md", "adr", "contracts", "CONTEXT.md", "test-plan.md")
+TASKS_DIR = "tasks"
+TASKS_JSON = "tasks/tasks.json"
 RECORD = ".spec-source"
 CARD_FIELDS = ("trello_card_id", "trello_card_id_short", "trello_card_title")
 
@@ -40,19 +47,55 @@ def git_bytes(repo, *args):
     return result.stdout
 
 
-def source_files(be, sha, slug):
-    """{path relative to the feature dir: blob bytes} for the copied artifacts at `sha`; empty when the feature dir
-    existed earlier in the history of `sha` and was removed since."""
+def source_files(be, sha, slug, repo):
+    """{path relative to the feature dir: source bytes} for the copied artifacts at `sha`, tasks/tasks.json as this
+    repository's part of it; empty when the feature dir existed earlier in the history of `sha` and was removed since."""
     prefix = (sdlc_common.FEATURES_DIR / slug).as_posix() + "/"
     listed = git_bytes(be, "ls-tree", "-r", "--name-only", "-z", sha, "--", prefix).decode("utf-8").split("\0")
-    files = {}
+    files, task_files = {}, {}
     for path in filter(None, listed):
         rel = path[len(prefix):]
         if rel in ARTIFACTS or ("/" in rel and rel.split("/", 1)[0] in ARTIFACTS):
             files[rel] = git_bytes(be, "show", "{}:{}".format(sha, path))
+        elif re.fullmatch(r"{}/[^/]+\.(md|json)".format(TASKS_DIR), rel):
+            task_files[rel] = git_bytes(be, "show", "{}:{}".format(sha, path))
+    if TASKS_JSON in task_files:
+        files.update(repo_tasks(task_files, repo, "{} at {}".format(prefix + TASKS_JSON, sha[:7])))
     if not files and not git_bytes(be, "log", "-1", "--format=%H", sha, "--", prefix).strip():
         raise Failure("no spec artifacts for {} at {} in the be checkout".format(prefix.rstrip("/"), sha[:7]))
     return files
+
+
+def repo_tasks(task_files, repo, where):
+    """{rel: bytes} of the tasks/ files this repository implements: tasks.json reduced to its tasks (deps on other
+    repositories' tasks moved to external_deps), their task files (frontmatter id) and the epic files (_*.md)."""
+    try:
+        doc = json.loads(task_files[TASKS_JSON].decode("utf-8"))
+        tasks = [t for t in doc["tasks"] if t.get("repo") == repo]
+        ids = {t["id"] for t in tasks}
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise Failure("{} in the be checkout does not follow the tasks.json contract".format(where))
+    if not tasks:
+        return {}
+    for task in tasks:
+        deps = task.get("deps") or []
+        task["deps"] = [d for d in deps if d in ids]
+        if len(task["deps"]) < len(deps):
+            task["external_deps"] = [d for d in deps if d not in ids]
+    doc["tasks"] = tasks
+    files = {TASKS_JSON: (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")}
+    for rel, data in task_files.items():
+        name = rel.split("/", 1)[1]
+        if name.endswith(".md") and (name.startswith("_") or task_id(data) in ids):
+            files[rel] = data
+    return files
+
+
+def task_id(data):
+    try:
+        return sdlc_common.frontmatter(data.decode("utf-8")).get("id")
+    except UnicodeDecodeError:
+        return None
 
 
 def card_fields(be, sha, slug):
@@ -71,6 +114,11 @@ def card_fields(be, sha, slug):
 def copy_text(rel, data, sha, slug):
     path = "{}/{}".format((sdlc_common.FEATURES_DIR / slug).as_posix(), rel)
     note = "Copied from be@{}:{} by sync-spec. Do not edit here.".format(sha, path)
+    if rel == TASKS_JSON:
+        note = note.replace(":" + path, ":{} (this repository's tasks only)".format(path))
+        doc = json.loads(data.decode("utf-8"))
+        doc = dict([("copied_from", note + " Task status and tracker.md live in be.")] + list(doc.items()))
+        return (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     if rel.endswith(".md"):
         lines = data.decode("utf-8").splitlines(True)
         bounds = sdlc_common.frontmatter_bounds([line.rstrip("\n") for line in lines])
@@ -87,10 +135,31 @@ def source_label(be):
     return url if re.match(r"(https://|ssh://|git@)", url) else Path(be).resolve().name
 
 
-def sync(root, be, sha, slug):
+def this_repo(root):
+    """The repository name tasks.json uses in "repo": the last part of the origin URL, else the checkout's dir name."""
+    url = (sdlc_common.git(root, "remote", "get-url", "origin") or "").rstrip("/")
+    name = re.split(r"[/:]", url)[-1] if url else ""
+    return (name[:-len(".git")] if name.endswith(".git") else name) or Path(root).resolve().name
+
+
+def recorded_files(target):
+    """The files of the existing record, or {} when there is none."""
+    try:
+        files = json.loads((target / RECORD).read_text(encoding="utf-8"))["files"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    return files if isinstance(files, dict) else {}
+
+
+def sync(root, be, sha, slug, repo):
     target = sdlc_common.feature_dir(root, slug)
     record = {"source_repo": source_label(be), "source_sha": sha, "files": {}}
-    for rel, data in sorted(source_files(be, sha, slug).items()):
+    current = source_files(be, sha, slug, repo)
+    for rel in sorted(set(recorded_files(target)) - set(current)):
+        if (target / rel).is_file():
+            (target / rel).unlink()
+            print("sync-spec: removed {}".format((target / rel).relative_to(root).as_posix()))
+    for rel, data in sorted(current.items()):
         copy = copy_text(rel, data, sha, slug)
         path = target / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,7 +171,7 @@ def sync(root, be, sha, slug):
     print("sync-spec: {} files from be@{}".format(len(record["files"]), sha[:7]))
 
 
-def check(root, be, sha, slug):
+def check(root, be, sha, slug, repo):
     target = sdlc_common.feature_dir(root, slug)
     try:
         record = json.loads((target / RECORD).read_text(encoding="utf-8"))
@@ -110,7 +179,7 @@ def check(root, be, sha, slug):
     except (OSError, ValueError, KeyError, TypeError):
         raise Failure("no usable {}/{}: run sync-spec {} --from <be checkout> first".format(target, RECORD, slug))
     drift = []
-    current = source_files(be, sha, slug)
+    current = source_files(be, sha, slug, repo)
     for rel in sorted(set(current) | set(recorded)):
         if rel not in recorded:
             drift.append("{}: new in be@{}".format(rel, sha[:7]))
@@ -121,6 +190,10 @@ def check(root, be, sha, slug):
         local = target / rel
         if rel in recorded and (not local.is_file() or sha256(local.read_bytes()) != recorded[rel].get("copy_sha256")):
             drift.append("{}: the copy here was edited or removed".format(rel))
+    for path in sorted(p for p in (target / TASKS_DIR).rglob("*") if p.is_file()):
+        rel = path.relative_to(target).as_posix()
+        if rel not in recorded and rel not in current:
+            drift.append("{}: not a copy from be; task status and tracker.md live in be, edit them there".format(rel))
     for line in drift:
         print("sync-spec: drift: {}".format(line))
     if drift:
@@ -133,6 +206,7 @@ def main(argv):
     parser.add_argument("slug")
     parser.add_argument("--from", dest="be", required=True, type=Path, help="local checkout of the be repository")
     parser.add_argument("--ref", default="origin/main")
+    parser.add_argument("--repo", help='this repository\'s name in the "repo" field of tasks.json')
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
     if not sdlc_common.valid_slug(args.slug):
@@ -145,7 +219,7 @@ def main(argv):
         sha = sdlc_common.git(args.be, "rev-parse", "--verify", "-q", args.ref + "^{commit}")
         if not sha:
             raise Failure("{} is not a commit in {} (git fetch there?)".format(args.ref, args.be))
-        (check if args.check else sync)(root, args.be, sha, args.slug)
+        (check if args.check else sync)(root, args.be, sha, args.slug, args.repo or this_repo(root))
     except Failure as exc:
         print("sync-spec: {}".format(exc), file=sys.stderr)
         return 1

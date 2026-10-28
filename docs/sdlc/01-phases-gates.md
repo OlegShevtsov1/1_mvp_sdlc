@@ -80,7 +80,7 @@ The course plugin is vendored unchanged (R-B1); invoke its skills as `/sdlc:<ski
 | `plan-tests` | 4 | test level per acceptance criterion; `task-brief` refuses a criterion without one |
 | `break-tasks` | 4 | M+ only; gated (`tasks`) |
 | `prepare-design-spec` | 4 | frontend features with a UI design to hand over |
-| `implement-tasks` | — | **not used**: the factory implements, one task per run, from `task-brief` |
+| `implement-tasks` | 5 | optional, operator-driven instead of the factory, one task per pull request ([00-operator.md](00-operator.md) step 6); in the frontend on the `sync-spec` copy of its tasks |
 | `verify-ui` | 7 | optional browser check of UI acceptance criteria against a running dev app |
 | `review-feature` | 6 | once per feature, after every task is done (R-C5) |
 | `ship-feature` | 8 | changelog entry and PR body; never merges; gated (`ship`) |

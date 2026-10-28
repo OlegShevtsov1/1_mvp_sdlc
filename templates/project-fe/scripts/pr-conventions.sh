@@ -60,7 +60,7 @@ types=$(printf '%s\n' "${body}" | grep -c '^Type:')
 if [ "${types}" -ne 1 ]; then
   echo "::error::pr-conventions: the PR body must have exactly one Type: line (found ${types})"
   failed=1
-elif ! printf '%s\n' "${body}" | grep -qxE 'Type: (feat|fix|chore|docs|refactor|test|ci)'; then
+elif ! grep -qxE 'Type: (feat|fix|chore|docs|refactor|test|ci)' <<<"${body}"; then
   echo '::error::pr-conventions: the Type: line must be one of feat, fix, chore, docs, refactor, test, ci'
   failed=1
 fi

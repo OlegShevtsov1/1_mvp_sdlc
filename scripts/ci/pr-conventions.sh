@@ -105,7 +105,7 @@ types=$(printf '%s\n' "${body}" | grep -c '^Type:')
 if [ "${types}" -ne 1 ]; then
   echo "::error::pr-conventions: the PR body must have exactly one Type: line (found ${types})"
   failed=1
-elif ! printf '%s\n' "${body}" | grep -qxE 'Type: (feat|fix|chore|docs|refactor|test|ci)'; then
+elif ! grep -qxE 'Type: (feat|fix|chore|docs|refactor|test|ci)' <<<"${body}"; then
   echo '::error::pr-conventions: the Type: line must be one of feat, fix, chore, docs, refactor, test, ci'
   failed=1
 fi
@@ -117,8 +117,8 @@ fi
 
 if [[ "${title}" =~ ${release_title} ]]; then
   version=${BASH_REMATCH[1]}
-  if ! printf '%s\n' "${body}" | release_changelog "${version}" &&
-    ! printf '%s\n' "${body}" | pasted_changelog "${version}" "${CHANGELOG_FILE:-CHANGELOG.md}"; then
+  if ! release_changelog "${version}" <<<"${body}" &&
+    ! pasted_changelog "${version}" "${CHANGELOG_FILE:-CHANGELOG.md}" <<<"${body}"; then
     echo "::error::pr-conventions: a release PR 'PILOT-<n>: Release v${version}' needs in its body '## Changelog (v${version})' followed by the version's CHANGELOG.md section with at least one entry (or '## Changelog' followed by the CHANGELOG.md heading '## [${version}]' and its section, or '## Changelog' followed by exactly the section of ${CHANGELOG_FILE:-CHANGELOG.md})"
     failed=1
   fi

@@ -113,7 +113,11 @@ it with their brownfield start (C2, C3) and new projects from the templates in
 
 - **Task PRs (code)**: the factory merges automatically after the operator approved the task plan (gate 2), CI is
   green and its review passed; in the app repositories they go into `develop`. Only the dev deploy follows
-  automatically; prod always needs a typed confirm and a ref check (R-C1).
+  automatically; prod always needs a typed confirm and a ref check (R-C1). The one exception to the review's round
+  cap (PILOT-300, decisions 93, 99, 100): when the delivery stops from round 3 on and its only open blockers re-raise
+  earlier findings on narrower cases, with every other contract item met and CI green, the factory creates a
+  follow-up card (label `task`, in `Ready`) per such finding, links the cards in the PR description and the run
+  report, and merges; a new defect class, an unmet contract item or red CI still stops the run.
 - **PRs with base `main` in the develop-model repositories, `1_mvp_sdlc` included** (the release `develop` → `main`, a hotfix into `main`) and the
   hotfix back-merge into `develop`: the operator merges by hand; a pull request with base `main` is never merged
   automatically (decision 27). The factory enforces it through `repo.manual_merge_bases: ["main"]` in
@@ -129,10 +133,22 @@ it with their brownfield start (C2, C3) and new projects from the templates in
 
 - **Severity**: P0 (critical: must not merge), P1 (important: fix before the feature is done), P2 (minor: backlog).
   AI review informs, it does not replace the gate.
-- **Cost** (R-C5): the factory's built-in multi-lens review on every PR plus `/sdlc:review-feature` once per feature,
-  locally, after every task is done. No `claude-code-action` and no Managed Code Review in CI. Revisit only on
-  evidence from the metrics that the built-in review misses P0/P1, or on a new operator decision after PUB; checked
-  in the monthly review ([09-metrics.md](09-metrics.md)).
+- **AI PR review** (decisions 32, 103 a): in the app repositories and every project made from the templates,
+  `ai-review.yml` (off unless the repository variable `AI_REVIEW` is `on`) reviews every pull request, factory PRs
+  included; drafts, Dependabot and the release PR `develop` → `main` are skipped. `claude-code-action` reviews with
+  read-only tools, then a script posts one GitHub pull request review per head commit as `github-actions`, shown
+  under Reviewers. Findings on changed lines are inline comments, the others are listed in the review body, each
+  finding once; the body and every inline comment are capped at 60000 characters, below GitHub's limit, with a
+  truncation note. The review state is *Request changes* on P0/P1 and *Comment* otherwise; a later clean review
+  dismisses the earlier *Request changes*. The script knows its own reviews by the `github-actions` login and the
+  `<!-- ai-review -->` marker that starts their body, both for the dismissal and for posting nothing on a head it
+  already reviewed. P0/P1 or a missing summary turn the check `ai-review` red, and the job log lists every P0/P1
+  for the factory's CI-failure handling. A comment `@claude review` asks for a re-review, which posts nothing new on
+  an unchanged head.
+- **Cost** (R-C5): the factory's built-in multi-lens review on every PR, the AI PR review above, and
+  `/sdlc:review-feature` once per feature, locally, after every task is done. No Managed Code Review in CI. Revisit
+  only on evidence from the metrics that the built-in review misses P0/P1, or on a new operator decision after PUB;
+  checked in the monthly review ([09-metrics.md](09-metrics.md)).
 
 ## Protection of `main`
 

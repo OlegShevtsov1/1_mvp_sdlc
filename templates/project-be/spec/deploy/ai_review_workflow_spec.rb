@@ -10,6 +10,9 @@ RSpec.describe 'AI PR review (decision 32)' do
     let(:review) { steps.find { |step| step['uses'] == 'anthropics/claude-code-action@v1' } }
     let(:gate) { steps.find { |step| step['run'] == 'bin/ai-review-gate' } }
     let(:skip) { steps.find { |step| step['run'] == 'bin/ai-review-skip ai-review/pr.json' } }
+    let(:collect) { steps.find { |step| step['name'] == 'Collect the pull request' } }
+    let(:base_checkout) { steps.find { |step| step.dig('with', 'path') == '.ai-review-base' } }
+    let(:submit) { steps.find { |step| step['run'] == '.ai-review-base/bin/ai-review-submit ai-review' } }
 
     it 'runs on the five pull_request types and on new comments' do
       triggers = workflow.fetch('on')
@@ -23,13 +26,13 @@ RSpec.describe 'AI PR review (decision 32)' do
     it 'starts the job only for a reviewable PR or an @claude review comment on a PR' do
       expect(job.fetch('if')).to include(
         'github.event.pull_request.draft',
-        "startsWith(github.event.pull_request.head.ref, 'archon/task-factory-')",
         'dependabot[bot]',
         "github.event.pull_request.head.ref == 'develop'",
         "github.event.pull_request.base.ref == 'main'",
         'github.event.issue.pull_request',
         "contains(github.event.comment.body, '@claude review')"
       )
+      expect(job.fetch('if')).not_to include('archon/task-factory-')
     end
 
     it 'runs on the RUNS_ON runner like the other workflows' do
@@ -60,7 +63,7 @@ RSpec.describe 'AI PR review (decision 32)' do
     it 'reviews only PRs that bin/ai-review-skip lets through' do
       expect(skip).to be_present
       expect(skip['id']).to eq('skip')
-      [ review, gate, steps.last ].each do |step|
+      [ review, gate, base_checkout, submit ].each do |step|
         expect(step['if'].to_s).to include("steps.skip.outputs.skip == 'false'")
       end
     end
@@ -78,14 +81,31 @@ RSpec.describe 'AI PR review (decision 32)' do
         '--model claude-sonnet-5', '--max-turns 25', '--json-schema', '--allowedTools "Read,Glob,Grep"'
       )
       disallowed = inputs.fetch('claude_args')[/--disallowedTools "([^"]+)"/, 1].to_s.split(',')
-      expect(disallowed).to include('Bash', 'Write', 'Edit')
+      expect(disallowed).to include('Bash', 'Write', 'Edit', 'mcp__github_inline_comment__create_inline_comment')
+    end
+
+    it 'asks the model for findings that match its counts' do
+      schema = JSON.parse(review.fetch('with').fetch('claude_args')[/--json-schema '([^']+)'/, 1])
+      finding = schema.dig('properties', 'findings', 'items')
+
+      expect(schema.fetch('required')).to include('p0', 'p1', 'p2', 'comment', 'findings')
+      expect(finding.fetch('required')).to match_array(%w[severity path line title body])
+      expect(finding.dig('properties', 'severity', 'enum')).to eq(%w[P0 P1 P2])
+      expect(finding.dig('properties', 'line')).to eq('type' => 'integer', 'minimum' => 0)
     end
 
     it 'prompts for the review areas with P0/P1/P2 severities' do
       expect(review.fetch('with').fetch('prompt')).to include(
         'P0', 'P1', 'P2', 'ai-review/pr.diff', 'ai-review/pr.json', 'expand', 'contract', 'strong parameters',
-        'mass assignment', 'N+1', 'SQL injection', 'Type:', 'CHANGELOG', 'internal host', 'weakened'
+        'mass assignment', 'N+1', 'SQL injection', 'Type:', 'CHANGELOG', 'internal host', 'weakened',
+        'findings', 'line'
       )
+    end
+
+    it 'asks for a summary without the findings list, which the workflow posts' do
+      prompt = review.fetch('with').fetch('prompt')
+      expect(prompt).to include('do not list the findings')
+      expect(prompt).not_to include('one bullet per finding')
     end
 
     it 'blocks the merge from the structured summary, also when the review step failed' do
@@ -95,12 +115,34 @@ RSpec.describe 'AI PR review (decision 32)' do
       expect(gate.fetch('env')).to include('STRUCTURED_OUTPUT' => '${{ steps.review.outputs.structured_output }}')
     end
 
-    it 'posts one comment, updating the previous one' do
-      comment = steps.last
+    it 'records the head the model reads for the review' do
+      expect(collect.fetch('run')).to include('git rev-parse HEAD > ai-review/head_sha', '> ai-review/pr.diff')
+      expect(steps.index(collect)).to be < steps.index(review)
+    end
 
-      expect(comment.fetch('if')).to include('!cancelled()', 'hashFiles(')
-      expect(comment.fetch('if')).to include('ai-review/comment.md')
-      expect(comment.fetch('run')).to include('<!-- ai-review -->', '-X PATCH', 'comments')
+    it "checks out the workflow's own scripts after the gate, so the PR head never runs with the write token" do
+      expect(base_checkout).to be_present
+      expect(steps.index(base_checkout)).to be > steps.index(gate)
+      expect(base_checkout).to include('uses' => 'actions/checkout@v4', 'continue-on-error' => true)
+      expect(base_checkout.fetch('with')).to include('sparse-checkout' => 'bin', 'persist-credentials' => false)
+      expect(base_checkout.fetch('with')).not_to have_key('ref')
+    end
+
+    it 'posts the review after a red gate too, and a posting failure never changes the check' do
+      expect(submit).to be_present
+      expect(steps.index(submit)).to be > steps.index(base_checkout)
+      expect(submit.fetch('if')).to include('!cancelled()', "hashFiles('ai-review/findings.json')")
+      expect(submit['continue-on-error']).to be(true)
+      expect(submit.fetch('env')).to include('GH_TOKEN' => '${{ github.token }}')
+    end
+
+    it 'posts no issue comment' do
+      steps.each { |step| expect(step['run'].to_s).not_to include('issues/') }
+    end
+
+    it 'says in its header that factory PRs are reviewed' do
+      expect(text).not_to include('Factory PRs are skipped')
+      expect(text).to include('Factory PRs are reviewed')
     end
 
     it 'passes untrusted PR text only through env' do
@@ -149,49 +191,6 @@ RSpec.describe 'AI PR review (decision 32)' do
 
       expect(mismatches).to be_empty, mismatches.join("\n")
     end
-
-    describe 'the comment step' do
-      # Runs the step's own script as GitHub does, with a gh shim that logs its arguments and answers
-      # the lookup of the previous AI review comment with `previous_id` (empty: none yet).
-      def post_comment(previous_id)
-        Dir.mktmpdir do |dir|
-          shim = File.join(dir, 'bin/gh')
-          log = File.join(dir, 'gh.log')
-          FileUtils.mkdir_p(File.dirname(shim))
-          File.write(shim, <<~'SH')
-            #!/usr/bin/env bash
-            echo "$*" >> "$GH_LOG"
-            if [[ "$*" == *--paginate* && -n "$PREVIOUS_ID" ]]; then echo "$PREVIOUS_ID"; fi
-          SH
-          File.chmod(0o755, shim)
-          FileUtils.mkdir_p(File.join(dir, 'ai-review'))
-          File.write(File.join(dir, 'ai-review/comment.md'), "<!-- ai-review -->\n")
-          env = {
-            'PATH' => "#{File.dirname(shim)}:#{ENV.fetch('PATH')}", 'GH_LOG' => log, 'PREVIOUS_ID' => previous_id,
-            'GH_TOKEN' => 'test', 'GITHUB_REPOSITORY' => 'owner/repo', 'PR_NUMBER' => '38'
-          }
-          output, status = Open3.capture2e(env, 'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c',
-                                           steps.last.fetch('run'), chdir: dir)
-          yield output, status, File.exist?(log) ? File.readlines(log, chomp: true) : []
-        end
-      end
-
-      it 'posts a new comment on the first review' do
-        post_comment('') do |output, status, calls|
-          expect(status).to be_success, output
-          expect(calls).to include('api -X POST repos/owner/repo/issues/38/comments -F body=@ai-review/comment.md')
-          expect(calls.grep(/-X PATCH/)).to be_empty
-        end
-      end
-
-      it 'updates the previous comment on a re-review' do
-        post_comment('4242') do |output, status, calls|
-          expect(status).to be_success, output
-          expect(calls).to include('api -X PATCH repos/owner/repo/issues/comments/4242 -F body=@ai-review/comment.md')
-          expect(calls.grep(/-X POST/)).to be_empty
-        end
-      end
-    end
   end
 
   describe 'bin/ai-review-skip' do
@@ -222,7 +221,6 @@ RSpec.describe 'AI PR review (decision 32)' do
 
     {
       { 'isDraft' => true } => 'draft',
-      { 'headRefName' => 'archon/task-factory-1792126613128' } => 'factory branch',
       { 'headRefName' => 'develop', 'baseRefName' => 'main' } => 'release PR',
       { 'author' => { 'login' => 'app/dependabot' } } => 'dependabot',
       { 'author' => { 'login' => 'dependabot[bot]' } } => 'dependabot'
@@ -233,6 +231,13 @@ RSpec.describe 'AI PR review (decision 32)' do
           expect(github_output).to include('skip=true')
           expect(output).to include("AI review skipped: #{reason}")
         end
+      end
+    end
+
+    it 'reviews a factory PR' do
+      skip_check('headRefName' => 'archon/task-factory-1792126613128') do |output, status, github_output|
+        expect(status).to be_success, output
+        expect(github_output).to include('skip=false')
       end
     end
 
@@ -254,6 +259,16 @@ RSpec.describe 'AI PR review (decision 32)' do
   describe 'bin/ai-review-gate' do
     let(:script) { Rails.root.join('bin/ai-review-gate').to_s }
 
+    def finding(severity, path: 'app/x.rb', line: 11, title: "#{severity} title", body: "#{severity} body")
+      { severity: severity, path: path, line: line, title: title, body: body }
+    end
+
+    # The structured output for `findings`, with the counts that match them.
+    def summary(findings)
+      counts = %w[P0 P1 P2].to_h { |severity| [ severity.downcase, findings.count { |f| f[:severity] == severity } ] }
+      counts.merge('comment' => 'x', 'findings' => findings).to_json
+    end
+
     # Yields the output, the exit status and the summary directory after a run with `structured_output`.
     def gate(structured_output)
       Dir.mktmpdir do |dir|
@@ -261,47 +276,75 @@ RSpec.describe 'AI PR review (decision 32)' do
       end
     end
 
-    it 'passes with only P2 findings and writes the summary and the comment' do
-      gate('{"p0":0,"p1":0,"p2":2,"comment":"x"}') do |output, status, dir|
+    it 'passes with only P2 findings and writes the summary, the comment and the findings' do
+      findings = [ finding('P2'), finding('P2', line: 12) ]
+      gate(summary(findings)) do |output, status, dir|
         expect(status).to be_success, output
         expect(JSON.parse(File.read(File.join(dir, 'result.json')))).to eq('p0' => 0, 'p1' => 0, 'p2' => 2)
+        expect(JSON.parse(File.read(File.join(dir, 'findings.json')))).to eq(JSON.parse(findings.to_json))
         comment = File.read(File.join(dir, 'comment.md'))
         expect(comment).to start_with('<!-- ai-review -->')
-        expect(comment).to include('AI-REVIEW: P0=0 P1=0 P2=2')
+        expect(comment.lines.last).to eq("AI-REVIEW: P0=0 P1=0 P2=2\n")
       end
     end
 
-    {
-      'P1' => '{"p0":0,"p1":1,"p2":0,"comment":"x"}',
-      'P0' => '{"p0":1,"p1":0,"p2":0,"comment":"x"}'
-    }.each do |severity, json|
+    %w[P1 P0].each do |severity|
       it "fails with a #{severity} finding: review required before merge" do
-        gate(json) do |output, status, dir|
+        gate(summary([ finding(severity) ])) do |output, status, dir|
           expect(status.exitstatus).to eq(1)
           expect(output).to include('::error::', 'review required before merge (decision 32)')
-          expect(File).to exist(File.join(dir, 'result.json'))
-          expect(File).to exist(File.join(dir, 'comment.md'))
+          %w[result.json comment.md findings.json].each { |name| expect(File).to exist(File.join(dir, name)) }
         end
+      end
+    end
+
+    it 'prints every P0/P1 finding to the log for the factory, with model text kept inert' do
+      findings = [ finding('P1', title: "Unsafe\nquery", body: "SQL from params.\nUse a bind."), finding('P2', title: 'Rename') ]
+      gate(summary(findings)) do |output, status, _dir|
+        expect(status.exitstatus).to eq(1)
+        lines = output.lines(chomp: true)
+        expect(lines).to include('AI review P1 app/x.rb:11 - Unsafe query', '  | SQL from params.', '  | Use a bind.')
+        expect(output).not_to include('Rename')
+        token = lines.find { |line| line.start_with?('::stop-commands::') }.to_s.delete_prefix('::stop-commands::')
+        expect(token).not_to be_empty
+        expect(lines.index("::#{token}::")).to be > lines.index('  | Use a bind.')
+        expect(lines.index("::stop-commands::#{token}")).to be < lines.index('AI review P1 app/x.rb:11 - Unsafe query')
+        expect(lines.index("::#{token}::")).to be < lines.index { |line| line.start_with?('::error::') }
+      end
+    end
+
+    it 'names a finding on no file line as PR' do
+      gate(summary([ finding('P1', path: '', line: 0, title: 'Title convention') ])) do |output, _status, _dir|
+        expect(output.lines(chomp: true)).to include('AI review P1 PR - Title convention')
       end
     end
 
     it 'fails closed when the summary is missing' do
       Dir.mktmpdir do |dir|
-        stale = File.join(dir, 'result.json')
-        File.write(stale, '{"p0":0,"p1":0,"p2":0}')
+        stale = %w[result.json comment.md findings.json].map { |name| File.join(dir, name) }
+        stale.each { |path| File.write(path, '{}') }
         output, status = Open3.capture2e({ 'STRUCTURED_OUTPUT' => '' }, script, dir)
 
         expect(status.exitstatus).to eq(1)
         expect(output).to include('AI review summary missing')
-        expect(File).not_to exist(stale)
+        stale.each { |path| expect(File).not_to exist(path) }
       end
     end
 
     [
       'not json',
-      '{"p0":"0","p1":0,"p2":0,"comment":"x"}',
-      '{"p0":-1,"p1":0,"p2":0,"comment":"x"}',
-      '{"p0":0,"p1":0,"p2":0}'
+      '{"p0":"0","p1":0,"p2":0,"comment":"x","findings":[]}',
+      '{"p0":-1,"p1":0,"p2":0,"comment":"x","findings":[]}',
+      '{"p0":0,"p1":0,"p2":0,"findings":[]}',
+      '{"p0":0,"p1":0,"p2":0,"comment":"x"}',
+      '{"p0":0,"p1":0,"p2":0,"comment":"x","findings":"none"}',
+      '{"p0":0,"p1":1,"p2":0,"comment":"x","findings":[]}',
+      '{"p0":0,"p1":0,"p2":1,"comment":"x","findings":[{"severity":"P3","path":"a","line":1,"title":"t","body":"b"}]}',
+      '{"p0":0,"p1":0,"p2":1,"comment":"x","findings":[{"severity":"P2","path":"a","line":-1,"title":"t","body":"b"}]}',
+      '{"p0":0,"p1":0,"p2":1,"comment":"x","findings":[{"severity":"P2","path":"a","line":1.5,"title":"t","body":"b"}]}',
+      '{"p0":0,"p1":0,"p2":1,"comment":"x","findings":[{"severity":"P2","path":"a","title":"t","body":"b"}]}',
+      '{"p0":0,"p1":0,"p2":1,"comment":"x","findings":[{"severity":"P2","line":1,"title":"t","body":"b"}]}',
+      '{"p0":0,"p1":0,"p2":1,"comment":"x","findings":[{"severity":"P2","path":"a","line":1,"title":"t"}]}'
     ].each do |json|
       it "fails closed on the invalid summary #{json.inspect}" do
         gate(json) do |output, status, _dir|

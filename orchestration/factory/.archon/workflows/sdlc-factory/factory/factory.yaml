@@ -416,8 +416,10 @@ nodes:
   # rounds of implement → draft PR → review → simplify → CI, which marks the PR
   # ready on green. It returns its report {ready, reason, pr_url, …} and
   # completes that report even when an inner node failed, so only a ready
-  # delivery may go on to the merge. Only pr-state reads it; everything after
-  # reads merge-gate. ───────────────────────────────────────────────────────
+  # delivery may go on to the merge. last-delivery hands it (or the retry's)
+  # on to review-followup, and to the report when review-followup was skipped;
+  # the nodes up to pr-state read review-followup's report, everything after
+  # reads merge-gate. ─────────────────────────────────────────────────────────
   - id: deliver
     include: archon-deliver-block
     depends_on: [plan-round, abort-plan]
@@ -440,6 +442,193 @@ nodes:
         `pgrep -f '[m]y-server'`. $visual-scope.output.brief Original request:
         $INPUTS.task $ARGUMENTS
 
+  # ── Retry (PILOT-301, decision 100) ────────────────────────────────────────
+  # A node that breaks inside the bundled delivery ends it failed: most often
+  # the review's route, when Claude returns no structured output (Archon
+  # v0.12.1 re-asks only best-effort providers; archon-factory.md §9). The
+  # block is composed, never forked (rulings.md), so a failed delivery runs
+  # once more as a second include on the same checkout and branch, where
+  # publish-pr reuses the branch's open pull request. Nothing loops back to it,
+  # so there is no third attempt, and no other reason retries. last-delivery
+  # hands on whichever report came last.
+  - id: redeliver
+    include: archon-deliver-block
+    depends_on: [deliver]
+    when: "$deliver.output.reason == 'failed'"
+    with:
+      work: >-
+        The run's first delivery ended failed: a node inside the bundled
+        delivery broke before it reported, and the run's record names it. This
+        is the run's second and last delivery attempt. Continue on this
+        checkout's branch: keep the commits it already holds and add commits
+        after them; never rewrite or force-push them. When an open pull request
+        already has this branch as its head ($deliver.output.pr_url when the
+        first delivery could name it), continue that pull request and never
+        open a second one.
+        Deliver the plan at $ARTIFACTS_DIR/plan.md — read it in full first. The
+        project's own checks: tests `$load-profile.output.test_command`, lint
+        `$load-profile.output.lint_command`, build `$load-profile.output.build_command`
+        (an empty command means the project has none). The pull request will be
+        merged and deployed automatically once it is ready, so never leave a
+        known failure behind. Before the merge the factory republishes the pull
+        request's live description from the newest $ARTIFACTS_DIR/pr-body*.md
+        file, so a review judges the description in that file and never raises
+        a live description that lags it as a finding. Never wait for a process
+        with `pgrep -f` on a literal that also appears in the waiting command
+        itself, because it matches its own shell and never ends; wait on the PID
+        (`cmd & pid=$!; wait "$pid"`) or use a bracket pattern such as
+        `pgrep -f '[m]y-server'`. $visual-scope.output.brief Original request:
+        $INPUTS.task $ARGUMENTS
+
+  - id: last-delivery
+    script: last-delivery
+    runtime: bun
+    depends_on: [deliver, redeliver]
+    trigger_rule: none_failed_min_one_success
+    timeout: 60000
+    with:
+      first: "$deliver.output"
+      retry: { from: "$redeliver.output", if_skipped: "" }
+    output_format:
+      type: object
+      properties:
+        ready: { type: boolean }
+        reason: { type: string }
+        pr_url: { type: string }
+        ci_rerun: { type: string }
+        threads_checked: { type: boolean }
+        summary: { type: string }
+        retry_note: { type: string }
+      required: [ready, reason, pr_url, summary, retry_note]
+
+  # ── Follow-up (PILOT-300, decisions 93, 99, 100) ───────────────────────────
+  # The bundled block owns the rounds, so this acts once it has ended: a
+  # delivery that stopped at round 3 or later (replan, or the round cap) whose
+  # only open blockers re-raise earlier findings on narrower cases, with every
+  # contract item met but for them and CI green, is ready, with one Trello
+  # follow-up card per such finding. review-state reads the facts (GitHub and
+  # findings.json), followup-judge judges the narrowing, review-followup
+  # checks the judgment against the facts and writes; fixtures stub the first
+  # two. Every other delivery passes through review-followup unchanged.
+  - id: review-state
+    script: review-state
+    runtime: bun
+    depends_on: [last-delivery]
+    when: "$last-delivery.output.reason == 'replan' || $last-delivery.output.reason == 'round_cap'"
+    # Waits up to 20 minutes for pending checks on a head no CI agent judged.
+    timeout: 1500000
+    with:
+      delivery: "$last-delivery.output"
+    output_format:
+      type: object
+      properties:
+        pr_url: { type: string }
+        round: { type: number }
+        review_round: { type: number }
+        read: { type: boolean }
+        head: { type: string }
+        is_draft: { type: boolean }
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              bucket: { type: string }
+            required: [name, bucket]
+        checks_read: { type: boolean }
+        review_url: { type: string }
+        review_commit: { type: string }
+        findings_read: { type: boolean }
+        findings:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              severity: { type: string }
+              sources: { type: array, items: { type: string } }
+              claim: { type: string }
+              status: { type: string }
+              round: { type: number }
+            required: [id, severity, sources, claim, status, round]
+      required: [pr_url, round, review_round, read, head, is_draft, checks, checks_read, review_url, review_commit, findings_read, findings]
+
+  - id: followup-judge
+    command: followup-judge
+    model: medium
+    # Pinned to Claude because allowed_tools is enforced for Claude nodes only
+    # (Codex ignores tool restrictions) and this node must only read.
+    provider: claude
+    allowed_tools: [Read, Grep, Glob]
+    depends_on: [review-state]
+    when: "$review-state.output.read == true && $review-state.output.findings_read == true"
+    with:
+      summary: "$last-delivery.output.summary"
+    output_format:
+      type: object
+      properties:
+        findings:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              verdict: { type: string, enum: [narrower, unfixed, new] }
+              earlier_id: { type: string }
+              why: { type: string }
+            required: [id, verdict, earlier_id, why]
+        left_open:
+          type: array
+          items:
+            type: object
+            properties:
+              item: { type: string }
+              finding_ids: { type: array, items: { type: string } }
+              only_followups: { type: boolean }
+            required: [item, finding_ids, only_followups]
+      required: [findings, left_open]
+
+  # Always runs after the delivery and emits the last delivery's report with
+  # followed_up, cards and warning added: unchanged when the rule does not
+  # apply, with "Not followed up: <why>" when it was considered and did not
+  # apply, or ready with reason follow_up. In a dry run it creates no card.
+  # A failed review-state or followup-judge skips it (a binding never falls
+  # back on a failed producer), so the report then reads last-delivery's.
+  - id: review-followup
+    script: review-followup
+    runtime: bun
+    depends_on: [last-delivery, review-state, followup-judge]
+    trigger_rule: none_failed_min_one_success
+    timeout: 120000
+    with:
+      delivery: "$last-delivery.output"
+      state: { from: "$review-state.output", if_skipped: "" }
+      judge: { from: "$followup-judge.output", if_skipped: "" }
+      task: "$INPUTS.task"
+      request: "$ARGUMENTS"
+    output_format:
+      type: object
+      properties:
+        ready: { type: boolean }
+        reason: { type: string }
+        pr_url: { type: string }
+        ci_rerun: { type: string }
+        threads_checked: { type: boolean }
+        summary: { type: string }
+        followed_up: { type: boolean }
+        cards:
+          type: array
+          items:
+            type: object
+            properties:
+              finding: { type: string }
+              url: { type: string }
+              status: { type: string, enum: [created, dry-run, failed] }
+            required: [finding, url, status]
+        warning: { type: string }
+      required: [ready, reason, pr_url, summary, followed_up, cards, warning]
+
   # ── Visual gate (PILOT-278, decisions 85 and 86) ───────────────────────────
   # A visual task's ready delivery waits here for the operator's look at its
   # screenshots. needs-revision runs one more delivery on the same pull request
@@ -451,8 +640,8 @@ nodes:
   # The loop ends a needs-revision after 4 answers, one below max_iterations,
   # so the cap ends typed instead of failing the loop.
   - id: visual-cycle
-    depends_on: [deliver, visual-scope]
-    when: "$deliver.output.ready == true && $visual-scope.output.visual == true"
+    depends_on: [deliver, review-followup, visual-scope]
+    when: "$review-followup.output.ready == true && $visual-scope.output.visual == true"
     loop_group:
       until_bash: 'decision=$visual-gate.output.decision; text=$visual-gate.output.text; printf "%s" "$decision" > "$ARTIFACTS_DIR/visual-gate.decision"; printf "%s" "$text" > "$ARTIFACTS_DIR/visual-gate.text"; printf "%s\n" "$decision" >> "$ARTIFACTS_DIR/visual-gate.decisions"; n=$(wc -l < "$ARTIFACTS_DIR/visual-gate.decisions"); test "$decision" != "needs-revision" || test "$n" -ge 4'
       max_iterations: 5
@@ -462,7 +651,7 @@ nodes:
           script: visual-turn
           runtime: bun
           with:
-            delivery: "$deliver.output"
+            delivery: "$review-followup.output"
           output_format:
             type: object
             properties:
@@ -479,7 +668,7 @@ nodes:
             pull_request: "$visual-turn.output.pr_number"
             work: >-
               Visual revision round $visual-turn.output.round of the pull
-              request $deliver.output.pr_url, which this delivery continues: the
+              request $review-followup.output.pr_url, which this delivery continues: the
               operator reviewed its screenshots and asked for changes. Operator
               feedback: $visual-turn.output.feedback
               Read the plan at $ARTIFACTS_DIR/plan.md first and change what the
@@ -509,7 +698,7 @@ nodes:
           timeout: 60000
           with:
             revision: { from: "$revise.output", if_skipped: "" }
-            initial: "$deliver.output"
+            initial: "$review-followup.output"
             screenshots_dir: "$visual-scope.output.screenshots_dir"
           output_format:
             type: object
@@ -560,13 +749,13 @@ nodes:
   - id: visual-round
     script: visual-round
     runtime: bun
-    depends_on: [deliver, visual-cycle]
+    depends_on: [deliver, review-followup, visual-cycle]
     trigger_rule: none_failed_min_one_success
-    when: "$deliver.output.ready == true"
+    when: "$review-followup.output.ready == true"
     with:
       visual: "$visual-scope.output.visual"
       gate: { from: "$visual-cycle.output", if_skipped: "" }
-      delivery: "$deliver.output"
+      delivery: "$review-followup.output"
     output_format:
       type: object
       properties:
@@ -586,11 +775,11 @@ nodes:
   - id: pr-body-sync
     script: pr-body-sync
     runtime: bun
-    depends_on: [deliver, visual-round]
-    when: "$deliver.output.ready == true && $visual-round.output.proceed == true"
+    depends_on: [deliver, review-followup, visual-round]
+    when: "$review-followup.output.ready == true && $visual-round.output.proceed == true"
     timeout: 120000
     with:
-      delivery: "$deliver.output"
+      delivery: "$review-followup.output"
     output_format:
       type: object
       properties:
@@ -606,13 +795,15 @@ nodes:
   - id: pr-state
     script: pr-state
     runtime: bun
-    depends_on: [deliver, pr-body-sync, visual-round]
+    depends_on: [deliver, review-followup, pr-body-sync, visual-round]
     # A failed or not-ready delivery still completes its report and must never
     # reach the merge, nor one the visual gate stopped.
-    when: "$deliver.output.ready == true && $visual-round.output.proceed == true"
-    timeout: 120000
+    when: "$review-followup.output.ready == true && $visual-round.output.proceed == true"
+    # Waits up to 20 minutes for queued or in-progress checks and workflow
+    # runs on the head: a body edit just before it restarts the head's CI.
+    timeout: 1500000
     with:
-      delivery: "$deliver.output"
+      delivery: "$review-followup.output"
     output_format:
       type: object
       properties:
@@ -653,8 +844,8 @@ nodes:
   # here, so the profile's test and build commands run again on the exact PR
   # head. Lint defers to a passing CI lint check when the PR has one: run
   # locally under the run's .archon/ worktree path, RuboCop's excludes miss
-  # and it refused a PR whose CI Lint was green. It refuses (exit 0, action refuse) on any red command or concluded
-  # red CI check, and when pr-state found the PR unreadable, not open and
+  # and it refused a PR whose CI Lint was green. It refuses (exit 0, action refuse) on any red command or red
+  # latest run of a CI check, and when pr-state found the PR unreadable, not open and
   # ready, or not what the checkout holds. A green PR whose base is in the
   # profile's manual_merge_bases gets action notify instead of merge: those
   # PRs are merged by the operator (decision 27). It also refuses when
@@ -903,7 +1094,7 @@ nodes:
   - id: claude-auth-scan
     script: claude-auth
     runtime: bun
-    depends_on: [deliver, visual-round, merge, notify-operator, deploy, health, monitor, decide-rollback, rollback]
+    depends_on: [last-delivery, review-followup, visual-round, merge, notify-operator, deploy, health, monitor, decide-rollback, rollback]
     trigger_rule: all_done
     timeout: 120000
     with:
@@ -914,7 +1105,7 @@ nodes:
   - id: report
     script: report
     runtime: bun
-    depends_on: [deliver, visual-round, merge, notify-operator, deploy, health, monitor, decide-rollback, rollback, claude-auth-scan]
+    depends_on: [last-delivery, review-followup, visual-round, merge, notify-operator, deploy, health, monitor, decide-rollback, rollback, claude-auth-scan]
     # all_done: a failed or not-ready delivery skips the merge path, and the
     # run must still end with a report.
     trigger_rule: all_done
@@ -923,9 +1114,14 @@ nodes:
       # if_skipped the report node itself failed on the binding (seen live) and
       # the run ended with no report at all.
       pr_url: { from: "$merge-gate.output.pr_url", if_skipped: "" }
-      delivery_ready: { from: "$deliver.output.ready", if_skipped: "skipped" }
-      delivery_reason: { from: "$deliver.output.reason", if_skipped: "" }
-      delivery_summary: { from: "$deliver.output.summary", if_skipped: "" }
+      delivery_ready: { from: "$review-followup.output.ready", if_skipped: "skipped" }
+      delivery_reason: { from: "$review-followup.output.reason", if_skipped: "" }
+      delivery_summary: { from: "$review-followup.output.summary", if_skipped: "" }
+      deliver_ready: { from: "$last-delivery.output.ready", if_skipped: "skipped" }
+      deliver_reason: { from: "$last-delivery.output.reason", if_skipped: "" }
+      deliver_summary: { from: "$last-delivery.output.summary", if_skipped: "" }
+      retry_note: { from: "$last-delivery.output.retry_note", if_skipped: "" }
+      followups: { from: "$review-followup.output.cards", if_skipped: "[]" }
       merge_refused: { from: "$merge-gate.output.reason", if_skipped: "" }
       merge_action: { from: "$merge-gate.output.action", if_skipped: "" }
       merge_base: { from: "$merge-gate.output.base", if_skipped: "" }

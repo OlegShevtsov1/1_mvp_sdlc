@@ -11,8 +11,9 @@ interface Step {
   uses?: string
   run?: string
   if?: string
-  with?: Record<string, string | number>
+  with?: Record<string, string | number | boolean>
   env?: Record<string, string>
+  'continue-on-error'?: boolean
 }
 
 interface Job {
@@ -62,8 +63,8 @@ describe('ai-review workflow', () => {
     expect(workflow.on.issue_comment?.types).toEqual(['created'])
   })
 
-  it('skips factory branches, Dependabot, drafts and the release PR', () => {
-    expect(condition).toContain("!startsWith(github.event.pull_request.head.ref, 'archon/task-factory-')")
+  it('reviews factory branches and skips Dependabot, drafts and the release PR', () => {
+    expect(condition).not.toContain('archon/task-factory-')
     expect(condition).toContain("github.actor != 'dependabot[bot]'")
     expect(condition).toContain("github.event.pull_request.user.login != 'dependabot[bot]'")
     expect(condition).toContain('!github.event.pull_request.draft')
@@ -127,7 +128,18 @@ describe('ai-review workflow', () => {
     expect(args).toContain('--max-turns 20')
     expect(args).toContain('--json-schema')
     const disallowed = option(args, '--disallowedTools').split(',')
-    expect(disallowed).toEqual(expect.arrayContaining(['Edit', 'Write']))
+    expect(disallowed).toEqual(
+      expect.arrayContaining(['Edit', 'Write', 'mcp__github_inline_comment__create_inline_comment']),
+    )
+    const schema = JSON.parse(option(args, '--json-schema')) as {
+      required: string[]
+      properties: { findings: { items: { required: string[]; properties: Record<string, unknown> } } }
+    }
+    expect(schema.required).toEqual(['summary', 'findings'])
+    const finding = schema.properties.findings.items
+    expect(Object.keys(finding.properties)).toEqual(['severity', 'path', 'line', 'title', 'body'])
+    expect(finding.required).toEqual(['severity', 'path', 'line', 'title', 'body'])
+    expect(finding.properties.line).toEqual({ type: 'integer', minimum: 0 })
     const allowed = option(args, '--allowedTools').split(',')
     expect(allowed.length).toBeGreaterThan(0)
     for (const tool of allowed) {
@@ -136,18 +148,57 @@ describe('ai-review workflow', () => {
     }
 
     const prompt = String(review.with?.prompt ?? '')
-    for (const word of ['P0', 'P1', 'P2', '/config.js', 'XSS', 'Type:']) expect(prompt).toContain(word)
+    for (const word of ['P0', 'P1', 'P2', '/config.js', 'XSS', 'Type:', 'line 0', 'the workflow posts the review'])
+      expect(prompt).toContain(word)
+  })
+
+  it('collects the head and the diff the review reads', () => {
+    const collect = steps.findIndex((step) => step.name === 'Collect the pull request')
+    expect(collect).toBeGreaterThan(0)
+    expect(steps[collect].run).toContain('git rev-parse HEAD > ai-review/head_sha')
+    expect(steps[collect].run).toContain('> ai-review/pr.diff')
+    expect(collect).toBeLessThan(steps.findIndex((step) => step.uses === action))
   })
 
   it('gates the merge after the review, even when the review step failed', () => {
-    const last = steps[steps.length - 1]
-    expect(last.run).toContain('bash scripts/ai-review-report.sh')
-    expect(last.if).toContain('!cancelled()')
-    expect(last.if).toContain(enabled)
-    expect(last.env?.RESULT).toContain('steps.review.outputs.structured_output')
+    const gate = steps.findIndex((step) => step.run === 'bash scripts/ai-review-report.sh')
+    expect(gate).toBeGreaterThan(0)
+    expect(steps[gate].name).toBe('Block the merge on P0/P1 (decision 32)')
+    expect(steps[gate].if).toContain('!cancelled()')
+    expect(steps[gate].if).toContain(enabled)
+    expect(steps[gate].env?.RESULT).toContain('steps.review.outputs.structured_output')
+    expect(steps[gate].env?.GH_TOKEN).toBeUndefined()
     const reviewIndex = steps.findIndex((step) => step.uses === action)
     expect(steps[reviewIndex].id).toBe('review')
-    expect(reviewIndex).toBeLessThan(steps.length - 1)
+    expect(reviewIndex).toBeLessThan(gate)
+  })
+
+  it('checks out the PR head without persisting the token', () => {
+    const head = steps.find((step) => String(step.with?.ref ?? '').includes('pull_request.head.sha'))
+    expect(head?.uses).toBe('actions/checkout@v7')
+    expect(head?.with?.['persist-credentials']).toBe(false)
+  })
+
+  it("posts the review from the workflow's own scripts after the gate", () => {
+    const gate = steps.findIndex((step) => step.run === 'bash scripts/ai-review-report.sh')
+    const base = steps.findIndex((step) => step.with?.path === '.ai-review-base')
+    expect(base).toBeGreaterThan(gate)
+    expect(steps[base].uses).toBe('actions/checkout@v7')
+    expect(steps[base].with?.['sparse-checkout']).toBe('scripts')
+    expect(steps[base].with?.['persist-credentials']).toBe(false)
+    expect(steps[base].with?.ref).toBeUndefined()
+    expect(steps[base]['continue-on-error']).toBe(true)
+
+    const submit = steps[steps.length - 1]
+    expect(steps.length - 1).toBeGreaterThan(base)
+    expect(submit.run).toBe('bash .ai-review-base/scripts/ai-review-submit.sh ai-review')
+    expect(submit.if).toContain('!cancelled()')
+    expect(submit.if).toContain(enabled)
+    expect(submit.if).toContain("hashFiles('ai-review/findings.json')")
+    expect(submit['continue-on-error']).toBe(true)
+    expect(submit.env?.GH_TOKEN).toBe('${{ github.token }}')
+    expect(submit.env?.PR_NUMBER).toBeDefined()
+    for (const step of steps) expect(step.run ?? '').not.toContain('issues/')
   })
 
   it('keeps expressions out of run scripts and secrets out of the file', () => {

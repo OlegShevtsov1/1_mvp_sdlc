@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Decides whether the AI review (decision 32) applies to a pull request; the AI review workflow runs it
 # on the PR fetched with gh pr view, because an issue_comment event carries no head, base or draft.
-# Skipped: drafts, the factory's archon/task-factory-* (the factory reviews its own PRs, R-C5), the
-# release PR develop -> main, and dependabot.
+# Skipped: drafts, the release PR develop -> main, and dependabot. Factory PRs are reviewed (decision 103 a).
 # Usage: bin/ai-review-skip <pr.json> (fields headRefName, baseRefName, isDraft, author.login).
 # Prints skip=true or skip=false, also to GITHUB_OUTPUT when set.
 # Exit 0: decided (a skip is green). Exit 2: usage error.
@@ -22,8 +21,6 @@ author=$(jq -r '.author.login' "${pr_json}")
 reason=""
 if [[ "${is_draft}" == true ]]; then
   reason="draft"
-elif [[ "${head_ref}" == archon/task-factory-* ]]; then
-  reason="factory branch (the factory reviews its own PRs, R-C5)"
 elif [[ "${head_ref}" == develop && "${base_ref}" == main ]]; then
   reason="release PR develop -> main"
 elif [[ "${author}" == "dependabot[bot]" || "${author}" == app/dependabot ]]; then

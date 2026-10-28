@@ -1,9 +1,13 @@
 import { emit, parseJsonObject } from "./_lib/io.ts";
 import { type CiCheck, PR_URL } from "./_lib/merge-decision.ts";
+import { settledChecks } from "./_lib/pr-checks.ts";
 
 // Binding (see factory.yaml `pr-state` node): delivery (the whole deliver
 // report). Reports facts only, merge-gate decides; always exits 0 with one line.
 const delivery = parseJsonObject(process.env.INPUTS_DELIVERY ?? "") ?? {};
+// A body edit just before this node restarts the head's CI; tests shorten both.
+const POLL_MS = Number(process.env.PR_STATE_POLL_MS || 30_000);
+const WAIT_MS = Number(process.env.PR_STATE_WAIT_MS || 20 * 60_000);
 
 interface PrState {
   pr_url: string;
@@ -24,26 +28,7 @@ function capture(argv: string[]): { ok: boolean; out: string } {
   return { ok: p.exitCode === 0, out: p.stdout.toString().trim() };
 }
 
-// gh encodes the checks' state in its exit code, so stdout is parsed whatever
-// the exit; a head with no checks at all prints a message instead of JSON.
-function readChecks(url: string): { checks: CiCheck[]; checks_read: boolean } {
-  const p = Bun.spawnSync(["gh", "pr", "checks", url, "--json", "name,bucket"], { stdout: "pipe", stderr: "pipe" });
-  const out = p.stdout.toString().trim();
-  if (/no checks reported/i.test(out + p.stderr.toString())) return { checks: [], checks_read: true };
-  try {
-    const doc: unknown = JSON.parse(out);
-    if (!Array.isArray(doc)) return { checks: [], checks_read: false };
-    const checks = doc.map((c: { name?: unknown; bucket?: unknown }) => ({
-      name: typeof c?.name === "string" ? c.name : "",
-      bucket: typeof c?.bucket === "string" ? c.bucket : "",
-    }));
-    return { checks, checks_read: true };
-  } catch {
-    return { checks: [], checks_read: false };
-  }
-}
-
-function read(): PrState {
+async function read(): Promise<PrState> {
   // archon-deliver-block's report carries the URL as pr_url.
   const url = typeof delivery.pr_url === "string" ? delivery.pr_url : "";
   const unread: PrState = {
@@ -81,8 +66,8 @@ function read(): PrState {
     is_draft: pr.isDraft !== false,
     checkout_is_head: checkout.ok && checkout.out === pr.headRefOid,
     checkout_clean: status.ok && status.out === "",
-    ...readChecks(url),
+    ...(await settledChecks(url, pr.headRefOid, { pollMs: POLL_MS, waitMs: WAIT_MS })),
   };
 }
 
-emit(read());
+emit(await read());

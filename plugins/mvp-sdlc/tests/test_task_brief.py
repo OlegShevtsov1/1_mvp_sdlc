@@ -254,7 +254,7 @@ class TaskBriefTest(TempTestCase):
 
 
 class TaskBriefFromBackendTest(TempTestCase):
-    """A frontend task is briefed in the frontend from the backend's committed tasks/ (sync-spec does not copy it)."""
+    """A frontend task is briefed in the frontend from the backend's committed tasks/, which owns its status."""
 
     def setUp(self):
         super().setUp()
@@ -297,6 +297,22 @@ class TaskBriefFromBackendTest(TempTestCase):
         shutil.copytree(str(self.be.path / FEATURE / "tasks"), str(self.fe.path / FEATURE / "tasks"))
         self.assertRefused(self.brief("T1", "--from", self.be.path), "tasks/tasks.json exists here", "drop --from")
         self.assertEqual(self.brief("T1").returncode, 0)
+
+    def test_the_sync_spec_copy_of_the_tasks_keeps_from_working(self):
+        path = FEATURE + "tasks/tasks.json"
+        tasks = json.loads(self.be.read(path))
+        for task in tasks["tasks"]:
+            task["repo"] = "fe"
+        self.be.write(path, json.dumps(tasks))
+        self.be.commit("frontend tasks")
+        self.be.push()
+        synced = self.fe.bin("sync-spec", "demo", "--from", self.be.path, "--repo", "fe")
+        self.assertEqual(synced.returncode, 0, synced.stderr)
+        self.assertTrue((self.fe.path / path).is_file())
+        result = self.brief("T1", "--from", self.be.path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("live in the backend repository", result.stdout)
+        self.assertRefused(self.brief(), "sync-spec copy", "--from")
 
     def test_default_ref_follows_the_profile_base_branch(self):
         self.fe.replace(".archon/factory-profile.yaml", 'base_branch: "main"', 'base_branch: "develop"')

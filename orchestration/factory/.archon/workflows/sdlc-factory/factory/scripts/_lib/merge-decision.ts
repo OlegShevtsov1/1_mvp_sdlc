@@ -3,7 +3,7 @@ import { DEFAULT_MANUAL_MERGE_BASES } from "./profile.ts";
 // `merge` interpolates the URL into a shell script, so only this shape passes.
 export const PR_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[0-9]+$/;
 
-// One entry of `gh pr checks --json name,bucket`; bucket is pass, fail,
+// A check's latest run on the head (pr-checks.ts); bucket is gh's: pass, fail,
 // pending, skipping or cancel.
 export interface CiCheck {
   name: string;

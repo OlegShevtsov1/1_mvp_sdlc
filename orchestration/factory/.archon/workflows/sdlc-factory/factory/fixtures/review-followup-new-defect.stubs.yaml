@@ -1,0 +1,120 @@
+# PILOT-300: the same round-3 replan as review-followup-ready, but the judge
+# finds R6 a new defect class, so review-followup passes the delivery through
+# not ready with why it was not followed up, and the run never reaches the
+# merge path although pr-state, merge, deploy and health are stubbed green.
+# review-state and followup-judge are stubbed.
+# Stubs the inner nodes of Archon v0.12.1's archon-plan-block and
+# archon-deliver-block (inside the rounds loop a node id has no `deliver__`
+# prefix).
+profile-check: '{"exists":true}'
+load-profile:
+  language: python
+  framework: fastapi
+  test_command: "true"
+  lint_command: ""
+  build_command: ""
+  remote: origin
+  base_branch: develop
+  merge_strategy: squash
+  deploy_command: "echo deploy"
+  health_url: "https://app.example.com/health"
+  wait_seconds: 120
+  rollback_command: "echo rollback"
+  monitoring_provider: none
+  window_minutes: 10
+  secret_names: []
+  manual_merge_bases: ["main"]
+sync-base: { action: "kept", base: "origin/develop", before: "0000000", after: "0000000", reason: "stub: already at origin/develop" }
+
+plan__plan:
+  ready: true
+  open_questions: []
+  summary: "stub: approach chosen and plan ready"
+  report: { type: archon_artifact, run_id: "fixture-run", path: "plan.md" }
+# forge, not gh: the threads node (gh only) is skipped, so nothing reaches GitHub.
+deliver__forge: { source: forge }
+implement__implement:
+  done: true
+  green: true
+  red_cause: ""
+  summary: "stub: implemented; focused checks pass"
+implement__assert-changed: "2 files changed"
+pr__forge: { source: forge }
+pr__prepare: { repo: { host: "github.com", path: "example/repo" }, head_repo: { host: "github.com", path: "example/repo" }, head: "fixture-branch", base: "develop", existing: null, title: "stub: title", body: { type: archon_artifact, run_id: "fixture-run", path: "pr-body.md" }, summary: "stub: target recorded" }
+pr__publish: { schemaVersion: 1, repo: { host: "github.com", path: "example/repo" }, number: 3, url: "https://github.com/example/repo/pull/3", head: "fixture-branch", base: "develop", is_draft: true, state: "open", head_repo: { host: "github.com", path: "example/repo" }, head_revision: "fixturehead", base_revision: "fixturebase", maintainer_can_modify: null }
+review__mode: '{"continuation":false,"light":false,"head":"fixturehead","cursor":"","risks":"fixture-owned-policy","execution":{"path":"review__mode","invocation":{"loopPath":[]}},"seams":false,"code":false,"tests":false,"errors":false,"docs":false,"part":null}'
+review__route: { seams: false, code: true, tests: true, errors: false, docs: false, reason: "stub" }
+review__scope:
+  head_matches: true
+  pr: { repo: { host: "github.com", path: "example/repo" }, number: 3 }
+  report: { type: archon_artifact, run_id: "fixture-run", path: "review/scope.md" }
+review__code: "0 findings"
+review__tests: "0 findings"
+review__prune-scratch: "prune-scratch: removed 0 scratch worktree(s)"
+review__synthesize: &replan
+  ready: false
+  action: replan
+  findings_summary: "R6 re-raised on a narrower case of the same invariant."
+  report: { type: archon_artifact, run_id: "fixture-run", path: "review/report.md" }
+  discoveries: []
+  contract_left: ["Required outcome: unmet — R6"]
+review__publish: *replan
+# A dry run iterates the rounds loop once, so the loop's round node is stubbed
+# with round 3's ending, the way visual-turn is stubbed for round 2.
+round:
+  round: 3
+  done: true
+  ready: false
+  reason: replan
+  pr_url: "https://github.com/example/repo/pull/3"
+  light_review: false
+  ci_rerun: none
+  prior_report: ""
+  contract_left: ["Required outcome: unmet — R6"]
+  threads_checked: false
+  summary: "Round 3: replan. R6 re-raised on a narrower case of the same invariant."
+# review-state talks to GitHub, so it is stubbed: the head the review judged,
+# green CI, and R6 open since round 2 (the T7 shape: a carried id).
+review-state:
+  pr_url: "https://github.com/example/repo/pull/3"
+  round: 3
+  review_round: 4
+  read: true
+  head: fixturehead
+  is_draft: true
+  checks: [{ name: "Tests", bucket: "pass" }]
+  checks_read: true
+  review_url: "https://github.com/example/repo/pull/3#issuecomment-1"
+  review_commit: fixturehead
+  findings_read: true
+  findings:
+    - { id: R1, severity: blocking, sources: [code], claim: "The guard misses an empty list.", status: fixed, round: 1 }
+    - { id: R6, severity: blocking, sources: [code], claim: "The guard still misses a list of one blank entry.", status: open, round: 2 }
+simplify__simplify: { findings: false }
+simplify__prune-scratch: "prune-scratch: removed 0 scratch worktree(s)"
+followup-judge:
+  findings: [{ id: R6, verdict: new, earlier_id: "", why: "stub: a different invariant" }]
+  left_open: [{ item: "Required outcome: unmet — R6", finding_ids: [R6], only_followups: true }]
+deliver__update-pr-body: { changed: false, summary: "stub: the description is still accurate" }
+# pr-body-sync talks to GitHub, so it is stubbed like pr-state.
+pr-body-sync: { pr_url: "https://github.com/example/repo/pull/3", action: unchanged, source: "pr-body-final.md", reason: "stub: the live description matches" }
+# pr-state talks to GitHub, so it is stubbed; merge-gate executes for real
+# against it in the scratch worktree of HEAD, where the profile's test
+# command is `true`.
+pr-state: { pr_url: "https://github.com/example/repo/pull/3", read: true, head: "fixture-branch", base: "develop", state: "OPEN", mergeable: "MERGEABLE", is_draft: false, checkout_is_head: true, checkout_clean: true, checks: [{ name: "Tests", bucket: "pass" }], checks_read: true }
+merge: { merged: true, merge_sha: "abc1234", head: "fixture-branch", error: "" }
+
+# Deploy and health are stubbed (the scratch worktree has nothing to deploy
+# to). monitor-check executes for real and prints enabled:false because this
+# profile's provider is `none`, so monitor is skipped and needs no stub.
+# decide-rollback and report execute for real; rollback is skipped by `when:`.
+deploy: { deployed: true, exit_code: 0, deployed_at: "2026-09-20T10:00:00Z", log: "deploy.log" }
+health: { healthy: true, last_status: "200", elapsed_seconds: 4 }
+
+plan-gate: { decision: approve, text: "" }
+exec-code: true
+fixture:
+  expect: cancelled
+  reached: [review-followup, report, not-delivered]
+  inputs:
+    task: "PILOT-7: fixture"

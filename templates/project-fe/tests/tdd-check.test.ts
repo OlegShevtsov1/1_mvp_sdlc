@@ -69,6 +69,22 @@ describe('scripts/tdd-check.sh', () => {
     expect(result.stdout).toContain('feat(x): code first')
   })
 
+  it('still applies when the change list is larger than the pipe buffer', () => {
+    const pad = Object.fromEntries(
+      Array.from({ length: 1200 }, (_, i) => [
+        `src/pad/file-${String(i).padStart(4, '0')}-${'x'.repeat(100)}.ts`,
+        `export const n = ${i}\n`,
+      ]),
+    )
+    commit(repo, 'feat(x): code first', { 'src/app.ts': 'export const a = 2\n', ...pad })
+    expect(git(repo, 'diff', '--name-only', 'main', 'HEAD').length).toBeGreaterThan(100_000)
+    const result = tddCheck()
+    expect(result.status, result.stdout + result.stderr).toBe(1)
+    expect(result.stdout).toContain('first commit must start with test(')
+    expect(result.stdout).not.toContain('not applicable')
+    expect(calls(bin, 'npm')).toEqual([])
+  })
+
   it.each([
     'src/a/b.test.ts',
     'src/App.test.tsx',

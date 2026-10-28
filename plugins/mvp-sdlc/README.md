@@ -60,10 +60,14 @@ and carry on.
   `config/project.env` names the project, else `TRELLO_BOARD_ID`) come from the environment or from
   `TRELLO_ENV_FILE` (default `~/.config/trello/.env`); they reach `curl` on stdin only and are never printed. The
   card text is printed inside `<untrusted-trello-card>` … `</untrusted-trello-card>`.
-- `sync-spec <slug> --from <be checkout> [--ref <ref>] [--check]` — copies `PRD.md`, `sad.md`, `adr/`,
-  `contracts/`, `CONTEXT.md` and `test-plan.md` from a backend commit (default `origin/main`) with a "do not edit"
-  header and a `.spec-source` record, which also carries the card id, number and title from the backend
-  `state.json`; `--check` exits 1 on any drift. Local only: frontend CI cannot read the
+- `sync-spec <slug> --from <be checkout> [--ref <ref>] [--repo <name>] [--check]` — copies `PRD.md`, `sad.md`,
+  `adr/`, `contracts/`, `CONTEXT.md` and `test-plan.md` from a backend commit (default `origin/main`) with a "do not
+  edit" header and a `.spec-source` record, which also carries the card id, number and title from the backend
+  `state.json`. It also copies this repository's tasks, so the course `implement-tasks` finds them: `tasks/tasks.json`
+  reduced to the tasks whose `"repo"` is this repository (`--repo`, default the `origin` remote's name; deps on
+  other tasks move to `"external_deps"`), their task files and `tasks/_*.md`; never `tasks/tracker.md`. A file
+  copied earlier that is no longer a source is removed. `--check` exits 1 on any drift, and on a file under `tasks/`
+  that is not a copy. Local only: frontend CI cannot read the
   private backend repository.
 - `task-cards <slug> [--dry-run]` — one Trello card per task of `docs/features/<slug>/tasks/tasks.json` (decision
   78), run in the backend after `break-tasks`. Validates first (feature started from its card, every task with an id
@@ -88,7 +92,8 @@ and carry on.
   `type`, default `feat`), `SDLC-Task:` and `SDLC-AC:`, and the `- Board:` line. A task without a card falls back
   to the feature card's `PILOT-<n>: <card title>` with a warning on stderr. `--from` reads `tasks/tasks.json` and
   `tasks/tracker.md` from the backend checkout as committed at `<ref>` (default `origin/<repo.base_branch>` of the
-  factory profile) for frontend tasks, which `sync-spec` does not copy. Refuses tasks that are not ready, invalid
+  factory profile) for frontend tasks, whose status the backend owns; the `sync-spec` copy of `tasks.json` is
+  briefed only with `--from`. Refuses tasks that are not ready, invalid
   task card fields, and tasks with no card number at all. Never names a branch and never carries a Trello link.
 - `bootstrap-project <be|fe> [--target DIR] [--overwrite PATH]...` — installs `CLAUDE.md`,
   `.claude/settings.json`, `.claude/rules/*.md`, `.claude/sdlc.local.md` and the `.gitignore` line

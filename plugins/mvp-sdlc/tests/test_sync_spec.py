@@ -162,3 +162,133 @@ class SyncSpecTest(TempTestCase):
     def test_invalid_slug_exits_2(self):
         result = self.fe.bin("sync-spec", "Demo_1", "--from", self.be.path)
         self.assertEqual(result.returncode, 2, result.stderr)
+
+
+TASK_FILE = "---\nid: {0}\ntitle: \"{1}\"\nrepo: {2}\nstatus: \"todo\"\n---\n\n# {0} — {1}\n"
+
+
+class SyncSpecTasksTest(TempTestCase):
+    """The fe gets its own tasks from the be tasks.json, so the course implement-tasks finds them there."""
+
+    def setUp(self):
+        super().setUp()
+        self.be = AppRepo(self.tmp, "spec-sync", name="be")
+        self.tasks = [
+            {"id": "T1", "title": "Export endpoint", "layer": "ports", "deps": [], "repo": "be", "status": "done"},
+            {"id": "T2", "title": "Export button", "layer": "ui", "deps": ["T1"], "repo": "fe", "status": "todo"},
+            {"id": "T3", "title": "Export page", "layer": "ui", "deps": ["T1", "T2"], "repo": "fe", "status": "todo"},
+        ]
+        self.write_tasks()
+        for task in self.tasks:
+            self.be.write(FEATURE + "tasks/{}-task.md".format(task["id"].lower()),
+                          TASK_FILE.format(task["id"], task["title"], task["repo"]))
+        self.be.write(FEATURE + "tasks/_epic.md", "# Epic — demo\n")
+        self.be.write(FEATURE + "tasks/tracker.md", "# Tracker — demo\n\n| T2 | Export button | todo |\n")
+        self.be_sha = self.be.commit("tasks")
+        self.be.push()
+        self.fe = AppRepo(self.tmp, name="fe")
+        self.fe.write("README.md", "fe\n")
+        self.fe.commit("init")
+
+    def write_tasks(self):
+        self.be.write(FEATURE + "tasks/tasks.json", json.dumps({"slug": "demo", "tasks": self.tasks}, indent=2))
+
+    def change_be(self, change):
+        change({t["id"]: t for t in self.tasks})
+        self.write_tasks()
+        self.be.commit("tasks changed")
+        self.be.push()
+
+    def sync(self, *args):
+        return self.fe.bin("sync-spec", "demo", "--from", self.be.path, "--repo", "fe", *args)
+
+    def copied_tasks(self):
+        return json.loads(self.fe.read(FEATURE + "tasks/tasks.json"))
+
+    def assertDrift(self, result, *needles):
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for needle in needles:
+            self.assertIn(needle, result.stdout + result.stderr)
+
+    def assertInSync(self):
+        result = self.sync("--check")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_sync_copies_only_this_repos_tasks(self):
+        result = self.sync()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        tasks = sorted(p.name for p in (self.fe.path / FEATURE / "tasks").iterdir())
+        self.assertEqual(tasks, ["_epic.md", "t2-task.md", "t3-task.md", "tasks.json"])
+        copy = self.copied_tasks()
+        self.assertEqual([t["id"] for t in copy["tasks"]], ["T2", "T3"])
+        self.assertEqual(copy["slug"], "demo")
+        self.assertEqual(copy["tasks"][1]["deps"], ["T2"])
+        self.assertEqual(copy["tasks"][1]["external_deps"], ["T1"])
+        self.assertEqual(copy["tasks"][0]["external_deps"], ["T1"])
+        self.assertIn("be@{}:{}tasks/tasks.json".format(self.be_sha, FEATURE), copy["copied_from"])
+        self.assertIn("Do not edit here", copy["copied_from"])
+        task_file = self.fe.read(FEATURE + "tasks/t2-task.md").splitlines()
+        self.assertEqual(task_file[1], "id: T2")
+        self.assertTrue(task_file[6].startswith("<!-- Copied from be@" + self.be_sha), task_file[6])
+        record = json.loads(self.fe.read(FEATURE + ".spec-source"))
+        self.assertIn("tasks/tasks.json", record["files"])
+        self.assertNotIn("tasks/tracker.md", record["files"])
+        self.assertInSync()
+
+    def test_this_repo_defaults_to_the_origin_name(self):
+        self.fe.git("remote", "set-url", "origin", "git@github.com:someone/fe.git")
+        result = self.fe.bin("sync-spec", "demo", "--from", self.be.path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([t["id"] for t in self.copied_tasks()["tasks"]], ["T2", "T3"])
+
+    def test_no_tasks_of_this_repo_copies_no_tasks(self):
+        result = self.fe.bin("sync-spec", "demo", "--from", self.be.path, "--repo", "other")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.fe.path / FEATURE / "tasks").exists())
+        self.assertTrue((self.fe.path / FEATURE / "PRD.md").is_file())
+
+    def test_check_detects_a_changed_task_of_this_repo(self):
+        self.sync()
+        self.change_be(lambda tasks: tasks["T2"].update(status="done"))
+        self.assertDrift(self.sync("--check"), "tasks/tasks.json: changed in be@")
+        self.assertEqual(self.sync().returncode, 0)
+        self.assertEqual(self.copied_tasks()["tasks"][0]["status"], "done")
+        self.assertInSync()
+
+    def test_check_ignores_a_change_to_another_repos_task(self):
+        self.sync()
+        self.change_be(lambda tasks: tasks["T1"].update(title="Export endpoint, paged"))
+        self.assertInSync()
+
+    def test_check_detects_a_local_edit_of_the_task_copy(self):
+        self.sync()
+        self.fe.replace(FEATURE + "tasks/tasks.json", '"status": "todo"', '"status": "done"')
+        self.assertDrift(self.sync("--check"), "tasks/tasks.json: the copy here was edited")
+
+    def test_check_detects_a_tracker_written_here(self):
+        self.sync()
+        self.fe.write(FEATURE + "tasks/tracker.md", "| T2 | Export button | done |\n")
+        self.assertDrift(self.sync("--check"), "tasks/tracker.md: not a copy from be", "live in be")
+
+    def test_resync_removes_a_task_that_left_this_repo(self):
+        self.sync()
+        self.change_be(lambda tasks: tasks["T3"].update(repo="be"))
+        self.be.write(FEATURE + "tasks/t3-task.md", TASK_FILE.format("T3", "Export page", "be"))
+        self.be.commit("T3 moves to be")
+        self.be.push()
+        self.assertDrift(self.sync("--check"), "tasks/t3-task.md: removed in be@", "tasks/tasks.json: changed in be@")
+        result = self.sync()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("removed {}tasks/t3-task.md".format(FEATURE), result.stdout)
+        self.assertFalse((self.fe.path / FEATURE / "tasks/t3-task.md").exists())
+        self.assertEqual([t["id"] for t in self.copied_tasks()["tasks"]], ["T2"])
+        self.assertInSync()
+
+    def test_invalid_tasks_json_fails_the_sync(self):
+        self.be.write(FEATURE + "tasks/tasks.json", json.dumps({"slug": "demo"}))
+        self.be.commit("broken tasks")
+        self.be.push()
+        result = self.sync()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("tasks.json contract", result.stderr)
+        self.assertFalse((self.fe.path / FEATURE / ".spec-source").exists())

@@ -1,27 +1,37 @@
 #!/usr/bin/env bash
 # The blocking step of the AI review (decision 32): reads the review's structured output, writes the
-# machine-readable summary <dir>/result.json ({"p0":n,"p1":n,"p2":n}) and the PR comment <dir>/comment.md,
-# and fails while there are P0 or P1 findings. It decides only from STRUCTURED_OUTPUT: the PR head is
-# checked out in the workspace, so a result.json found there could come from the PR itself.
+# machine-readable summary <dir>/result.json ({"p0":n,"p1":n,"p2":n}), the review summary <dir>/comment.md
+# and the findings <dir>/findings.json for bin/ai-review-submit, lists every P0/P1 finding in the job log
+# (the factory's CI-failure handling reads it) and fails while there are any. It decides only from
+# STRUCTURED_OUTPUT: the PR head is checked out in the workspace, so a result.json found there could come
+# from the PR itself.
 # Usage: bin/ai-review-gate [dir] (default ai-review). Env: STRUCTURED_OUTPUT, the JSON
-# {"p0":n,"p1":n,"p2":n,"comment":"<markdown>"}.
+# {"p0":n,"p1":n,"p2":n,"comment":"<markdown>","findings":[{"severity":"P0|P1|P2","path":"<file or empty>",
+# "line":n,"title":"…","body":"…"}]}, whose counts must equal the findings per severity.
 # Exit 0: no P0/P1. Exit 1: P0/P1 findings, or the summary is missing or invalid (fail closed).
 set -uo pipefail
 dir=${1:-ai-review}
 summary=${STRUCTURED_OUTPUT:-}
 
 mkdir -p "${dir}"
-rm -f "${dir}/result.json" "${dir}/comment.md"
+rm -f "${dir}/result.json" "${dir}/comment.md" "${dir}/findings.json"
 
 valid='length == 1 and (.[0] | type == "object"
   and ([.p0, .p1, .p2] | all(type == "number" and . == floor and . >= 0))
-  and (.comment | type == "string"))'
+  and (.comment | type == "string")
+  and (.findings | type == "array")
+  and (.findings | all(type == "object" and (.severity | IN("P0", "P1", "P2"))
+    and (.path | type == "string") and (.title | type == "string") and (.body | type == "string")
+    and (.line | type == "number" and . == floor and . >= 0)))
+  and ([.p0, .p1, .p2]
+    == [.findings | map(select(.severity == "P0")), map(select(.severity == "P1")), map(select(.severity == "P2")) | length]))'
 if ! jq -se "${valid}" <<< "${summary}" > /dev/null 2>&1; then
   echo "::error::AI review summary missing or invalid (no structured output from the review step): failing closed while AI_REVIEW=on"
   exit 1
 fi
 
 jq -c '{p0, p1, p2}' <<< "${summary}" > "${dir}/result.json"
+jq -c '.findings' <<< "${summary}" > "${dir}/findings.json"
 read -r p0 p1 p2 < <(jq -r '"\(.p0) \(.p1) \(.p2)"' <<< "${summary}")
 {
   echo "<!-- ai-review -->"
@@ -34,6 +44,13 @@ read -r p0 p1 p2 < <(jq -r '"\(.p0) \(.p1) \(.p2)"' <<< "${summary}")
 } > "${dir}/comment.md"
 
 if (( p0 + p1 > 0 )); then
+  # Model text in the log: stop-commands keeps a "::…::" line in it from acting as a workflow command.
+  token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+  echo "::stop-commands::${token}"
+  jq -r '.findings[] | select(.severity != "P2")
+    | "AI review \(.severity) \(if .path == "" then "PR" else "\(.path):\(.line)" end) - \(.title | gsub("\n"; " "))",
+      (.body | split("\n")[] | "  | \(.)")' <<< "${summary}"
+  echo "::${token}::"
   echo "::error::AI review found P0=${p0} P1=${p1}: review required before merge (decision 32)"
   exit 1
 fi

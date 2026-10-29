@@ -38,7 +38,7 @@ scripts and the workflows read it. The app answers on `https://{{PROJECT_ZONE}}`
 
 Names only; values never go into the repository.
 
-- Repository secrets: `AWS_ROLE_ARN`, `VPN_CI_OVPN`, `SRV_DEPLOY_SSH_KEY`, `ANTHROPIC_API_KEY` (AI review only).
+- Repository secrets: `AWS_ROLE_ARN`, `VPN_CI_OVPN`, `SRV_DEPLOY_SSH_KEY`, `{{AI_REVIEW_SECRET}}` (AI review only).
 - Repository secrets set by `project-add` (S5): `RAG_MCP_URL`, `RAG_MCP_TOKEN` — the address and token of the
   shared project knowledge server `mvp-rag` that the `mvp-sdlc` plugin connects to (decision 61 b).
 - Environment `dev`: `SECRET_KEY_BASE`, `POSTGRES_PASSWORD` (URL-safe, never changed after the first deploy),

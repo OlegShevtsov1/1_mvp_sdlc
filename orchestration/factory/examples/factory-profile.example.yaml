@@ -7,6 +7,8 @@ stack:
   test_command: "pytest -q"
   lint_command: "ruff check ."
   build_command: ""                    # empty = no build step
+  test_timeout_seconds: 1000           # the merge gate's limit for one run of test_command, 1-3600 s;
+                                       # absent means 1000. A timed-out run is retried once.
 repo:
   remote: origin
   base_branch: main

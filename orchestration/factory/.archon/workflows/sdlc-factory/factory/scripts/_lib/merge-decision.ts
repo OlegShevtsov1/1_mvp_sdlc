@@ -1,5 +1,8 @@
 import { DEFAULT_MANUAL_MERGE_BASES } from "./profile.ts";
 
+// The merge gate's limit for one run of the lint or of the build command.
+export const OTHER_COMMAND_TIMEOUT_SECONDS = 1000;
+
 // `merge` interpolates the URL into a shell script, so only this shape passes.
 export const PR_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[0-9]+$/;
 

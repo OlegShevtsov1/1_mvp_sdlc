@@ -17,7 +17,7 @@ jobs:
   checks:
     name: Actionlint, hygiene, gitleaks
     runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
-    timeout-minutes: 10
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v7
@@ -48,7 +48,7 @@ jobs:
   orchestration:
     name: Archon workflows (v0.12.1)
     runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v7

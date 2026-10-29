@@ -410,13 +410,15 @@ for kind in ("be", "fe"):
     for line in lines:
         if "_smoke_{} ".format(kind) in line:
             listed |= set(re.findall(r"\b[A-Z][A-Z0-9_]+\b", line.split(":", 1)[1]))
-    wanted = set(subprocess.run("grep -ohE \"secrets\\.[A-Z_]+\" templates/project-{}/.github/workflows/*.yml | cut -d. -f2"
-                                .format(kind), shell=True, cwd=sys.argv[1], stdout=subprocess.PIPE,
+    render = "{}/render-{}".format(sys.argv[2], kind)
+    subprocess.run([sys.argv[1] + "/bin/render-template", kind, "smoke", render], stdout=subprocess.DEVNULL, check=True)
+    wanted = set(subprocess.run("grep -ohE \"secrets\\.[A-Z_]+\" .github/workflows/*.yml | cut -d. -f2",
+                                shell=True, cwd=render, stdout=subprocess.PIPE,
                                 universal_newlines=True, check=True).stdout.split())
     wanted |= {"RAG_MCP_URL", "RAG_MCP_TOKEN"}
     if listed != wanted:
         sys.exit("{}: missing {} extra {}".format(kind, sorted(wanted - listed), sorted(listed - wanted)))
-' "${root}" || fail "dry run" "step 3 secrets differ from the templates' secrets plus the RAG names"
+' "${root}" "${tmp}" || fail "dry run" "step 3 secrets differ from the templates' secrets plus the RAG names"
 echo "PASS dry run: nine steps, the templates' secrets plus RAG_MCP_URL/RAG_MCP_TOKEN, no call, no write"
 
 for bad in Smoke 1x pilot; do

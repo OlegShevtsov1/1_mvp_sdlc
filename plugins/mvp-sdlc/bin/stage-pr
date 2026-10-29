@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""Commit one feature stage's files on their own branch, push it and open the stage's docs pull request.
+
+Usage: stage-pr <slug> <stage> --message <commit message> <path>...   (paths relative to the repository root)
+
+Run by the feature-stage skills once the operator has approved the stage (decision 105 c). It fetches
+origin/<base> (SDLC_BASE_BRANCH, else origin/HEAD, as sdlc-gate resolves it), creates
+feature/PILOT-<n>-<slug>-<stage> from it (<n> and the card title from state.json, or .spec-source in the frontend),
+commits only the given paths plus the feature's state.json when the gate advanced it, pushes that branch and opens a
+pull request into <base> titled `PILOT-<n>: <card title> — <stage>` whose body has exactly one `Type: docs` line.
+The operator's merge of that pull request is the stage's gate (R-C8.9). On the stage's branch with its pull request
+still open (or not opened yet), it adds a commit there instead; once that branch is merged it takes <name>-2 ... -9.
+It refuses, before switching or committing anything, when the working tree has changes outside the given paths or
+the given paths are already identical on origin/<base>. Prints `branch: <name>`, `commit: <sha>` and `pr: <url>`.
+Exit 0 the pull request is open, 1 refused or git/gh failed (a re-run finishes a push whose pull request failed),
+2 usage error.
+"""
+import argparse
+import json
+import os
+import posixpath
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import sdlc_common  # noqa: E402
+
+# Importing a bin/ command must not leave a __pycache__ beside the commands on the PATH.
+sys.dont_write_bytecode = True
+task_brief = sdlc_common.load_script("bin/task-brief")
+guards = sdlc_common.load_script("hooks/guards.py")
+
+STAGE_RE = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
+MAX_STAGE = 32
+SUFFIXES = range(2, 10)
+SHOWN = 20
+
+
+class Usage(Exception):
+    pass
+
+
+class Refused(Exception):
+    pass
+
+
+def git(root, *args):
+    return sdlc_common.run(["git", "-C", str(root)] + list(args))
+
+
+def must(result, what):
+    if result.returncode != 0:
+        raise Refused("{}: {}".format(what, result.stderr.strip()))
+    return result.stdout.strip()
+
+
+def gh(root, *args):
+    try:
+        return sdlc_common.run(["gh"] + list(args), cwd=root)
+    except OSError as exc:
+        raise Refused("gh is not available: {}".format(exc))
+
+
+def parse(argv):
+    parser = argparse.ArgumentParser(prog="stage-pr")
+    parser.add_argument("slug")
+    parser.add_argument("stage")
+    parser.add_argument("--message", required=True)
+    parser.add_argument("paths", nargs="+")
+    return parser.parse_args(argv)
+
+
+def stage_paths(root, slug, stage, message, paths):
+    """The given paths, normalised and relative to `root`; Usage on any invalid argument."""
+    if not sdlc_common.valid_slug(slug) or not sdlc_common.feature_dir(root, slug).is_dir():
+        raise Usage("no feature {!r} under {}".format(slug, sdlc_common.FEATURES_DIR.as_posix()))
+    if not STAGE_RE.fullmatch(stage) or len(stage) > MAX_STAGE:
+        raise Usage("stage {!r} must match {} and be at most {} characters".format(stage, STAGE_RE.pattern, MAX_STAGE))
+    if not message.strip():
+        raise Usage("--message is empty")
+    if any(line.startswith("Type:") for line in message.splitlines()):
+        raise Usage("--message must not carry a Type: line; stage-pr writes Type: docs in the pull request body")
+    state = state_path(slug)
+    result = []
+    for path in paths:
+        rel = posixpath.normpath(path.replace(os.sep, "/"))
+        if posixpath.isabs(rel) or rel == ".." or rel.startswith("../") or rel == ".":
+            raise Usage("{} is not a path inside the repository (paths are relative to its root)".format(path))
+        if rel == state:
+            raise Usage("{} is not passed: stage-pr adds state.json itself".format(path))
+        if not (Path(root) / rel).exists():
+            raise Usage("{} does not exist in the working tree".format(path))
+        result.append(rel)
+    return result
+
+
+def state_path(slug):
+    return (sdlc_common.FEATURES_DIR / slug / "state.json").as_posix()
+
+
+def card(root, slug):
+    _, fields = task_brief.card_fields(sdlc_common.feature_dir(root, slug))
+    if not fields:
+        raise Refused(
+            "no card number and title for {} in state.json or .spec-source: start the feature with feature-start "
+            "(backend) or run sync-spec (frontend)".format(slug)
+        )
+    return fields["trello_card_id_short"], fields["trello_card_title"]
+
+
+def differs(root, ref, paths):
+    """True when a path differs from `ref` in the working tree or holds an untracked file."""
+    if git(root, "diff", "--quiet", ref, "--", *paths).returncode != 0:
+        return True
+    return bool(must(git(root, "ls-files", "--others", "--exclude-standard", "--", *paths), "git ls-files"))
+
+
+def covered(path, paths):
+    return any(path == p or path.startswith(p.rstrip("/") + "/") for p in paths)
+
+
+def unrelated_changes(root, paths):
+    status = git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    must(status, "git status")
+    entries = status.stdout.split("\0")
+    changed = []
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
+        if not entry:
+            continue
+        changed.append(entry[3:])
+        if "R" in entry[:2] or "C" in entry[:2]:
+            changed.append(entries[index])
+            index += 1
+    return [path for path in changed if not covered(path, paths)]
+
+
+def open_pr_url(root, branch):
+    """(reusable, url): the branch may take the commit when its pull request is open (url) or not opened yet."""
+    result = gh(root, "pr", "view", branch, "--json", "state,url")
+    if result.returncode != 0:
+        if "no pull requests found" in result.stderr:
+            return True, None
+        raise Refused("cannot read the pull request of {}: {}".format(branch, result.stderr.strip()))
+    try:
+        pr = json.loads(result.stdout)
+    except ValueError:
+        return True, None
+    if isinstance(pr, dict) and pr.get("state") == "OPEN":
+        return True, pr.get("url")
+    return False, None
+
+
+def branch_exists(root, branch):
+    if git(root, "rev-parse", "--verify", "-q", "refs/heads/" + branch).returncode == 0:
+        return True
+    remote = git(root, "ls-remote", "--exit-code", "--heads", "origin", branch)
+    if remote.returncode not in (0, 2):
+        raise Refused("cannot list origin's branches: {}".format(remote.stderr.strip()))
+    return remote.returncode == 0
+
+
+def checkout_branch(root, name, ref):
+    """(branch, url of its open pull request or None); switches to a new branch from `ref` unless reusing."""
+    current = git(root, "symbolic-ref", "--short", "-q", "HEAD").stdout.strip()
+    if re.fullmatch(re.escape(name) + r"(-[2-9])?", current):
+        reusable, url = open_pr_url(root, current)
+        if reusable:
+            return current, url
+    for branch in [name] + ["{}-{}".format(name, k) for k in SUFFIXES]:
+        if not branch_exists(root, branch):
+            break
+    else:
+        raise Refused("{0} and {0}-2 ... -{1} all exist: delete merged stage branches first".format(name, SUFFIXES[-1]))
+    switched = git(root, "switch", "-q", "--no-track", "-c", branch, ref)
+    if switched.returncode != 0:
+        raise Refused(
+            "cannot create {} from {}: {}\nswitch to the base first (git switch {} && git pull --ff-only) and run "
+            "stage-pr again".format(branch, ref, switched.stderr.strip(), ref[len("origin/"):])
+        )
+    return branch, None
+
+
+def body(message, stage, slug, files):
+    lines = [message.strip().splitlines()[0], ""]
+    lines += ["Stage `{}` of feature `{}`, committed by stage-pr.".format(stage, slug)]
+    lines += ["", "Files:"] + ["- `{}`".format(f) for f in files]
+    lines += ["","The operator's merge is this stage's gate (R-C8.9).", "", "Type: docs"]
+    return "\n".join(lines) + "\n"
+
+
+def stage_pr(root, args, environ):
+    paths = stage_paths(root, args.slug, args.stage, args.message, args.paths)
+    number, title = card(root, args.slug)
+    base = sdlc_common.base_branch(root, environ)
+    ref = "origin/" + base
+    must(git(root, "fetch", "-q", "origin", base), "cannot fetch {}".format(ref))
+    commit_set = list(paths)
+    state = state_path(args.slug)
+    if (Path(root) / state).is_file() and differs(root, ref, [state]):
+        commit_set.append(state)
+    unrelated = unrelated_changes(root, commit_set)
+    if unrelated:
+        raise Refused(
+            "the working tree has changes outside this stage's files: {}{} - commit them elsewhere or remove them; "
+            "stage-pr commits only: {}".format(
+                ", ".join(unrelated[:SHOWN]), " ..." if len(unrelated) > SHOWN else "", ", ".join(commit_set)
+            )
+        )
+    if not differs(root, ref, paths):
+        raise Refused(
+            "{} are already identical on {}: nothing to open a pull request for".format(", ".join(paths), ref)
+        )
+    name = "feature/PILOT-{}-{}-{}".format(number, args.slug, args.stage)
+    if not guards.BRANCH_NAME.fullmatch(name):
+        raise Refused("{} does not follow the branch convention {}".format(name, guards.BRANCH_NAME.pattern))
+    branch, url = checkout_branch(root, name, ref)
+    must(git(root, "add", "--", *commit_set), "git add")
+    if git(root, "diff", "--cached", "--quiet").returncode != 0:
+        must(git(root, "commit", "-q", "-m", args.message), "git commit")
+    sha = must(git(root, "rev-parse", "HEAD"), "git rev-parse")
+    must(git(root, "push", "-q", "-u", "origin", "refs/heads/{0}:refs/heads/{0}".format(branch)), "git push")
+    if url is None:
+        files = must(git(root, "diff", "--name-only", ref + "...HEAD", "--", *commit_set), "git diff").splitlines()
+        result = gh(
+            root, "pr", "create", "--base", base, "--head", branch,
+            "--title", "PILOT-{}: {} — {}".format(number, title, args.stage),
+            "--body", body(args.message, args.stage, args.slug, sorted(files)),
+        )
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if result.returncode != 0 or not lines:
+            raise Refused(
+                "pushed {} ({}) but gh pr create failed: {}; run stage-pr again to open the pull request".format(
+                    branch, sha[:7], result.stderr.strip() or "no URL printed"
+                )
+            )
+        url = lines[-1]
+    print("branch: " + branch)
+    print("commit: " + sha)
+    print("pr: " + url)
+
+
+def main(argv, environ):
+    args = parse(argv)
+    root = sdlc_common.repo_root()
+    try:
+        if root is None:
+            raise Refused("not inside a git repository")
+        stage_pr(root, args, environ)
+    except Usage as exc:
+        print("stage-pr: {}".format(exc), file=sys.stderr)
+        return 2
+    except Refused as exc:
+        print("stage-pr: {}".format(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:], os.environ))

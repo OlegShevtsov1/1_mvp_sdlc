@@ -23,15 +23,24 @@ GIT_IDENTITY = {
 MERGED = [{"number": 7, "merged_at": "2026-10-01T10:00:00Z"}]
 UNMERGED = [{"number": 7, "merged_at": None}]
 
-# Stub gh: logs argv as one JSON line, answers `api .../commits/<sha>/pulls` from GH_STUB_RESPONSE (a file whose
-# content is printed; the content FAIL makes the stub exit 1).
+# Stub gh: logs argv as one JSON line. A call `gh <a> <b> ...` answers from the file in GH_STUB_RESPONSE_<A>_<B> when
+# that variable is set; otherwise `gh pr list` prints [] and any other `gh pr ...` fails like "no pull requests
+# found"; every other call answers from GH_STUB_RESPONSE. A response file whose content is FAIL makes the stub exit 1.
 GH_STUB = textwrap.dedent(
     """\
     #!/usr/bin/env python3
     import json, os, sys
     with open(os.environ["GH_STUB_LOG"], "a") as log:
         log.write(json.dumps(sys.argv[1:]) + "\\n")
-    with open(os.environ["GH_STUB_RESPONSE"]) as response:
+    command = "_".join(sys.argv[1:3]).upper().replace("-", "_")
+    path = os.environ.get("GH_STUB_RESPONSE_" + command)
+    if path is None and sys.argv[1:3] == ["pr", "list"]:
+        sys.stdout.write("[]")
+        sys.exit(0)
+    if path is None and sys.argv[1:2] == ["pr"]:
+        sys.stderr.write("no pull requests found\\n")
+        sys.exit(1)
+    with open(path or os.environ["GH_STUB_RESPONSE"]) as response:
         body = response.read()
     if body.strip() == "FAIL":
         sys.stderr.write("gh: HTTP 502\\n")
@@ -104,18 +113,26 @@ class AppRepo:
             raise AssertionError("{!r} not in {}".format(old, rel))
         self.write(rel, text.replace(old, new))
 
-    def stub_gh(self, response):
-        """Install the gh stub; `response` is JSON-able or the string FAIL. Returns the argv log path."""
+    def stub_gh(self, response, **commands):
+        """Install the gh stub; `response` and each keyword response (`pr_list=`, `pr_view=`, `pr_create=`) is the
+        string FAIL, another string printed as is (a URL), or a JSON-able value. Returns the argv log path."""
         stub = self.stub_bin / "gh"
         stub.write_text(GH_STUB, encoding="utf-8")
         stub.chmod(0o755)
-        response_path = self.tmp / "gh-response"
-        response_path.write_text(response if response == "FAIL" else json.dumps(response), encoding="utf-8")
+        for key in [k for k in self.env if k.startswith("GH_STUB_RESPONSE_")]:
+            del self.env[key]
+        self.env["GH_STUB_RESPONSE"] = str(self.gh_response("gh-response", response))
+        for command, answer in commands.items():
+            self.env["GH_STUB_RESPONSE_" + command.upper()] = str(self.gh_response("gh-" + command, answer))
         log = self.tmp / "gh-calls.log"
         log.write_text("", encoding="utf-8")
-        self.env["GH_STUB_RESPONSE"] = str(response_path)
         self.env["GH_STUB_LOG"] = str(log)
         return log
+
+    def gh_response(self, name, answer):
+        path = self.tmp / name
+        path.write_text(answer if isinstance(answer, str) else json.dumps(answer), encoding="utf-8")
+        return path
 
     def gh_calls(self):
         log = self.tmp / "gh-calls.log"

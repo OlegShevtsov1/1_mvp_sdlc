@@ -5,15 +5,18 @@ process, deploy and observability scaffolding of the pilot release (Kamal dev/pr
 `config/project.env`, deploy/rollback/promote/manage scripts and guards, health, the error tunnel, GlitchTip smoke,
 the full workflow set of the develop branch model, release tooling, `.claude/` guards, the PR template with its
 `Type:` line), without the pilot's business code. Each directory is a full repository tree: what you see is what the
-new repository contains after rendering. `github/` holds the C1 pull request template and is not rendered.
+new repository contains after rendering. `github/` holds the C1 pull request template and is not rendered. `projects/` holds per-project overrides that the
+renderer reads; it is not rendered either.
 
 ## Sources
 
 | What | Repository | Ref | Commit |
 |---|---|---|---|
 | Backend | `OlegShevtsov1/1_mvp_pilot_be` | tag `v0.1.0` | `01294772d16773e4c2f40d5a200c80c71a2e1fc4` |
-| Backend AI review (landed on `develop` after the tag) | `OlegShevtsov1/1_mvp_pilot_be` | `develop` commit | `04c85d797a6de20ef35cd9307198c20e2a7753e5`: only `.github/workflows/ai-review.yml`, `bin/ai-review-gate`, `bin/ai-review-skip`, `spec/deploy/ai_review_workflow_spec.rb`, `spec/support/github_expression.rb` |
+| Backend AI review scripts (landed on `develop` after the tag) | `OlegShevtsov1/1_mvp_pilot_be` | `develop` commit | `04c85d797a6de20ef35cd9307198c20e2a7753e5`: only `bin/ai-review-gate`, `bin/ai-review-skip`, `spec/support/github_expression.rb` |
+| Backend AI review | `OlegShevtsov1/1_mvp_pilot_be` | `develop` commit | `72974aa81a75b91ee5688eaef4c1c44127d8587b`: only `.github/workflows/ai-review.yml` and `spec/deploy/ai_review_workflow_spec.rb` |
 | Frontend | `OlegShevtsov1/1_mvp_pilot_fe` | `main`; tag `v0.1.0` goes on this commit once the backend is on prod | `bbd51899a93acafe37d92a97afb6065af025f487` |
+| Frontend AI review | `OlegShevtsov1/1_mvp_pilot_fe` | `develop` commit | `7e12daddbf09cd3cf3c783a0fd2678ecaa076cf6`: only `.github/workflows/ai-review.yml` and `tests/ai-review-workflow.test.ts` |
 
 ## Rendering
 
@@ -22,16 +25,23 @@ bin/render-template <be|fe> <name> <dest>
 ```
 
 `<name>` is the project name: `^[a-z][a-z0-9]{1,15}$` (lowercase letters and digits, 2–16 characters, a leading
-letter because it becomes a Ruby module). Every value below is derived from it:
+letter because it becomes a Ruby module). Every value below is derived from it, except that the `AI_REVIEW_*` rows come
+from the project's overrides (see [Project overrides](#project-overrides)); `AI_REVIEW_AUTH_INPUT` follows
+`AI_REVIEW_SECRET`:
 
 | Placeholder | Value | For `tplcheck` |
 |---|---|---|
 | `{{PROJECT_NAME}}` | `<name>` | `tplcheck` |
 | `{{PROJECT_ZONE}}` | `<name>.up.km.ua` | `tplcheck.up.km.ua` |
+| `{{PROJECT_KEY}}` | `<name>` in capitals (the ticket key) | `TPLCHECK` |
 | `{{APP_MODULE}}` | `<name>` with the first letter capitalised (Ruby module, UI title) | `Tplcheck` |
 | `{{REPO_BE}}` | `OlegShevtsov1/1_mvp_<name>_be` | `OlegShevtsov1/1_mvp_tplcheck_be` |
 | `{{REPO_FE}}` | `OlegShevtsov1/1_mvp_<name>_fe` | `OlegShevtsov1/1_mvp_tplcheck_fe` |
 | `{{SDLC_VERSION}}` | the 12-character commit of this repository the renderer ran from | |
+| `{{AI_REVIEW_SECRET}}` | the repository secret the AI review authenticates with | `ANTHROPIC_API_KEY` |
+| `{{AI_REVIEW_AUTH_INPUT}}` | `{{AI_REVIEW_SECRET}}` in lower case: the `claude-code-action` input of that name | `anthropic_api_key` |
+| `{{AI_REVIEW_MODEL}}` | the AI review's model | `claude-sonnet-5` |
+| `{{AI_REVIEW_AUTH_CHECKS}}` | what the backend AI review checks authentication and authorization against | `on every endpoint that needs them` |
 
 Rules:
 
@@ -43,6 +53,21 @@ Rules:
 - `<dest>` may be missing, empty or hold only `.git` (a fresh clone): the render is written there. If it already holds
   exactly this render, the renderer prints `unchanged` and exits 0. Anything else is refused (exit 1) and left as is.
 
+### Project overrides
+
+`templates/projects/<name>.env` is optional. Without it, a render uses the defaults below. Each of its lines is
+`KEY=value`, the value taken verbatim after the first `=`; blank lines and lines starting with `#` are ignored. A key
+that is not one of these refuses the render (exit 2, `<file>:<line>`, nothing written). `templates/projects/` is never
+copied into a render.
+
+| Key | Default | `pilot` |
+|---|---|---|
+| `AI_REVIEW_SECRET` | `ANTHROPIC_API_KEY` (the secret `project-add` sets) | `CLAUDE_CODE_OAUTH_TOKEN` |
+| `AI_REVIEW_MODEL` | `claude-sonnet-5` | `claude-sonnet-5-5` |
+| `AI_REVIEW_AUTH_CHECKS` | `on every endpoint that needs them` | `(CanCanCan checks, the authentication Hard Rule in CLAUDE.md)` |
+
+Only `pilot` has an override file: with it, a `pilot` render reproduces the pilot's AI review byte for byte.
+
 Deliberately not placeholders:
 
 - `PROD_VPN_IP`: a GitHub secret that `project-add` (S5) sets; never a file or a template value.
@@ -50,6 +75,7 @@ Deliberately not placeholders:
   per project); the committed `.claude/` setup reads them only as `${…}` through the mvp-sdlc plugin.
 - The ticket key: `<KEY>` is `PROJECT_NAME` from `config/project.env` in capitals (the Trello board name).
   `bin/pr-conventions-check` (be) and `scripts/pr-conventions.sh` (fe) derive it at run time; prose says `<KEY>-<n>`.
+  Only the AI review prompt and the backend's spec of it name it, as `{{PROJECT_KEY}}`, the way the pilot's name `PILOT`.
 - Telegram secret names: `TELEGRAM_DEV_ALERTS_*` and `TELEGRAM_PROD_ALERTS_*` with topics `DEV_ALERTS` and
   `PROD_ALERTS`, the same in every project (secrets are repository-scoped). The shared `notify-telegram` action
   builds the secret names from the topic.
@@ -107,22 +133,23 @@ bin/render-template be pilot /tmp/parity/render-be
 bin/render-template fe pilot /tmp/parity/render-fe
 mkdir -p /tmp/parity/pilot-be /tmp/parity/pilot-fe
 git -C <path to 1_mvp_pilot_be clone> archive 01294772d16773e4c2f40d5a200c80c71a2e1fc4 .github/workflows | tar -x -C /tmp/parity/pilot-be
-git -C <path to 1_mvp_pilot_be clone> archive 04c85d797a6de20ef35cd9307198c20e2a7753e5 .github/workflows/ai-review.yml | tar -x -C /tmp/parity/pilot-be
+git -C <path to 1_mvp_pilot_be clone> archive 72974aa81a75b91ee5688eaef4c1c44127d8587b .github/workflows/ai-review.yml spec/deploy/ai_review_workflow_spec.rb | tar -x -C /tmp/parity/pilot-be
 git -C <path to 1_mvp_pilot_fe clone> archive bbd51899a93acafe37d92a97afb6065af025f487 .github/workflows | tar -x -C /tmp/parity/pilot-fe
+git -C <path to 1_mvp_pilot_fe clone> archive 7e12daddbf09cd3cf3c783a0fd2678ecaa076cf6 .github/workflows/ai-review.yml tests/ai-review-workflow.test.ts | tar -x -C /tmp/parity/pilot-fe
+for f in .github/workflows/ai-review.yml spec/deploy/ai_review_workflow_spec.rb; do cmp /tmp/parity/pilot-be/$f /tmp/parity/render-be/$f; done
+for f in .github/workflows/ai-review.yml tests/ai-review-workflow.test.ts; do cmp /tmp/parity/pilot-fe/$f /tmp/parity/render-fe/$f; done
 diff -ru /tmp/parity/pilot-be/.github/workflows /tmp/parity/render-be/.github/workflows
 diff -ru /tmp/parity/pilot-fe/.github/workflows /tmp/parity/render-fe/.github/workflows
 ```
 
-Every hunk must be one of the rows below; files not listed are identical.
+The AI review workflow and its workflow test must be identical (`cmp` silent); no row allows a difference in them.
+Every other hunk must be one of the rows below; files not listed are identical.
 
 | Repo | Workflow | Difference | Why |
 |---|---|---|---|
-| be, fe | `dev-deploy.yml`, `kamal-deploy.yml`, `kamal-manage.yml`, `release.yml`, `main-guard.yml`, `develop-guard.yml` | `TELEGRAM_PILOT_{DEV,PROD}_ALERTS_*` → `TELEGRAM_{DEV,PROD}_ALERTS_*` in `env:` and the preflight `required` lists; `topic:` `PILOT_DEV_ALERTS` → `DEV_ALERTS`, `PILOT_PROD_ALERTS` → `PROD_ALERTS` | the project prefix carries nothing in repository-scoped secrets, and no placeholder can produce an upper-case name; `project-add` (S5) sets these names |
+| be, fe | `dev-deploy.yml`, `kamal-deploy.yml`, `kamal-manage.yml`, `release.yml`, `main-guard.yml`, `develop-guard.yml` | `TELEGRAM_PILOT_{DEV,PROD}_ALERTS_*` → `TELEGRAM_{DEV,PROD}_ALERTS_*` in `env:` and the preflight `required` lists; `topic:` `PILOT_DEV_ALERTS` → `DEV_ALERTS`, `PILOT_PROD_ALERTS` → `PROD_ALERTS` | the project prefix carries nothing in repository-scoped secrets; `project-add` (S5) sets these names |
 | be | `main-guard.yml`, `develop-guard.yml` | comments say "the project's dev alerts topic" or "dev alerts", the alert step is `Alert DEV_ALERTS` | same rename |
 | be, fe | `pr-conventions-check.yml` | header comment says `<KEY>-<n>:` instead of `PILOT-<n>:` | the key comes from `config/project.env` |
-| be, fe | `ai-review.yml` | the "Conventions" item of the prompt says `<KEY>` and explains it | same |
-| be | `ai-review.yml` | taken from `04c85d79`, not the tag; the security item no longer names CanCanCan and the authentication hard rule | the AI review landed after the tag; the template has neither CanCanCan nor that rule |
-| be, fe | `ai-review.yml` | the review is posted as a GitHub pull request review with inline comments from the workflow's own scripts (`.ai-review-base`), and factory PRs are reviewed (PILOT-369, decision 103 a) | made the same way by each app repository's own PILOT-369 pull request after the source commits above; update the Sources table to those commits once both have merged |
 
 No actionlint fix was needed.
 

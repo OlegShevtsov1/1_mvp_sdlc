@@ -18,6 +18,8 @@ read-only copy through `sync-spec`.
 - Security: `bundle exec brakeman -q`.
 - Database: `bin/rails db:migrate` locally only; never against a shared database.
 - Phase gate: `sdlc-gate <phase> <slug>` (runs automatically before the gated `sdlc` skills).
+- Stage docs PR: `stage-pr <slug> <stage> --message <msg> <files>` (run by the feature-stage skills after your
+  approval; prints the pull request link).
 - Task text for the factory: `task-brief <slug> <task-id>`.
 
 Per-developer command overrides live in `.claude/sdlc.local.md` (not committed).
@@ -31,6 +33,14 @@ Per-developer command overrides live in `.claude/sdlc.local.md` (not committed).
   `docs/features/<slug>/migrations/` until the implementing task promotes them to `db/migrate/`.
 - Commits follow Conventional Commits. A task is three commits: `test(...)` (RED), `feat(...)` or `fix(...)`
   (GREEN), `refactor(...)`, each with the trailers `SDLC-Task: <id>` and `SDLC-AC: <ids>`.
+- At a course skill's "Propose commit" step, once you have approved the stage in the skill's own confirmation, the
+  agent runs `stage-pr <slug> <stage> ...` instead of proposing git commands; you merge the stage's docs pull request,
+  and that merge is the gate. Stages: `/sdlc:interview` → `brief`, `/sdlc:classify-size` → `brief`,
+  `/sdlc:fix-term` → `glossary`, `/sdlc:write-prd` → `prd`, `/sdlc:clarify-prd` → `prd`,
+  `/sdlc:prepare-design-spec` → `design-spec`, `/sdlc:architecture-design` → `sad`,
+  `/sdlc:complete-sequence-diagrams` → `sad`, `/sdlc:decide-adr` → `adr-NNNN`,
+  `/sdlc:generate-data-model` → `data-model`, `/sdlc:api-forge` → `contracts`, `/sdlc:plan-tests` → `test-plan`,
+  `/sdlc:break-tasks` → `tasks`, `/mvp-sdlc:rails-data-model` → `data-model`, `/mvp-sdlc:task-cards` → `tasks`.
 - One task is at most one day of work and at most 500 changed lines.
 - Rules for git, testing, migrations, API and security are in `.claude/rules/`.
 

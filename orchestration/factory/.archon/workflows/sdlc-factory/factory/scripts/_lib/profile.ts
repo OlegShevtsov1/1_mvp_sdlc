@@ -6,10 +6,21 @@ export const MERGE_STRATEGIES = ["squash", "merge", "rebase"] as const;
 export const MONITORING_PROVIDERS = ["sentry", "datadog", "grafana", "none"] as const;
 // Decision 27: pull requests into these bases are merged by the operator, never the factory.
 export const DEFAULT_MANUAL_MERGE_BASES: readonly string[] = ["main"];
+// The merge gate's limit for one run of the test command. The merge-gate node
+// timeout in factory.yaml is sized for twice the maximum (one retry after a timeout).
+export const DEFAULT_TEST_TIMEOUT_SECONDS = 1000;
+export const MAX_TEST_TIMEOUT_SECONDS = 3600;
+
+function isValidTestTimeout(n: unknown): n is number {
+  return typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= MAX_TEST_TIMEOUT_SECONDS;
+}
 
 export interface Profile {
   version: 1;
-  stack: { language: string; framework: string; test_command: string; lint_command: string; build_command: string };
+  stack: {
+    language: string; framework: string; test_command: string; lint_command: string; build_command: string;
+    test_timeout_seconds: number;
+  };
   repo: {
     remote: string; base_branch: string; merge_strategy: (typeof MERGE_STRATEGIES)[number];
     manual_merge_bases: string[];
@@ -22,6 +33,7 @@ export interface Profile {
 export interface FlatProfile {
   language: string; framework: string;
   test_command: string; lint_command: string; build_command: string;
+  test_timeout_seconds: number;
   remote: string; base_branch: string; merge_strategy: string;
   deploy_command: string; health_url: string; wait_seconds: number; rollback_command: string;
   monitoring_provider: string; window_minutes: number;
@@ -75,6 +87,7 @@ export function validateProfile(doc: unknown): Validation {
       test_command: str(stack, "test_command", "stack", errors, false),
       lint_command: str(stack, "lint_command", "stack", errors, false),
       build_command: str(stack, "build_command", "stack", errors, false),
+      test_timeout_seconds: DEFAULT_TEST_TIMEOUT_SECONDS,
     },
     repo: {
       remote: str(repo, "remote", "repo", errors, true),
@@ -96,6 +109,14 @@ export function validateProfile(doc: unknown): Validation {
     secrets: [],
   };
 
+  const testTimeout = stack.test_timeout_seconds;
+  if (testTimeout !== undefined && testTimeout !== null) {
+    if (isValidTestTimeout(testTimeout)) {
+      profile.stack.test_timeout_seconds = testTimeout;
+    } else {
+      errors.push(`stack.test_timeout_seconds must be a whole number of seconds between 1 and ${MAX_TEST_TIMEOUT_SECONDS}`);
+    }
+  }
   if (!MERGE_STRATEGIES.includes(profile.repo.merge_strategy)) {
     errors.push(`repo.merge_strategy must be one of ${MERGE_STRATEGIES.join(", ")}`);
   }
@@ -139,6 +160,7 @@ export function flattenProfile(p: Profile): FlatProfile {
   return {
     language: p.stack.language, framework: p.stack.framework,
     test_command: p.stack.test_command, lint_command: p.stack.lint_command, build_command: p.stack.build_command,
+    test_timeout_seconds: p.stack.test_timeout_seconds,
     remote: p.repo.remote, base_branch: p.repo.base_branch, merge_strategy: p.repo.merge_strategy,
     deploy_command: p.deploy.command, health_url: p.deploy.health_url,
     wait_seconds: p.deploy.wait_seconds, rollback_command: p.deploy.rollback_command,
@@ -164,6 +186,7 @@ export function profileToYaml(p: Profile): string {
     `  test_command: ${q(p.stack.test_command)}`,
     `  lint_command: ${q(p.stack.lint_command)}`,
     `  build_command: ${q(p.stack.build_command)}`,
+    `  test_timeout_seconds: ${p.stack.test_timeout_seconds}`,
     "repo:",
     `  remote: ${q(p.repo.remote)}`,
     `  base_branch: ${q(p.repo.base_branch)}`,

@@ -71,6 +71,29 @@ describe("validateProfile", () => {
       if (!r.ok) expect(r.errors.join(" ")).toContain("repo.manual_merge_bases[1] must be a branch name");
     }
   });
+  test("test_timeout_seconds defaults to 1000 when absent or null", () => {
+    for (const stack of [good.stack, { ...good.stack, test_timeout_seconds: null }]) {
+      const r = validateProfile({ ...good, stack });
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.profile.stack.test_timeout_seconds).toBe(1000);
+    }
+  });
+  test("accepts a whole test_timeout_seconds from 1 to 3600", () => {
+    for (const seconds of [1, 2400, 3600]) {
+      const r = validateProfile({ ...good, stack: { ...good.stack, test_timeout_seconds: seconds } });
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.profile.stack.test_timeout_seconds).toBe(seconds);
+    }
+  });
+  test("rejects a test_timeout_seconds that is not a whole number of seconds between 1 and 3600", () => {
+    for (const bad of [0, -5, 1.5, "600", 3601]) {
+      const r = validateProfile({ ...good, stack: { ...good.stack, test_timeout_seconds: bad } });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.errors.join(" ")).toContain("stack.test_timeout_seconds must be a whole number of seconds between 1 and 3600");
+      }
+    }
+  });
 });
 
 describe("flattenProfile", () => {
@@ -80,6 +103,7 @@ describe("flattenProfile", () => {
     expect(flattenProfile(r.profile)).toEqual({
       language: "python", framework: "fastapi",
       test_command: "pytest -q", lint_command: "ruff check .", build_command: "",
+      test_timeout_seconds: 1000,
       remote: "origin", base_branch: "main", merge_strategy: "squash",
       deploy_command: good.deploy.command, health_url: good.deploy.health_url,
       wait_seconds: 120, rollback_command: good.deploy.rollback_command,
@@ -111,6 +135,14 @@ describe("profileToYaml", () => {
     }
   });
 
+  test("test_timeout_seconds round-trips", () => {
+    const r = validateProfile({ ...good, stack: { ...good.stack, test_timeout_seconds: 2400 } });
+    if (!r.ok) throw new Error(r.errors.join(","));
+    const back = validateProfile(Bun.YAML.parse(profileToYaml(r.profile)));
+    expect(back.ok).toBe(true);
+    if (back.ok) expect(back.profile).toEqual(r.profile);
+  });
+
   test("secret names that are YAML keywords round-trip as strings", () => {
     const r = validateProfile({ ...good, secrets: ["TRUE", "NULL_TOKEN"] });
     if (!r.ok) throw new Error(r.errors.join(","));
@@ -135,5 +167,12 @@ describe("this repository's own profile", () => {
       expect(r.profile.repo.base_branch).toEqual("develop");
       expect(r.profile.repo.manual_merge_bases).toEqual(["main"]);
     }
+  });
+  // check.sh outgrew the 1000 s default under parallel factory load (PILOT-375).
+  test("gives the test command more than the default limit", () => {
+    const path = join(import.meta.dir, "../../../.archon/factory-profile.yaml");
+    const r = validateProfile(Bun.YAML.parse(readFileSync(path, "utf8")));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.profile.stack.test_timeout_seconds).toBeGreaterThanOrEqual(1600);
   });
 });

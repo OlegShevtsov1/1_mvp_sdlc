@@ -50,6 +50,11 @@ ALL_PLACEHOLDERS = (
     "be={{REPO_BE}}\n"
     "fe={{REPO_FE}}\n"
     "sdlc={{SDLC_VERSION}}\n"
+    "key={{PROJECT_KEY}}\n"
+    "secret={{AI_REVIEW_SECRET}}\n"
+    "input={{AI_REVIEW_AUTH_INPUT}}\n"
+    "model={{AI_REVIEW_MODEL}}\n"
+    "auth={{AI_REVIEW_AUTH_CHECKS}}\n"
 )
 UNTOUCHED = "sha: " + GH_EXPR + "\nnames: docker ps --format '{{.Names}}'\n"
 
@@ -138,8 +143,49 @@ class TemplatesTest(unittest.TestCase):
             "module=Tplcheck\n"
             "be=OlegShevtsov1/1_mvp_tplcheck_be\n"
             "fe=OlegShevtsov1/1_mvp_tplcheck_fe\n"
-            "sdlc={}\n".format(sha),
+            "sdlc={}\n"
+            "key=TPLCHECK\n"
+            "secret=ANTHROPIC_API_KEY\n"
+            "input=anthropic_api_key\n"
+            "model=claude-sonnet-5\n"
+            "auth=on every endpoint that needs them\n".format(sha),
         )
+
+    def write_overrides(self, text):
+        path = self.root / "templates" / "projects" / "tplcheck.env"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def test_project_overrides_replace_the_defaults(self):
+        self.write_overrides(
+            "# tplcheck overrides\n"
+            "\n"
+            "AI_REVIEW_SECRET=CLAUDE_CODE_OAUTH_TOKEN\n"
+            "AI_REVIEW_MODEL=claude-sonnet-5-5\n"
+            "AI_REVIEW_AUTH_CHECKS=(x, y)\n"
+        )
+        self.commit()
+        dest = self.tmp / "out"
+        self.assertExit(self.render("be", "tplcheck", dest), 0)
+        lines = (dest / "values.txt").read_text().splitlines()
+        for line in (
+            "key=TPLCHECK",
+            "secret=CLAUDE_CODE_OAUTH_TOKEN",
+            "input=claude_code_oauth_token",
+            "model=claude-sonnet-5-5",
+            "auth=(x, y)",
+        ):
+            self.assertIn(line, lines)
+        self.assertEqual(list(dest.rglob("*.env")), [dest / "config" / "project.env"])
+
+    def test_unknown_override_is_refused_and_nothing_written(self):
+        self.write_overrides("PROJECT_NAME=x\n")
+        self.commit()
+        dest = self.tmp / "out"
+        result = self.render("be", "tplcheck", dest)
+        self.assertExit(result, 2)
+        self.assertIn("tplcheck.env:1:", result.stderr)
+        self.assertFalse(dest.exists())
 
     def test_tmpl_suffix_is_dropped(self):
         self.commit()
@@ -343,6 +389,42 @@ class TemplatesTest(unittest.TestCase):
                 self.assertEqual(positions, sorted(positions))
                 self.assertRegex(section, link)
 
+    def test_pilot_render_carries_the_pilot_review_values(self):
+        key = PROJECT_WORD.upper()
+        for kind in ("be", "fe"):
+            with self.subTest(kind=kind):
+                dest = self.tmp / "render-{}-{}".format(kind, PROJECT_WORD)
+                self.assertExit(run([str(RENDERER), kind, PROJECT_WORD, str(dest)]), 0)
+                text = (dest / ".github" / "workflows" / "ai-review.yml").read_text(encoding="utf-8")
+                self.assertIn("claude_code_oauth_token: $" + "{{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", text)
+                self.assertIn("--model claude-sonnet-5-5\n", text)
+                self.assertIn("feature/{}-<n>-<slug>".format(key), text)
+                self.assertNotIn("<KEY>", text)
+                if kind == "be":
+                    self.assertIn("(CanCanCan checks, the authentication Hard Rule in CLAUDE.md)", text)
+                    self.assertIn("archon/task-factory-<n>", text)
+                self.assertWorkflowTestPins(dest, kind, "CLAUDE_CODE_OAUTH_TOKEN", "claude-sonnet-5-5", "ANTHROPIC_API_KEY")
+
+                dest = self.tmp / "render-{}-tplcheck".format(kind)
+                self.assertExit(run([str(RENDERER), kind, "tplcheck", str(dest)]), 0)
+                text = (dest / ".github" / "workflows" / "ai-review.yml").read_text(encoding="utf-8")
+                self.assertIn("anthropic_api_key: $" + "{{ secrets.ANTHROPIC_API_KEY }}", text)
+                self.assertIn("--model claude-sonnet-5\n", text)
+                self.assertIn("feature/TPLCHECK-<n>-<slug>", text)
+                self.assertWorkflowTestPins(dest, kind, "ANTHROPIC_API_KEY", "claude-sonnet-5", "CLAUDE_CODE_OAUTH_TOKEN")
+
+    def assertWorkflowTestPins(self, dest, kind, secret, model, other_secret):
+        expression = "$" + "{{ secrets." + secret + " }}"
+        if kind == "be":
+            text = (dest / "spec" / "deploy" / "ai_review_workflow_spec.rb").read_text(encoding="utf-8")
+            self.assertIn("'{}' => '{}',".format(secret.lower(), expression), text)
+            self.assertIn("'--model {}',".format(model), text)
+            self.assertIn("to eq([ '{}' ])".format(secret), text)
+        else:
+            text = (dest / "tests" / "ai-review-workflow.test.ts").read_text(encoding="utf-8")
+            self.assertIn("review.with?.{}).toBe('{}')".format(secret.lower(), expression), text)
+            self.assertIn("toBe('secrets.{}')".format(secret), text)
+        self.assertNotIn(other_secret, text)
 
 def run(args):
     return subprocess.run(args, cwd=str(REPO), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)

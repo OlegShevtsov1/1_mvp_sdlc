@@ -87,7 +87,7 @@ jobs:
         if: steps.switch.outputs.enabled == 'true' && steps.skip.outputs.skip == 'false'
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          {{AI_REVIEW_AUTH_INPUT}}: ${{ secrets.{{AI_REVIEW_SECRET}} }}
           github_token: ${{ github.token }}
           prompt: |
             You review pull request #${{ github.event.pull_request.number || github.event.issue.number }} of the
@@ -100,13 +100,13 @@ jobs:
             Review only what the PR changes, for:
             - Logic errors and regressions.
             - Security: secrets or credentials in code; injection (SQL injection, shell, HTML/XSS);
-              authentication and authorization on every endpoint that needs them;
+              authentication and authorization {{AI_REVIEW_AUTH_CHECKS}};
               mass assignment and missing strong parameters; migrations that do not follow
               expand -> backfill -> contract, edits to existing db/migrate/ files, hand edits of db/schema.rb.
             - Tests: is the changed behaviour covered; were tests weakened, skipped or deleted.
-            - Conventions: branch name feature/<KEY>-<n>-<slug> or hotfix/<KEY>-<n>-<slug>, title
-              "<KEY>-<n>: <card title>" (<KEY> is PROJECT_NAME from config/project.env in capitals),
-              exactly one Type: line in the body; if a CHANGELOG.md exists in the
+            - Conventions: branch name feature/{{PROJECT_KEY}}-<n>-<slug>, hotfix/{{PROJECT_KEY}}-<n>-<slug> or the factory's
+              archon/task-factory-<n>, title
+              "{{PROJECT_KEY}}-<n>: <card title>", exactly one Type: line in the body; if a CHANGELOG.md exists in the
               repository, a user-visible change without an entry in it.
             - Public-repo rule: internal host names, internal IP addresses, account IDs or tokens anywhere in the diff.
             - Rails specifics: strong parameters, N+1 queries in changed queries, API changes not reflected in
@@ -129,7 +129,7 @@ jobs:
             is a one-paragraph overall assessment in markdown; do not list the findings in it, the workflow lists
             them. Do not post anything; the workflow posts the review.
           claude_args: |
-            --model claude-sonnet-5
+            --model {{AI_REVIEW_MODEL}}
             --max-turns 25
             --allowedTools "Read,Glob,Grep"
             --disallowedTools "Bash,Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,mcp__github_inline_comment__create_inline_comment"

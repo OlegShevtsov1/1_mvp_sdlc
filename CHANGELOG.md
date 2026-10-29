@@ -23,6 +23,42 @@ release pull request `PILOT-<n>: Release vX.Y.Z` carries that section under `## 
 
 ### Security
 
+## [0.6.0] - 2026-10-29
+
+### Added
+
+### Changed
+
+- Every feature stage commits, pushes and opens its docs PR by itself (PILOT-373, decision 105 c): the new
+  `mvp-sdlc` command `stage-pr` branches `feature/PILOT-<n>-<slug>-<stage>` from a fresh `origin/develop`, commits
+  only the stage's files (and `state.json`), pushes and opens a `Type: docs` pull request titled
+  `PILOT-<n>: <card title> — <stage>`, refusing on unrelated changes or nothing to commit; `sdlc-gate-hook` fetches
+  the base before the gate and tells the course feature-stage skills to run it instead of "Propose commit", and
+  `sync-spec`, `task-cards` and `rails-data-model` run it themselves; a blocked gate names the artifact's open pull
+  request. The operator still merges each stage's PR by hand (R-C8.9); the course plugin `plugins/sdlc/` is
+  unchanged (R-B1).
+- The AI review of the be and fe templates takes its auth secret, model and the backend's authorization wording from
+  render placeholders with documented defaults (`ANTHROPIC_API_KEY`, `claude-sonnet-5`), overridden per project in
+  `templates/projects/<name>.env`, and names the ticket key and the factory branch in its conventions; a `pilot`
+  render reproduces the pilot's `ai-review.yml` and its workflow test byte for byte (PILOT-396).
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- The merge gate's test-command limit is a profile setting (PILOT-375): `stack.test_timeout_seconds` (whole seconds,
+  1 to 3600; absent means the old fixed 1000 s). A test command that outlives it runs once more before the gate
+  refuses, and the refusal reads `test command timed out after N s …` instead of `test command exited 124`; a command
+  that exits 124 by itself is still reported as exiting 124. The `merge-gate` node timeout grows from 3600 s to
+  9600 s to cover a retried test at the maximum plus lint and build. This repository's profile sets 2400 s:
+  `check.sh` had outgrown 1000 s under parallel factory load and stopped merges into it.
+- Both CI jobs in `ci.yml` have a 30-minute limit, up from 10 (`Actionlint, hygiene, gitleaks`) and 20 (`Archon
+  workflows`), so a 2-3x slowdown of the shared self-hosted runner no longer cancels them (PILOT-429).
+
+### Security
+
 ## [0.5.0] - 2026-10-28
 
 ### Added

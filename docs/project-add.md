@@ -86,7 +86,8 @@ so a live project's moved-on `main` or a failed rerun never blocks it.
 | `GLITCHTIP_API_URL`, `BE_REPO_READ_TOKEN` | fe | `prod` | manual (the token is a fine-grained PAT, which no API creates) |
 | `ANTHROPIC_API_KEY` | be, fe | repository | manual |
 
-The list is exactly the `secrets.*` names the templates' workflows read plus the two RAG names; the test pins it.
+The list is exactly the `secrets.*` names a default render of the templates' workflows reads plus the two RAG names;
+the test pins it.
 Values reach `gh secret set` on standard input; API tokens reach `curl` in its configuration on standard input. No
 value is ever printed, put on a command line or written to the state. The template's production configuration reads
 `SECRET_KEY_BASE`, so no `RAILS_MASTER_KEY` is set.

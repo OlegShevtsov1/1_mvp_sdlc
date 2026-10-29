@@ -8,6 +8,10 @@ stack:
   test_command: "bash scripts/ci/check.sh"
   lint_command: "bash scripts/ci/check.sh actionlint"
   build_command: ""
+  # check.sh outgrew the default 1000 s under parallel factory load (PILOT-375). Measured 2026-10-28,
+  # each check of check.sh in turn next to other check.sh runs (load 3.3-7.5): 1296 s in all, of which
+  # archon (tools.sh archon + archon-check.sh) 745 s, tests 231 s, mvp_sdlc 192 s, factory 56 s.
+  test_timeout_seconds: 2400
 repo:
   remote: "origin"
   base_branch: "develop"

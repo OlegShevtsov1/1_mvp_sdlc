@@ -3,8 +3,8 @@
 
 Usage: bin/render-template <be|fe> <name> <dest>
 
-Copies templates/project-<be|fe>/ into <dest>, substituting the six {{PLACEHOLDERS}} derived from <name>
-and dropping the .tmpl suffix. Any other {{UPPER_CASE}} token refuses the render. <dest> may be missing,
+Copies templates/project-<be|fe>/ into <dest>, substituting the {{PLACEHOLDERS}} derived from <name> and
+the DEFAULTS that templates/projects/<name>.env may override, and dropping the .tmpl suffix. Any other {{UPPER_CASE}} token refuses the render. <dest> may be missing,
 empty or hold only .git; a dest already holding exactly this render is left alone; anything else is refused.
 Exit codes: 0 rendered or unchanged, 1 dest differs, 2 usage or template error.
 """
@@ -21,6 +21,11 @@ NAME = re.compile(r"^[a-z][a-z0-9]{1,15}$")
 PLACEHOLDER = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
 SUFFIX = ".tmpl"
 MAX_LISTED = 20
+DEFAULTS = {
+    "AI_REVIEW_SECRET": "ANTHROPIC_API_KEY",
+    "AI_REVIEW_MODEL": "claude-sonnet-5",
+    "AI_REVIEW_AUTH_CHECKS": "on every endpoint that needs them",
+}
 
 
 def fail(message, code=2):
@@ -37,14 +42,34 @@ def values(name):
     )
     if sha.returncode != 0:
         fail("render-template: {} is not a git checkout; SDLC_VERSION needs its commit".format(SDLC))
-    return {
-        "PROJECT_NAME": name,
-        "PROJECT_ZONE": "{}.up.km.ua".format(name),
-        "APP_MODULE": name.capitalize(),
-        "REPO_BE": "OlegShevtsov1/1_mvp_{}_be".format(name),
-        "REPO_FE": "OlegShevtsov1/1_mvp_{}_fe".format(name),
-        "SDLC_VERSION": sha.stdout.strip(),
-    }
+    chosen = dict(DEFAULTS, **overrides(name))
+    return dict(
+        chosen,
+        AI_REVIEW_AUTH_INPUT=chosen["AI_REVIEW_SECRET"].lower(),
+        PROJECT_NAME=name,
+        PROJECT_ZONE="{}.up.km.ua".format(name),
+        PROJECT_KEY=name.upper(),
+        APP_MODULE=name.capitalize(),
+        REPO_BE="OlegShevtsov1/1_mvp_{}_be".format(name),
+        REPO_FE="OlegShevtsov1/1_mvp_{}_fe".format(name),
+        SDLC_VERSION=sha.stdout.strip(),
+    )
+
+
+def overrides(name):
+    """Return the KEY=value lines of templates/projects/<name>.env; exit 2 on a key outside DEFAULTS."""
+    path = SDLC / "templates" / "projects" / "{}.env".format(name)
+    if not path.is_file():
+        return {}
+    rel, chosen = path.relative_to(SDLC).as_posix(), {}
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep or key not in DEFAULTS:
+            fail("{}:{}: not an override; use one of {}".format(rel, number, ", ".join(sorted(DEFAULTS))))
+        chosen[key] = value
+    return chosen
 
 
 def read_sources(source, known):

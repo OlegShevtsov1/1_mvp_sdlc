@@ -1,11 +1,14 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { emit, parseJsonObject } from "./_lib/io.ts";
 import { parseSecretNames, runLogged } from "./_lib/exec.ts";
-import { type CiCheck, ciRefusal, isManualBase, lintCheck, parseManualMergeBases, PR_URL } from "./_lib/merge-decision.ts";
+import {
+  type CiCheck, ciRefusal, isManualBase, lintCheck, OTHER_COMMAND_TIMEOUT_SECONDS, parseManualMergeBases, PR_URL,
+} from "./_lib/merge-decision.ts";
+import { DEFAULT_TEST_TIMEOUT_SECONDS } from "./_lib/profile.ts";
 
 // Bindings (see factory.yaml `merge-gate` node): pr (the whole pr-state
-// output), body_sync (the whole pr-body-sync output), test_command, lint_command, build_command, secret_names and
-// manual_merge_bases (JSON array strings). ARTIFACTS_DIR is engine-provided.
+// output), body_sync (the whole pr-body-sync output), test_command, lint_command, build_command,
+// test_timeout_seconds, secret_names and manual_merge_bases (JSON array strings). ARTIFACTS_DIR is engine-provided.
 // Always exits 0 with one {action, pr_url, head, base, reason} line: a
 // refusal is a reported state, and a node failure would leave the conditions
 // of `merge` and `notify-operator` unreadable.
@@ -13,6 +16,8 @@ const pr = parseJsonObject(process.env.INPUTS_PR ?? "") ?? {};
 const bodySync = parseJsonObject(process.env.INPUTS_BODY_SYNC ?? "") ?? {};
 const secretNames = parseSecretNames(process.env.INPUTS_SECRET_NAMES ?? "[]");
 const manualBases = parseManualMergeBases(process.env.INPUTS_MANUAL_MERGE_BASES ?? "");
+// load-profile already validated the number; the fallback only keeps a missing binding from running unbounded.
+const testTimeoutSeconds = Number(process.env.INPUTS_TEST_TIMEOUT_SECONDS) || DEFAULT_TEST_TIMEOUT_SECONDS;
 const artifactsDir = process.env.ARTIFACTS_DIR ?? ".";
 const logPath = `${artifactsDir}/merge-gate.log`;
 
@@ -81,7 +86,23 @@ async function decide(): Promise<Decision> {
       appendFileSync(logPath, `\nlint: deferred to the pull request's CI check '${ciLint}' (pass)\n`);
       continue;
     }
-    const r = await runLogged(command, { logPath, secretNames, timeoutMs: 1_000_000 });
+    const seconds = label === "test" ? testTimeoutSeconds : OTHER_COMMAND_TIMEOUT_SECONDS;
+    const runOnce = () => runLogged(command, { logPath, secretNames, timeoutMs: seconds * 1000 });
+    let r = await runOnce();
+    let retried = false;
+    // A slow host, not a red suite, is what times a test command out
+    // (PILOT-375), so it gets exactly one more run; a failure never does.
+    if (label === "test" && r.timed_out) {
+      appendFileSync(logPath, `
+test: timed out after ${seconds} s; retrying once
+`);
+      r = await runOnce();
+      retried = true;
+    }
+    if (r.timed_out) {
+      const again = retried ? ", and again on its one retry" : "";
+      return refuse(head, `${label} command timed out after ${seconds} s on the pull request head${again}; see merge-gate.log`);
+    }
     if (r.exit_code !== 0) {
       return refuse(head, `${label} command exited ${r.exit_code} on the pull request head; see merge-gate.log`);
     }

@@ -67,7 +67,8 @@ Where shipped tooling differs from this agreed table, the tooling wins and the d
   `bin/` script of the app repository, and it moves the card to `In Progress` when the feature **starts**, so during
   phases 1–4 the card sits in `In Progress`, not in `Backlog`/`Ready`. Aligning the two is open.
 - Phase 4 for size S: `break-tasks` is not run (R-C8.10), so the one-task `tasks/tasks.json` and its tracker row are
-  written in the contracts docs PR by the operator's session ([00-operator.md](00-operator.md#size-s)).
+  written by the operator's session and committed in the `tasks` stage PR that `task-cards` opens
+  ([00-operator.md](00-operator.md#size-s)).
 - Phase 8: today prod deploys a commit sha built by Dev Deploy (`kamal-deploy.yml` with `confirm=prod`). Tags,
   the changelog-driven draft Release and tag-only prod are planned, C4 (backend) and C5 (frontend).
 
@@ -77,8 +78,10 @@ Where shipped tooling differs from this agreed table, the tooling wins and the d
    from `classify-size` and goes onto the card.
 2. **Artifacts of phases 1–4** are created by the operator interactively in the backend repository: the skills ask
    through `AskUserQuestion`, which the unattended factory cannot do, so these phases **never** go through the
-   factory. Each phase ends with a docs PR that a human merges; the PR link goes onto the card. For the frontend:
-   `sync-spec` → a docs PR in the frontend.
+   factory. Each phase ends with a docs PR that the skill opens through `stage-pr` once the operator approved the
+   stage (branch `feature/PILOT-<n>-<slug>-<stage>` from a fresh `origin/develop`, only the stage's files,
+   `Type: docs`; decision 105 c), and a human merges it: that merge is the gate (R-C8.9). The PR link goes onto the
+   card. For the frontend: `sync-spec` → the same helper opens the docs PR in the frontend.
 3. **Tasks**: `tasks.json` (format B, R-C2) → one Trello card per task `Tn` (decision 78, label `task`, in `Ready`)
    made by `task-cards`, which records the card in `tasks.json` and adds `Tn` with a link to the task card to the
    feature card's checklist `T1…Tn` (an item added by hand gets the link appended). The feature card moves to

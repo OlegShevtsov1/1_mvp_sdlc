@@ -18,6 +18,7 @@ load-profile: &profile
   test_command: "true"
   lint_command: ""
   build_command: ""
+  test_timeout_seconds: 1000
   remote: origin
   base_branch: develop
   merge_strategy: squash

@@ -37,7 +37,7 @@ pushing an annotated release tag.
   exception to the names above. A factory task is traced to its card through the pull request title.
 - **Squash subject and body** (decision 25): the repositories squash with the pull request title as the subject
   and the pull request body as the body. The title is exactly `PILOT-<idShort>: <card title>`, the Trello card name
-  verbatim, with no type prefix. The body has exactly one line `Type: <type>`, one of `feat`, `fix`, `chore`,
+  verbatim, with no type prefix (a stage docs PR appends ` — <stage>`, decision 105 c). The body has exactly one line `Type: <type>`, one of `feat`, `fix`, `chore`,
   `docs`, `refactor`, `test`, `ci`, always, also for the types that do not change the version. A
   `BREAKING CHANGE: <what>` footer marks a MAJOR change (R-C9, unchanged). `next-version.sh` (planned, C4) reads the
   `Type:` line, not a subject prefix: `feat` → MINOR, `fix` → PATCH, the rest no bump.
@@ -124,7 +124,12 @@ it with their brownfield start (C2, C3) and new projects from the templates in
   `.archon/factory-profile.yaml` of the develop-model repositories (an absent key means `["main"]`): a green pull request into
   a listed base is not merged, the factory comments on it for the operator, and the run ends
   `delivered-pending-operator`.
-- **Docs PRs (feature artifacts)**: the operator merges by hand; that merge is part of the gate (R-C8.9).
+- **Docs PRs (feature artifacts)**: one per feature stage, opened by `stage-pr` of the `mvp-sdlc` plugin once the
+  operator approved the stage (decision 105 c): branch `feature/PILOT-<n>-<slug>-<stage>` from a fresh
+  `origin/develop`, only the stage's files, title `PILOT-<n>: <card title> — <stage>`, a body with the files, the
+  line "the operator's merge is this stage's gate (R-C8.9)" and exactly one `Type: docs` line. The operator merges
+  it by hand; that merge is part of the gate (R-C8.9), and the next stage's gate blocks naming the PR while it is
+  open.
 - **RULE-LOOP**: if the auto-review misses a P0/P1 finding twice in a row (found later), tasks labelled `migration`,
   `auth` or `security` switch to manual merge (R-C1, variant c) and their review to the large model (R-C12); the
   cases go into the C9 retrospective.

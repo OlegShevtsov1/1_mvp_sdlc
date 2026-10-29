@@ -35,7 +35,7 @@ describe("runLogged", () => {
       logPath,
       secretNames: ["FACTORY_TEST_SECRET"],
     });
-    expect(r.exit_code).toBe(3);
+    expect(r).toEqual({ exit_code: 3, timed_out: false });
     const log = readFileSync(logPath, "utf8");
     expect(log).toContain("out ***");
     expect(log).toContain("err ***");
@@ -58,7 +58,12 @@ describe("runLogged", () => {
   test("times out with exit code 124", async () => {
     const dir = mkdtempSync(join(tmpdir(), "factory-exec-"));
     const r = await runLogged("sleep 5", { logPath: join(dir, "x.log"), secretNames: [], timeoutMs: 300 });
-    expect(r.exit_code).toBe(124);
+    expect(r).toEqual({ exit_code: 124, timed_out: true });
+  });
+  test("a command that exits 124 by itself is not a timeout", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-exec-"));
+    const r = await runLogged("exit 124", { logPath: join(dir, "x.log"), secretNames: [], timeoutMs: 10_000 });
+    expect(r).toEqual({ exit_code: 124, timed_out: false });
   });
 });
 

@@ -202,6 +202,7 @@ nodes:
         test_command: { type: string }
         lint_command: { type: string }
         build_command: { type: string }
+        test_timeout_seconds: { type: number }
         remote: { type: string }
         base_branch: { type: string }
         merge_strategy: { type: string }
@@ -217,7 +218,7 @@ nodes:
         manual_merge_bases:
           type: array
           items: { type: string }
-      required: [language, test_command, remote, base_branch, merge_strategy, deploy_command, health_url, wait_seconds, rollback_command, monitoring_provider, window_minutes, secret_names, manual_merge_bases]
+      required: [language, test_command, test_timeout_seconds, remote, base_branch, merge_strategy, deploy_command, health_url, wait_seconds, rollback_command, monitoring_provider, window_minutes, secret_names, manual_merge_bases]
 
   # Archon cuts the run worktree from the default branch, not the profile's
   # base_branch. Before the plan, this resets a run branch with no work of its
@@ -849,18 +850,22 @@ nodes:
   # ready, or not what the checkout holds. A green PR whose base is in the
   # profile's manual_merge_bases gets action notify instead of merge: those
   # PRs are merged by the operator (decision 27). It also refuses when
-  # pr-body-sync could not republish the description.
+  # pr-body-sync could not republish the description. The test command runs
+  # under the profile's test_timeout_seconds (default 1000 s) and runs once more
+  # after a timeout; lint and build get 1000 s each. The node timeout covers
+  # twice the 3600 s maximum plus both.
   - id: merge-gate
     script: merge-gate
     runtime: bun
     depends_on: [pr-state, pr-body-sync]
-    timeout: 3600000
+    timeout: 9600000
     with:
       pr: "$pr-state.output"
       body_sync: "$pr-body-sync.output"
       test_command: "$load-profile.output.test_command"
       lint_command: "$load-profile.output.lint_command"
       build_command: "$load-profile.output.build_command"
+      test_timeout_seconds: "$load-profile.output.test_timeout_seconds"
       secret_names: "$load-profile.output.secret_names"
       manual_merge_bases: "$load-profile.output.manual_merge_bases"
     output_format:

@@ -45,8 +45,8 @@ task text is written from them (R-C8.7).
 `owner`, `estimate`, `status`, plus the optional `type` of the pull request, default `feat`, and the optional
 `trello_card_id` and `trello_card_id_short` of the task's own card, written only by `task-cards`), PRD section 5 for every referenced criterion and a test level for each. The course
 `break-tasks` refuses without `sad.md` and an Accepted ADR, and S runs neither (R-C8.10). So for S the operator's
-interactive session writes `tasks/tasks.json` with one task and one `tasks/tracker.md` row in the contracts docs PR,
-then `task-cards <slug>` gives the task its card and `task-brief <slug> T1` validates them. A helper that writes these two files is a candidate follow-up.
+interactive session writes `tasks/tasks.json` with one task and one `tasks/tracker.md` row, then `task-cards <slug>`
+gives the task its card and opens the `tasks` stage PR with both files, and `task-brief <slug> T1` validates them. A helper that writes these two files is a candidate follow-up.
 
 ## Machine state
 

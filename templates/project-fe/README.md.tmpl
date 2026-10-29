@@ -72,7 +72,7 @@ Repository secrets:
 - `AWS_ROLE_ARN` — the role the workflows assume for ECR (OIDC)
 - `VPN_CI_OVPN` — the shared CI VPN profile
 - `SRV_DEPLOY_SSH_KEY` — SSH key of the dev host's deploy user
-- `ANTHROPIC_API_KEY` — AI PR review (only used when `AI_REVIEW` is `on`)
+- `{{AI_REVIEW_SECRET}}` — AI PR review (only used when `AI_REVIEW` is `on`)
 - `RAG_MCP_URL`, `RAG_MCP_TOKEN` — address and token of the shared project knowledge server `mvp-rag` that the
   `mvp-sdlc` plugin connects to (decision 61 b); set by `project-add` (S5), read by no workflow yet
 

@@ -80,7 +80,7 @@ jobs:
         if: steps.switch.outputs.enabled == 'true'
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          {{AI_REVIEW_AUTH_INPUT}}: ${{ secrets.{{AI_REVIEW_SECRET}} }}
           github_token: ${{ github.token }}
           prompt: |
             You are reviewing pull request #${{ github.event.pull_request.number || github.event.issue.number }} of
@@ -98,9 +98,8 @@ jobs:
                docs/features/*/contracts/.
             3. Tests: is the changed behaviour covered by a test that would fail without the change; were tests weakened,
                skipped or deleted; were checks in .github/workflows or scripts/ loosened.
-            4. Conventions (<KEY> is PROJECT_NAME from config/project.env in capitals): head branch
-               feature/<KEY>-<n>-<slug>, hotfix/<KEY>-<n>-<slug> or archon/task-factory-*; title <KEY>-<n>: <card title>;
-               exactly one Type: line (feat|fix|chore|docs|refactor|test|ci) in the body; a
+            4. Conventions: head branch feature/{{PROJECT_KEY}}-<n>-<slug>, hotfix/{{PROJECT_KEY}}-<n>-<slug> or archon/task-factory-*; title
+               {{PROJECT_KEY}}-<n>: <card title>; exactly one Type: line (feat|fix|chore|docs|refactor|test|ci) in the body; a
                Type: feat or fix PR adds an entry under [Unreleased] in CHANGELOG.md unless labelled skip-changelog; commits
                follow Conventional Commits; specs under docs/features/ and state.json are never edited here.
             5. Public-repo rule: no internal hostnames, IP addresses, cloud account IDs, tracker or chat IDs, or local paths
@@ -124,7 +123,7 @@ jobs:
             an empty findings list. Put a one-paragraph overall assessment in summary.
             Do not post anything; the workflow posts the review.
           claude_args: |
-            --model claude-sonnet-5
+            --model {{AI_REVIEW_MODEL}}
             --max-turns 20
             --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*)"
             --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch,Task,mcp__github_inline_comment__create_inline_comment"

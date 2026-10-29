@@ -96,8 +96,9 @@ async function pumpToLog(
 // the exit code. Nothing the command prints reaches this process's stdout — a
 // node's stdout is its declared result and nothing else. `timeoutMs` is a hard
 // bound: the command's own fds cannot extend it, and a command that outlives it
-// reports 124.
-export async function runLogged(command: string, opts: RunOptions): Promise<{ exit_code: number }> {
+// reports 124 with `timed_out` set — the one way to tell it from a command that
+// exits 124 by itself.
+export async function runLogged(command: string, opts: RunOptions): Promise<{ exit_code: number; timed_out: boolean }> {
   mkdirSync(dirname(opts.logPath), { recursive: true });
   appendFileSync(opts.logPath, `\n$ ${redact(command, opts.secretNames)}\n`);
   // Two wrappers around the command, both load-bearing for the deadline:
@@ -124,6 +125,7 @@ export async function runLogged(command: string, opts: RunOptions): Promise<{ ex
   const exited = proc.exited.catch(() => -1);
 
   let exit_code: number;
+  let timed_out = false;
   if (!opts.timeoutMs) {
     await drained;
     exit_code = await exited;
@@ -143,10 +145,11 @@ export async function runLogged(command: string, opts: RunOptions): Promise<{ ex
       killAll(proc, "SIGKILL");
       await Promise.race([drained, Bun.sleep(DRAIN_AFTER_KILL_MS)]);
       exit_code = 124;
+      timed_out = true;
     } else {
       exit_code = first;
     }
   }
   appendFileSync(opts.logPath, `\n[exit ${exit_code}]\n`);
-  return { exit_code };
+  return { exit_code, timed_out };
 }

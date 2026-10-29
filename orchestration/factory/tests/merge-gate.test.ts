@@ -2,8 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { OTHER_COMMAND_TIMEOUT_SECONDS } from "../.archon/workflows/sdlc-factory/factory/scripts/_lib/merge-decision.ts";
+import { MAX_TEST_TIMEOUT_SECONDS } from "../.archon/workflows/sdlc-factory/factory/scripts/_lib/profile.ts";
 
-const MERGE_GATE = join(import.meta.dir, "..", ".archon", "workflows", "sdlc-factory", "factory", "scripts", "merge-gate.ts");
+const PACK = join(import.meta.dir, "..", ".archon", "workflows", "sdlc-factory", "factory");
+const MERGE_GATE = join(PACK, "scripts", "merge-gate.ts");
 const PR_URL = "https://github.com/example/repo/pull/3";
 
 interface Result { code: number; doc: Record<string, unknown>; lines: string[]; artifacts: string }
@@ -231,5 +234,91 @@ describe("merge-gate", () => {
     const log = readFileSync(join(r.artifacts, "merge-gate.log"), "utf8");
     expect(log).toContain("token=***");
     expect(log).not.toContain("s3cr3t-value-123");
+  });
+
+  // A slow test command, stubbed: each run appends a line to `runs`, then
+  // outlives the 1 s limit the binding sets.
+  function slowTest(): { marks: string; runs: () => number; env: Record<string, string> } {
+    const { marks, env } = markerCommands();
+    return {
+      marks,
+      runs: () => (existsSync(join(marks, "runs")) ? readFileSync(join(marks, "runs"), "utf8").split("\n").filter((l) => l !== "").length : 0),
+      env: { ...env, INPUTS_TEST_TIMEOUT_SECONDS: "1" },
+    };
+  }
+
+  test("a test command that times out twice refuses with a timeout, not a failing test", () => {
+    const { marks, runs, env } = slowTest();
+    const r = run({ ...env, INPUTS_TEST_COMMAND: `echo x >> ${marks}/runs; sleep 30` });
+    expectOneLine(r);
+    expect(r.doc).toEqual({
+      action: "refuse", pr_url: PR_URL, head: "feature-x", base: "develop",
+      reason: "test command timed out after 1 s on the pull request head, and again on its one retry; see merge-gate.log",
+    });
+    expect(runs()).toBe(2);
+    expect(existsSync(join(marks, "lint"))).toBe(false);
+    expect(existsSync(join(marks, "build"))).toBe(false);
+    expect(readFileSync(join(r.artifacts, "merge-gate.log"), "utf8")).toContain("test: timed out after 1 s; retrying once");
+  }, 15_000);
+
+  test("a test command that times out once and passes on its retry goes on to merge", () => {
+    const { marks, env } = slowTest();
+    const r = run({ ...env, INPUTS_TEST_COMMAND: `if [ -e ${marks}/once ]; then true; else touch ${marks}/once; sleep 30; fi` });
+    expectOneLine(r);
+    expect(r.doc).toMatchObject({ action: "merge", reason: "" });
+    expect(existsSync(join(marks, "lint"))).toBe(true);
+    expect(existsSync(join(marks, "build"))).toBe(true);
+  }, 15_000);
+
+  test("a test command that times out and then fails on its retry reports the failure", () => {
+    const { marks, env } = slowTest();
+    const r = run({ ...env, INPUTS_TEST_COMMAND: `if [ -e ${marks}/once ]; then exit 3; else touch ${marks}/once; sleep 30; fi` });
+    expectOneLine(r);
+    expect(r.doc).toMatchObject({ action: "refuse", reason: "test command exited 3 on the pull request head; see merge-gate.log" });
+  }, 15_000);
+
+  test("a failing test command is not retried", () => {
+    const { marks, runs, env } = slowTest();
+    const r = run({ ...env, INPUTS_TEST_COMMAND: `echo x >> ${marks}/runs; exit 1` });
+    expectOneLine(r);
+    expect(r.doc).toMatchObject({ action: "refuse", reason: "test command exited 1 on the pull request head; see merge-gate.log" });
+    expect(runs()).toBe(1);
+  }, 15_000);
+
+  test("a test command that exits 124 by itself is reported as exiting 124, not retried", () => {
+    const { marks, runs, env } = slowTest();
+    const r = run({ ...env, INPUTS_TEST_COMMAND: `echo x >> ${marks}/runs; exit 124` });
+    expectOneLine(r);
+    expect(r.doc).toMatchObject({ action: "refuse", reason: "test command exited 124 on the pull request head; see merge-gate.log" });
+    expect(runs()).toBe(1);
+  }, 15_000);
+
+  test("an absent or unreadable test_timeout_seconds binding still runs the test command", () => {
+    for (const binding of [undefined, "", "abc", "0"]) {
+      const { marks, env } = markerCommands();
+      const r = run({ ...env, INPUTS_TEST_TIMEOUT_SECONDS: binding });
+      expectOneLine(r);
+      expect(r.doc).toMatchObject({ action: "merge", reason: "" });
+      expect(existsSync(join(marks, "test"))).toBe(true);
+    }
+  });
+
+  test("factory.yaml binds the profile's test_timeout_seconds into merge-gate", () => {
+    const yaml = Bun.YAML.parse(readFileSync(join(PACK, "factory.yaml"), "utf8")) as {
+      nodes: { id: string; with?: Record<string, unknown>; output_format?: { properties: Record<string, unknown>; required: string[] } }[];
+    };
+    const loadProfile = yaml.nodes.find((n) => n.id === "load-profile");
+    expect(loadProfile?.output_format?.properties.test_timeout_seconds).toEqual({ type: "number" });
+    expect(loadProfile?.output_format?.required).toContain("test_timeout_seconds");
+    const gate = yaml.nodes.find((n) => n.id === "merge-gate");
+    expect(gate?.with?.test_timeout_seconds).toBe("$load-profile.output.test_timeout_seconds");
+  });
+
+  // Worst case: the test command at the largest limit, timed out and retried,
+  // then lint and build at theirs; the margin covers the kill grace and startup.
+  test("the merge-gate node timeout covers a retried test at the maximum limit plus lint and build", () => {
+    const yaml = Bun.YAML.parse(readFileSync(join(PACK, "factory.yaml"), "utf8")) as { nodes: { id: string; timeout?: number }[] };
+    const timeout = yaml.nodes.find((n) => n.id === "merge-gate")?.timeout ?? 0;
+    expect(timeout).toBeGreaterThanOrEqual((2 * MAX_TEST_TIMEOUT_SECONDS + 2 * OTHER_COMMAND_TIMEOUT_SECONDS) * 1000 + 300_000);
   });
 });

@@ -145,10 +145,10 @@ Steps 0–2 and 4–9 of the M path below, with these differences:
   `/sdlc:plan-tests` (the test plan may stay inside the PRD);
 - step 5: no `/sdlc:break-tasks` (it refuses without `sad.md` and an Accepted ADR). **Known gap:** the task is
   written by hand: ask the agent in the session to write, from the PRD, `docs/features/<slug>/tasks/tasks.json` with
-  one task and one row in `docs/features/<slug>/tasks/tracker.md`, in the contracts docs PR (no `T1.md` is needed),
-  then run `task-cards <slug>` to give the task its card and `task-brief <slug> T1` to validate both. A feature that
-  touches the frontend too gets its frontend task as `T2` in the same backend `tasks/tasks.json` and `tracker.md`
-  (layer `ui`), so `task-cards` gives it its card in the backend too; it is briefed in the frontend with
+  one task and one row in `docs/features/<slug>/tasks/tracker.md` (no `T1.md` is needed), then run
+  `task-cards <slug>` to give the task its card and open the `tasks` stage PR with both files, and
+  `task-brief <slug> T1` to validate both. A feature that touches the frontend too gets its frontend task as `T2` in
+  the same backend `tasks/tasks.json` and `tracker.md` (layer `ui`), so `task-cards` gives it its card in the backend too; it is briefed in the frontend with
   `task-brief <slug> T2 --from <be checkout>` (step 6). Fix tasks after review are appended the same way as the next
   `T<n>` in a docs PR. A helper that writes these files is a candidate follow-up. The minimal shape (R-C2):
 
@@ -181,13 +181,17 @@ creates `docs/features/<slug>/state.json`, moves the card to `In Progress`, comm
 card and hands over to `/sdlc:interview <slug>`. The card text is treated as untrusted data. The agent asks why,
 for whom, how to measure success, edge cases; the result is `idea-brief.md` and the glossary `CONTEXT.md`. If
 `feature-start` refuses, it says exactly why; fix the card, do not work around it.
-**Your gate:** is this really what you want? If yes, tell the agent so: it sets `status: Confirmed` in the brief's
-frontmatter, commits the documents on a `feature/PILOT-<n>-<slug>-brief` branch (`<n>` is the card number) and opens
-the docs PR into `develop`, titled `PILOT-<n>: <card title>` with the body line `Type: docs`, and **you** merge it on
-GitHub (you merge all docs PRs, R-C1). Then in your checkout: `git checkout develop && git pull --ff-only` (the gate
-reads `origin`, and the next phase starts from `develop`). The gate looks at the remote's default branch unless told
-otherwise, so export `SDLC_BASE_BRANCH=develop` in the session of an app repository. Every later gate works the same
-way: you say approved, the agent sets the status and opens the PR, you merge, you pull.
+**Your gate:** is this really what you want? If yes, approve it in the skill's own question: the agent sets
+`status: Confirmed` in the brief's frontmatter and runs `stage-pr` (decision 105 c), which creates the
+`feature/PILOT-<n>-<slug>-brief` branch (`<n>` is the card number) from a freshly fetched `origin/develop`, commits
+only the stage's documents (and `state.json`), pushes and opens the docs PR into `develop`, titled
+`PILOT-<n>: <card title> — brief` with the body line `Type: docs`. The handoff names the commit and the PR link, and
+**you** merge it on GitHub (you merge all docs PRs, R-C1; that merge is the gate, R-C8.9). No `git pull` is needed:
+the next gated skill fetches `origin/develop` before its gate, and `stage-pr` branches from it. The gate looks at the
+remote's default branch unless told otherwise, so export `SDLC_BASE_BRANCH=develop` in the session of an app
+repository. Every later gate works the same way: you approve, the agent sets the status and opens the stage's PR,
+you merge it before the next skill, as its "Run next" says; a skill started too early is blocked with the open PR's
+number.
 
 **Step 2. Requirements (gate).** `/clear`, then `/sdlc:write-prd <slug>` (the agent prints the exact "run next"
 command at the end of each phase), then `/sdlc:clarify-prd <slug>`. The result is `PRD.md` with acceptance
@@ -210,9 +214,10 @@ confirm). You only answer when the agent asks about a disputed point.
 `tasks/tracker.md`. A task is at most one day of work and at most 500 changed lines. Right after it, in the backend,
 `/mvp-sdlc:task-cards <slug>` gives every task its own Trello card (decision 78): it shows a dry run first, then
 creates each card in `Ready` with the label `task` (or adopts a card already named `<slug> T<n>: …`), records the
-card in `tasks/tasks.json` and adds the task to the feature card's checklist. Then, as at every gate, the agent
-opens **one contracts docs PR** with everything from steps 4 and 5 (the documents keep the status their skill
-gives them; the gate for this phase is the Definition of Ready) and you merge it. If the feature touches the
+card in `tasks/tasks.json` and adds the task to the feature card's checklist. As at every gate, each skill of steps
+4 and 5 opens its own stage PR once you approve it (`sad`, `data-model`, `contracts`, `test-plan`, `tasks`;
+`task-cards` adds `tasks.json` to the open `tasks` PR), and you merge each before the next skill, as its "Run next"
+says (the documents keep the status their skill gives them; the gate for this phase is the Definition of Ready). If the feature touches the
 frontend, sync the spec copy now (section 4). Check the Definition of Ready: the PRD approved and merged, for M+ the
 SAD and an Accepted ADR merged, every task in `tasks/tasks.json` with criteria from PRD section 5 and a test level
 for each, no task over a day, CI green on `main`, and `task-brief` prints the text for each task without refusing
@@ -363,8 +368,9 @@ contracts as the shared source (M6.6).
    repository (named after its `origin` remote; `--repo <name>` overrides), their task files `tasks/t<n>-*.md` and
    the epic `tasks/_epic.md`. A dependency on a backend task moves from `"deps"` to `"external_deps"`.
    `tasks/tracker.md` is never copied: the backend owns the status of every task.
-3. Commit the copy on a `feature/PILOT-<n>-<slug>-spec` branch and merge the docs PR into `develop` (title
-   `PILOT-<n>: <card title>`, body line `Type: docs`).
+3. `/mvp-sdlc:sync-spec` then runs `stage-pr <slug> spec`: it commits the copy on a `feature/PILOT-<n>-<slug>-spec`
+   branch and opens the docs PR into `develop` (title `PILOT-<n>: <card title> — spec`, body line `Type: docs`); you
+   merge it.
 4. Never edit a copied file in the frontend: change the backend first, then sync again. That includes task status:
    a frontend task is marked done in the backend, then synced.
 5. Before each frontend task and in its Definition of Done: `sync-spec <slug> --from <be checkout> --check` must exit

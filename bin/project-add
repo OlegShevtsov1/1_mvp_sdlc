@@ -266,8 +266,8 @@ class State:
 # --- secrets --------------------------------------------------------------------------------------------------------
 
 # name -> (repositories, scopes, source, instruction for a manual one). Scope "repo" is repository-wide; "dev" and
-# "prod" are GitHub environments. The set equals the secrets.* names the templates' workflows read plus the two RAG
-# names (tests/project-add pins it).
+# "prod" are GitHub environments. The set equals the secrets.* names a default render of the templates' workflows reads
+# plus the two RAG names (tests/project-add pins it).
 MANUAL = "manual"
 TELEGRAM = "telegram"
 SECRETS = (

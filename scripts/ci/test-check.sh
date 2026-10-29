@@ -16,6 +16,9 @@ echo "PASS the workflows run every check.sh check"
 [ "$(grep -cxF '    branches: [develop, main]' "${workflows}/ci.yml")" -eq 2 ] \
   || fail "ci.yml" "must run on pull requests into and pushes to develop and main"
 echo "PASS CI runs on pull requests into and pushes to develop and main"
+[ "$(grep -cxF '    timeout-minutes: 30' "${workflows}/ci.yml")" -eq 2 ] \
+  || fail "ci.yml" "both jobs need timeout-minutes: 30 (a shared runner under load runs them 2-3x slower)"
+echo "PASS both CI jobs have a 30-minute limit"
 
 rc=0
 bash "${here}/check.sh" no-such-check 2>/dev/null || rc=$?

@@ -95,6 +95,19 @@ and carry on.
   factory profile) for frontend tasks, whose status the backend owns; the `sync-spec` copy of `tasks.json` is
   briefed only with `--from`. Refuses tasks that are not ready, invalid
   task card fields, and tasks with no card number at all. Never names a branch and never carries a Trello link.
+- `stage-pr <slug> <stage> --message <msg> <path>...` — commits, pushes and opens one feature stage's docs pull
+  request (decision 105 c); the feature-stage skills run it once the operator has approved the stage, the operator
+  merges the pull request by hand and that merge is the stage's gate (R-C8.9). Fetches `origin/<base>` (the gate's
+  base), creates `feature/PILOT-<n>-<slug>-<stage>` from it (card number and title from `state.json`, or
+  `.spec-source` in the frontend), commits only the given paths (relative to the repository root) plus the feature's
+  `state.json` when the gate advanced it, pushes the branch and opens a pull request into the base titled
+  `PILOT-<n>: <card title> — <stage>`, its body the files, the R-C8.9 line and exactly one `Type: docs` line. On the
+  stage's own branch while its pull request is open (or not opened yet) it adds a commit there; once that branch is
+  merged it takes `<branch>-2` … `-9`. Refuses (exit 1), before switching or committing anything, when the working
+  tree has changes outside the given paths or the paths are already identical on the base; a push whose pull
+  request failed is finished by a re-run. Prints `branch:`, `commit:` and `pr:` lines. Exit 0 the pull request is
+  open, 1 refused or git/gh failed, 2 usage error (passing `state.json`, a `Type:` line in the message, a path
+  outside the repository).
 - `bootstrap-project <be|fe> [--target DIR] [--overwrite PATH]...` — installs `CLAUDE.md`,
   `.claude/settings.json`, `.claude/rules/*.md`, `.claude/sdlc.local.md` and the `.gitignore` line
   `.claude/*.local.md`. Idempotent (`No changes` on a second run); a file that differs is kept unless named with
@@ -138,7 +151,10 @@ release and metrics from C2 on). Hand edits are blocked by the `block-state-edit
 - `block-state-edit` (PreToolUse Write, Edit, MultiEdit, NotebookEdit, Bash) — blocks writing
   `docs/features/<slug>/state.json` except through the scripts; reading it (`cat`, `jq`, `git diff`, …) passes.
 - `sdlc-gate-hook` (PreToolUse Skill and UserPromptSubmit) — runs `sdlc-gate` before the gated course skills,
-  whether the model invokes the skill or the user types `/sdlc:<skill>` or `/sdlc-<skill>`.
+  whether the model invokes the skill or the user types `/sdlc:<skill>` or `/sdlc-<skill>`, after a best-effort
+  `git fetch origin <base>`. When a course skill that writes a feature stage starts (`FEATURE_STAGE_SKILLS` in
+  `hooks/guards.py`) and is not blocked, it adds context telling the model to replace the skill's "Propose commit"
+  with `stage-pr` once the operator approved the stage (decision 105 c; the course plugin stays unchanged).
 
 All hook logic is in `hooks/guards.py`; the `.sh` files are entry points. The command-line parsing handles
 compound commands, `sh -c`, `env`/`VAR=` prefixes, input redirects (`< file`) and `git -C`. The hooks are
@@ -156,8 +172,9 @@ protection are the other layers.
 
 "Merged" means: the file is on `origin/<base>`, the working tree matches it there, and the last commit touching it
 on `origin/<base>` belongs to a merged pull request (`gh api repos/{owner}/{repo}/commits/<sha>/pulls`). The base is
-`SDLC_BASE_BRANCH`, else the remote's default branch, else `main`. The gate never fetches: run `git fetch` after a
-merge. Without a working `gh` the gate blocks (fail closed). The slug is the first argument, else `SDLC_FEATURE`,
+`SDLC_BASE_BRANCH`, else the remote's default branch, else `main`. The gate itself never fetches; `sdlc-gate-hook`
+fetches the base before it runs the gate, so only a manual run needs `git fetch` after a merge. A block on an
+artifact that is not merged names its open pull request when `gh pr list` finds one. Without a working `gh` the gate blocks (fail closed). The slug is the first argument, else `SDLC_FEATURE`,
 else the only feature not yet shipped (any `state.json` that does not follow the schema blocks). On a pass the gate advances `state.json` forward only (`ship` moves it to
 `review`) with the evidence `sdlc-gate:<phase>:<sha>`. `mvp-sdlc:rails-data-model` and the other course skills are
 not gated.

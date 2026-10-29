@@ -40,6 +40,15 @@ continue; never stop or retry because of it.
   3. `app/models/*.rb` — soft delete (`include Discard::Model` means `discarded_at`, `acts_as_paranoid` means
      `deleted_at`), associations and `dependent:` options.
 
+## Commit, push and open the stage PR
+
+After step 7, ask the operator once with `AskUserQuestion` (Approve and open the PR / Revise): this skill has no
+confirmation of its own, and nothing is pushed without the operator's approval. On Approve run
+`stage-pr <slug> data-model --message "docs(data-model): <slug>" docs/features/<slug>/data-model.md
+docs/features/<slug>/migrations`, adding the rule file step 6 installed, if it did, and put the commit
+and the pull request link it printed in step 7's report: the operator merges that pull request. A non-zero exit:
+show its message and stop.
+
 ## Hard rules
 
 - Never create, edit or delete `db/schema.rb`, `db/structure.sql` or anything under `db/migrate/`.

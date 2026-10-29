@@ -33,11 +33,12 @@ unavailable (<reason>)` instead and continue; never stop or retry because of it.
    backend checkout if you do not know it.
 2. In the frontend repository run `sync-spec <slug> --from <be checkout>` (add `--ref <ref>` only when the user
    asks for something other than `origin/main`). A non-zero exit: show the message and stop.
-3. Commit the copied files and `docs/features/<slug>/.spec-source` on a docs branch and open a docs pull request;
-   the copy changes nothing else. In the pilot app repositories that branch is `feature/PILOT-<n>-<slug>-spec`,
-   the pull request goes into `develop` with the title `PILOT-<n>: <card title>` and the body line `Type: docs`.
-   The record also carries the card number and title from the backend `state.json`, which `task-brief` needs for
-   frontend tasks. A sync after a task changed status in the backend goes the same way.
+3. Commit, push and open the stage PR: run `stage-pr <slug> spec --message "docs(spec): copy <slug> from
+   be@<sha7>" docs/features/<slug>` in the frontend repository. It branches `feature/PILOT-<n>-<slug>-spec` from a
+   fresh `origin/develop` (card number and title from the `.spec-source` the copy just wrote, which `task-brief` also
+   needs for frontend tasks), commits only the copy and `.spec-source` and opens the `Type: docs` pull request into
+   `develop`. Report the commit and the pull request link it printed, and that the operator merges it. A non-zero
+   exit: show its message and stop. A sync after a task changed status in the backend goes the same way.
 4. Never edit a copied file in the frontend repository. A needed change goes to the backend repository first, then
    is synced again.
 

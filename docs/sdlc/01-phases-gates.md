@@ -37,8 +37,8 @@ otherwise. You can run it by hand. The table is the one in
 
 "Merged" means: the file is on `origin/<base>`, the working tree matches it there, and the last commit touching it
 on `origin/<base>` belongs to a merged pull request (checked with `gh api`). The base is `SDLC_BASE_BRANCH`, else the
-remote's default branch, else `main`. The gate never fetches: run `git fetch` after a merge. Without a working `gh`
-the gate blocks (fail closed). The slug is the argument, else `SDLC_FEATURE`, else the only feature not yet shipped.
+remote's default branch, else `main`. The gate script never fetches; `sdlc-gate-hook` fetches the base first (run
+`git fetch` only before a manual `sdlc-gate`). Without a working `gh` the gate blocks (fail closed). The slug is the argument, else `SDLC_FEATURE`, else the only feature not yet shipped.
 On a pass the gate moves `state.json` forward (never back) with the evidence `sdlc-gate:<phase>:<sha>`.
 
 In the app repositories (the develop model, [05-git-pr-review.md](05-git-pr-review.md)) the feature documents merge

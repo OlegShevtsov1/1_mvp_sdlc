@@ -9,6 +9,8 @@ from support import MERGED, PLUGIN, UNMERGED, AppRepo, TempTestCase
 sys.path.insert(0, str(PLUGIN / "lib"))
 import sdlc_common  # noqa: E402
 
+guards = sdlc_common.load_script("hooks/guards.py")
+
 FEATURE = "docs/features/demo/"
 CLEAN_AC = "**Then** the system delivers a spreadsheet file with one row per order and confirms the export"
 DIRTY_AC = "**Then** the system answers with status 200 and runs SELECT on the orders"
@@ -63,11 +65,34 @@ class GateTest(TempTestCase):
         self.repo.commit("local only")
         self.assertBlocked(self.gate("prd", "demo"), "idea-brief.md", "origin/main", "git fetch")
 
+    def test_blocked_message_names_the_open_pr(self):
+        brief = self.repo.read(FEATURE + "idea-brief.md")
+        (self.repo.path / FEATURE / "idea-brief.md").unlink()
+        self.publish()
+        self.repo.write(FEATURE + "idea-brief.md", brief)
+        self.repo.commit("local only")
+        url = "https://github.com/acme/app/pull/12"
+        files = [{"path": FEATURE + "idea-brief.md"}]
+        self.repo.stub_gh(MERGED, pr_list=[{"number": 12, "url": url, "files": files}])
+        self.assertBlocked(self.gate("prd", "demo"), "merge pull request #12 ({}) first".format(url))
+        self.repo.stub_gh(MERGED, pr_list="FAIL")
+        self.assertBlocked(self.gate("prd", "demo"), "idea-brief.md", "origin/main", "git fetch")
+
     def test_status_and_merge_failures_of_one_artifact_are_both_reported(self):
         self.publish()
         self.repo.replace(FEATURE + "idea-brief.md", "status: Confirmed", "status: Draft")
         self.repo.commit("local draft")
         self.assertBlocked(self.gate("prd", "demo"), "has status 'Draft'", "has unmerged edits")
+
+    def test_unmerged_edits_name_the_open_pr(self):
+        self.publish()
+        self.repo.write(FEATURE + "idea-brief.md", self.repo.read(FEATURE + "idea-brief.md") + "\nRevised.\n")
+        url = "https://github.com/acme/app/pull/13"
+        files = [{"path": FEATURE + "idea-brief.md"}]
+        self.repo.stub_gh(MERGED, pr_list=[{"number": 13, "url": url, "files": files}])
+        self.assertBlocked(
+            self.gate("prd", "demo"), "has unmerged edits", "its pull request #13 ({}) is still open".format(url)
+        )
 
     def test_prd_needs_merged_pull_request(self):
         sha = self.publish()
@@ -187,7 +212,6 @@ class GateTest(TempTestCase):
 
 class PhaseTableTest(unittest.TestCase):
     def test_hook_phases_are_the_gate_phases(self):
-        guards = sdlc_common.load_script("hooks/guards.py")
         gate = sdlc_common.load_script("bin/sdlc-gate")
         self.assertEqual(set(guards.GATED_SKILLS.values()), set(gate.PHASE_STAGE))
 
@@ -244,3 +268,46 @@ class GateHookTest(TempTestCase):
                 result = self.hook(event)
                 self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.repo.gh_calls(), [])
+
+    def assertStageContext(self, result, event_name, stage):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], event_name)
+        self.assertIn("`stage-pr <slug> {} ".format(stage), output["additionalContext"])
+
+    def test_feature_stage_skills_get_the_stage_pr_context(self):
+        for skill, stage in guards.FEATURE_STAGE_SKILLS.items():
+            if skill in guards.GATED_SKILLS:
+                continue
+            with self.subTest(skill=skill):
+                tool_input = {"skill": "sdlc:" + skill}
+                event = {"hook_event_name": "PreToolUse", "tool_name": "Skill", "tool_input": tool_input}
+                self.assertStageContext(self.hook(event), "PreToolUse", stage)
+                prompt = {"hook_event_name": "UserPromptSubmit", "prompt": "/sdlc:{} demo".format(skill)}
+                self.assertStageContext(self.hook(prompt), "UserPromptSubmit", stage)
+        self.assertEqual(self.repo.gh_calls(), [])
+
+    def approve_prd(self):
+        self.repo.replace(FEATURE + "PRD.md", "status: Draft", "status: Approved")
+
+    def test_gated_pass_adds_the_context_and_block_does_not(self):
+        tool_input = {"skill": "sdlc:architecture-design"}
+        event = {"hook_event_name": "PreToolUse", "tool_name": "Skill", "tool_input": tool_input}
+        blocked = self.hook(event)
+        self.assertBlocked(blocked)
+        self.assertEqual(blocked.stdout, "")
+        self.approve_prd()
+        self.repo.commit("approve PRD")
+        self.repo.push()
+        self.assertStageContext(self.hook(event), "PreToolUse", "sad")
+
+    def test_hook_fetches_the_base_before_the_gate(self):
+        other = AppRepo(self.tmp, name="other")
+        other.git("fetch", "-q", str(self.repo.origin), "main")
+        other.git("reset", "-q", "--hard", "FETCH_HEAD")
+        other.replace(FEATURE + "PRD.md", "status: Draft", "status: Approved")
+        other.commit("approve PRD")
+        other.git("push", "-q", str(self.repo.origin), "HEAD:main")
+        self.approve_prd()
+        prompt = {"hook_event_name": "UserPromptSubmit", "prompt": "/sdlc:architecture-design demo"}
+        self.assertStageContext(self.hook(prompt), "UserPromptSubmit", "sad")

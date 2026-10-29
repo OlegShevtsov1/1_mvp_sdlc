@@ -281,7 +281,9 @@ While a gate waits for you (gate 1, gate 2 or the visual gate) the card is in `B
 - **The CI step fails with "no pull requests found for branch"**: `gh` looks at the wrong repository;
   `gh repo set-default OlegShevtsov1/<repo>`.
 - **The run ends with `merge refused`**: read `merge-gate.log` in the run's artifacts. Often a check that is red on
-  `main` too (lint, security audit): make CI green in a separate PR first.
+  `main` too (lint, security audit): make CI green in a separate PR first. A reason
+  `test command timed out after N s` means the test command outlived its limit twice (the gate retries it once): the
+  suite needs more time on the Archon host, so raise `stack.test_timeout_seconds` in the profile (at most 3600).
 - **The agent asks for permission to push or open a PR**: check the unattended-runs exception in
   `~/.claude/CLAUDE.md`.
 - **Health is always red**: request the health URL from the Archon host with `curl -i`; check the route to the
@@ -331,7 +333,9 @@ While a gate waits for you (gate 1, gate 2 or the visual gate) the card is in `B
   the run's worktree, under a path that contains `.archon/`, RuboCop's excludes miss and it refused a PR whose CI Lint
   was green. **`merge-gate` refuses any red command and any CI check whose latest run failed or was cancelled** (a
   cancelled run superseded by a newer run is ignored), including red that the deliver block would have accepted as
-  `inherited` or `environment`; test and build run twice on the happy path.
+  `inherited` or `environment`; test and build run twice on the happy path. The test command runs under the profile's
+  `stack.test_timeout_seconds` (default 1000 s, at most 3600 s) and once more after a timeout; lint and build have
+  1000 s each, and the `merge-gate` node timeout (9600 s) covers the worst case of all of them.
 - **The visual gate's loop (v0.12.1, PILOT-278).** A wait node must be the last node of its loop, and nothing outside
   a loop can read a node inside it. The `visual-cycle` loop therefore follows the PILOT-217 pattern of the other
   gates: its `until_bash` saves each answer to `visual-gate.decision`, `visual-gate.text` and

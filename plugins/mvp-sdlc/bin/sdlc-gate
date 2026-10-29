@@ -3,7 +3,9 @@
 
 An artifact counts as merged when it is on origin/<base>, the working tree matches it there, and the last commit
 touching it on origin/<base> belongs to a merged pull request (gh api). The gate never fetches; a stale origin ref
-blocks with a hint to run git fetch. On pass it advances state.json forward only (evidence sdlc-gate:<phase>:<sha>).
+blocks with a hint to run git fetch. A block on an unmerged artifact names its open pull request when gh finds one
+(best effort; sdlc-gate-hook fetches before it runs the gate). On pass it advances state.json forward only (evidence
+sdlc-gate:<phase>:<sha>).
 Exit 0 pass, 2 blocked or unusable input (every failure is listed on stderr).
 """
 import json
@@ -52,15 +54,38 @@ def resolve_slug(root, slug, environ):
     return active[0]
 
 
+def open_pull_request(root, rel, base):
+    """`pull request #<n> (<url>)` of an open pull request into <base> that changes `rel`, else None (best effort)."""
+    try:
+        result = sdlc_common.run(
+            ["gh", "pr", "list", "--state", "open", "--base", base, "--json", "number,url,files", "--limit", "100"],
+            cwd=root,
+        )
+        pulls = json.loads(result.stdout) if result.returncode == 0 else []
+    except (OSError, ValueError):
+        return None
+    for pr in pulls if isinstance(pulls, list) else []:
+        files = pr.get("files") if isinstance(pr, dict) else None
+        if any(isinstance(f, dict) and f.get("path") == rel for f in files or []):
+            return "pull request #{} ({})".format(pr.get("number"), pr.get("url"))
+    return None
+
+
 def is_merged(root, rel, base):
     """(True, "") when `rel` is merged to origin/<base> unchanged, else (False, reason). Raises Unusable when gh fails."""
     ref = "origin/" + base
     if sdlc_common.git(root, "cat-file", "-e", "{}:{}".format(ref, rel)) is None:
+        pr = open_pull_request(root, rel, base)
+        if pr:
+            return False, "{} is not on {}: merge {} first".format(rel, ref, pr)
         return False, "{} is not on {}: merge its pull request first (run git fetch if it is already merged)".format(
             rel, ref
         )
     if sdlc_common.run(["git", "-C", str(root), "diff", "--quiet", ref, "--", rel]).returncode != 0:
-        return False, "{} has unmerged edits (working tree differs from {})".format(rel, ref)
+        pr = open_pull_request(root, rel, base)
+        return False, "{} has unmerged edits (working tree differs from {}){}".format(
+            rel, ref, "; its {} is still open".format(pr) if pr else ""
+        )
     sha = sdlc_common.git(root, "log", "-1", "--format=%H", ref, "--", rel)
     try:
         result = sdlc_common.run(["gh", "api", "repos/{owner}/{repo}/commits/" + sha + "/pulls"], cwd=root)

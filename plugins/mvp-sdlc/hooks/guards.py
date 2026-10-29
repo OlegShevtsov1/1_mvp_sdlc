@@ -3,13 +3,15 @@
 
 Exit 0 allows the tool call or prompt; exit 2 blocks it and the reason on stderr is shown to the model and the user.
 A hook that only warns (check-branch-name) exits 0 and prints a JSON `systemMessage` and `additionalContext` on
-stdout. An empty, `{}` or non-JSON event is allowed. These are best-effort command-line parsers, not a sandbox: deny
+stdout; sdlc-gate-hook prints only `additionalContext` (the stage-PR instruction) when a feature-stage skill
+starts. An empty, `{}` or non-JSON event is allowed. These are best-effort command-line parsers, not a sandbox: deny
 rules, main-guard and branch protection are the other layers.
 """
 import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -44,11 +46,42 @@ GATED_SKILLS = {
     "break-tasks": "tasks",
     "ship-feature": "ship",
 }
-GATED_PROMPT = re.compile(r"\s*/sdlc[:-]({})(?:\s+(.*))?\Z".format("|".join(GATED_SKILLS)), re.S)
+# Course skills that write a feature stage's artifacts, and the stage token of the stage's branch and pull request
+# (decision 105 c). A follow-up skill shares its stage's token, so it joins the stage's open pull request.
+FEATURE_STAGE_SKILLS = {
+    "interview": "brief",
+    "classify-size": "brief",
+    "fix-term": "glossary",
+    "write-prd": "prd",
+    "clarify-prd": "prd",
+    "prepare-design-spec": "design-spec",
+    "architecture-design": "sad",
+    "complete-sequence-diagrams": "sad",
+    "decide-adr": "adr-NNNN",
+    "generate-data-model": "data-model",
+    "api-forge": "contracts",
+    "plan-tests": "test-plan",
+    "break-tasks": "tasks",
+}
+STAGE_PR_CONTEXT = (
+    "mvp-sdlc adaptation of /sdlc:{skill} (decision 105 c): in this repository the skill's \"Propose commit\" step "
+    "means commit, push and open the stage PR. Once the operator has approved the stage in the skill's own "
+    "AskUserQuestion confirmation (ask nothing extra), run `stage-pr <slug> {stage} --message \"<the commit message "
+    "the skill gives>\" <every file this stage wrote or changed>`{note}. Do not run git add, git commit, git push or "
+    "gh pr create yourself, never commit to develop or main, and never pass state.json (stage-pr adds it). In the "
+    "handoff block, What I did names the commit sha and the pull request link that stage-pr printed, and Run next "
+    "starts with \"merge PR #<number> first\". If stage-pr refuses, show its message and stop."
+)
+SKILL_PROMPT = re.compile(r"\s*/sdlc[:-]([a-z0-9-]+)(?:\s+(.*))?\Z", re.S)
+FETCH_TIMEOUT = 30
 
 
 class Blocked(Exception):
     pass
+
+
+class Context(str):
+    """What a hook returns to add context for the model without a warning."""
 
 
 # ---------------------------------------------------------------- shell parsing
@@ -335,30 +368,60 @@ def check_branch_name(event):
     return None
 
 
-def gated_invocation(event):
-    """(phase, args) when the event starts a gated course skill, else None."""
+def invoked_skill(event):
+    """(course skill name, args) when the event is a `/sdlc:<skill>` prompt or a Skill tool call, else None."""
     if event.get("hook_event_name") == "UserPromptSubmit" or "prompt" in event:
-        match = GATED_PROMPT.match(event.get("prompt") or "")
-        return (GATED_SKILLS[match.group(1)], match.group(2) or "") if match else None
+        match = SKILL_PROMPT.match(event.get("prompt") or "")
+        return (match.group(1), match.group(2) or "") if match else None
     if event.get("tool_name") == "Skill":
         tool_input = event.get("tool_input") or {}
         skill = tool_input.get("skill") or ""
-        name = skill[len("sdlc:"):] if skill.startswith("sdlc:") else skill
-        if name in GATED_SKILLS:
-            args = tool_input.get("args")
-            return GATED_SKILLS[name], args if isinstance(args, str) else ""
+        args = tool_input.get("args")
+        return skill[len("sdlc:"):] if skill.startswith("sdlc:") else skill, args if isinstance(args, str) else ""
     return None
+
+
+def gated_invocation(event):
+    """(phase, args) when the event starts a gated course skill, else None."""
+    invocation = invoked_skill(event)
+    if invocation is None or invocation[0] not in GATED_SKILLS:
+        return None
+    return GATED_SKILLS[invocation[0]], invocation[1]
+
+
+def fetch_base(root):
+    """Best effort: a gated skill starts from a fresh origin/<base>; offline, the gate judges the ref it has."""
+    base = sdlc_common.base_branch(root, os.environ)
+    try:
+        subprocess.run(
+            ["git", "-C", str(root), "fetch", "-q", "origin", base],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=FETCH_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def sdlc_gate_hook(event):
     invocation = gated_invocation(event)
-    if invocation is None:
-        return
-    phase, args = invocation
+    if invocation is not None:
+        run_gate(event, *invocation)
+    skill = (invoked_skill(event) or ("", ""))[0]
+    if skill in FEATURE_STAGE_SKILLS:
+        stage = FEATURE_STAGE_SKILLS[skill]
+        note = " (NNNN is the ADR number)" if "NNNN" in stage else ""
+        return Context(STAGE_PR_CONTEXT.format(skill=skill, stage=stage, note=note))
+    return None
+
+
+def run_gate(event, phase, args):
     cwd = event_cwd(event)
     command = [sys.executable, str(sdlc_common.PLUGIN_DIR / "bin" / "sdlc-gate"), phase]
     token = (args.split() or [""])[0]
     root = sdlc_common.repo_root(cwd)
+    if root:
+        fetch_base(root)
     if root and sdlc_common.valid_slug(token) and sdlc_common.feature_dir(root, token).is_dir():
         command.append(token)
     try:
@@ -391,12 +454,16 @@ def main(argv):
     if len(argv) != 1 or argv[0] not in HOOKS:
         print("usage: guards.py {}".format("|".join(sorted(HOOKS))), file=sys.stderr)
         return 1
+    event = read_event(sys.stdin)
     try:
-        warning = HOOKS[argv[0]](read_event(sys.stdin))
+        warning = HOOKS[argv[0]](event)
     except Blocked as exc:
         print("Blocked by mvp-sdlc {}: {}".format(argv[0], exc), file=sys.stderr)
         return 2
-    if warning:
+    if isinstance(warning, Context):
+        name = "UserPromptSubmit" if event.get("hook_event_name") == "UserPromptSubmit" else "PreToolUse"
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": name, "additionalContext": str(warning)}}))
+    elif warning:
         message = "WARNING from mvp-sdlc {}: {}".format(argv[0], warning)
         specific = {"hookEventName": "PreToolUse", "additionalContext": message}
         print(json.dumps({"systemMessage": message, "hookSpecificOutput": specific}))

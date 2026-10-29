@@ -122,7 +122,10 @@ A full annotated example with every field is in
 
 - `stack` — `language`, `framework`, `test_command`, `lint_command`,
   `build_command`. Any of the commands may be empty; `test_command` may be empty
-  for a project that has no tests yet.
+  for a project that has no tests yet. `test_timeout_seconds` is the merge
+  gate's limit for one run of the test command, a whole number of seconds from
+  1 to 3600; absent means 1000. After a timeout the test command runs once more
+  before the gate refuses with `test command timed out after N s`.
 - `repo` — `remote`, `base_branch`, `merge_strategy` (`squash` | `merge` |
   `rebase`), `manual_merge_bases` — the bases whose pull requests the operator
   merges by hand. Absent means `["main"]`, so a profile whose `base_branch` is
@@ -224,7 +227,9 @@ round rewrote it since; else the newest `pr-body*.md`), and `merge-gate`
 refuses when it could not. The `pr-state` node then reads the pull request,
 its CI checks and the checkout, and the `merge-gate` node re-runs the profile's test and build commands on the exact
 pull request head. The lint command runs too, unless the pull request has a
-passing CI check named lint, which stands in for it. On any red command, any
+passing CI check named lint, which stands in for it. The test command runs
+under the profile's `stack.test_timeout_seconds` (default 1000 s) and gets one
+retry after a timeout; lint and build have 1000 s each. On any red command, any
 CI check whose latest run on the head failed or was cancelled (`pr-state` waits up
 to 20 minutes for queued or in-progress runs first), or when the pull request is
 not open and ready, is

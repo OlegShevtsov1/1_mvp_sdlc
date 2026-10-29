@@ -14,6 +14,20 @@
 - A task from `tasks/tasks.json` is exactly three commits: `test(...)` with the failing tests, `feat(...)` or
   `fix(...)` that makes them pass, `refactor(...)`. Each carries the trailers `SDLC-Task: <id>` and
   `SDLC-AC: <AC ids>`.
+- Stage pull requests (decision 105 c): a feature stage's docs reach `develop` through one docs pull request per
+  stage, and the operator's merge of it is the stage's gate (R-C8.9). Where a course skill says "Propose commit", once
+  the operator has approved the stage in the skill's own confirmation, run
+  `stage-pr <slug> <stage> --message "<commit message>" <the stage's files>` instead: it branches
+  `feature/PILOT-<n>-<slug>-<stage>` from a fresh `origin/develop`, commits only those files (and `state.json` when
+  the gate advanced it), pushes and opens the `Type: docs` pull request. Never `git add -A`, never commit feature
+  artifacts to `develop` or `main`. The handoff names the commit sha and the pull request link, and Run next says
+  "merge PR #<n> first". Stages: `/sdlc:interview` → `brief`, `/sdlc:classify-size` → `brief`,
+  `/sdlc:fix-term` → `glossary`, `/sdlc:write-prd` → `prd`, `/sdlc:clarify-prd` → `prd`,
+  `/sdlc:prepare-design-spec` → `design-spec`, `/sdlc:architecture-design` → `sad`,
+  `/sdlc:complete-sequence-diagrams` → `sad`, `/sdlc:decide-adr` → `adr-NNNN`,
+  `/sdlc:generate-data-model` → `data-model`, `/sdlc:api-forge` → `contracts`, `/sdlc:plan-tests` → `test-plan`,
+  `/sdlc:break-tasks` → `tasks`, `/mvp-sdlc:rails-data-model` → `data-model`, `/mvp-sdlc:task-cards` → `tasks`, and in
+  the frontend `/mvp-sdlc:sync-spec` → `spec`.
 - Stage files by name. Never commit `.env*` files, `config/master.key`, `.claude/*.local.md` or build output.
 - When a task is done, set its row in `docs/features/<slug>/tasks/tracker.md` and its `status` in `tasks.json` to
   `done` in the same pull request.

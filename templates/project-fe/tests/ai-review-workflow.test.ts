@@ -121,7 +121,7 @@ describe('ai-review workflow', () => {
     const reviews = steps.filter((step) => step.uses === action)
     expect(reviews).toHaveLength(1)
     const review = reviews[0]
-    expect(review.with?.anthropic_api_key).toBe('${{ secrets.ANTHROPIC_API_KEY }}')
+    expect(review.with?.{{AI_REVIEW_AUTH_INPUT}}).toBe('${{ secrets.{{AI_REVIEW_SECRET}} }}')
     expect(review.with?.github_token).toBe('${{ github.token }}')
 
     const args = String(review.with?.claude_args ?? '')
@@ -205,7 +205,7 @@ describe('ai-review workflow', () => {
     for (const step of steps) expect(step.run ?? '').not.toContain('${{')
     const secrets = text.match(/secrets\.[A-Z_]+/g) ?? []
     expect(secrets.length).toBeGreaterThan(0)
-    for (const secret of secrets) expect(secret).toBe('secrets.ANTHROPIC_API_KEY')
+    for (const secret of secrets) expect(secret).toBe('secrets.{{AI_REVIEW_SECRET}}')
     expect(text).not.toMatch(/sk-ant-|ghp_|github_pat_|xox[bp]-/)
   })
 })

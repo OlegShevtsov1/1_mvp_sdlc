@@ -15,6 +15,8 @@ artifacts; this repository holds a read-only copy of them under `docs/features/<
 - Lint: `npm run lint`.
 - Type check: `npx tsc --noEmit`.
 - Spec copy from the backend checkout: `sync-spec <slug> --from <be checkout>`; check for drift with `--check`.
+- Spec copy pull request: `stage-pr <slug> spec --message <msg> docs/features/<slug>` after `sync-spec` (run by
+  `/mvp-sdlc:sync-spec`; you merge it).
 - Task text for the factory: `task-brief <slug> <task-id>`.
 
 Per-developer command overrides live in `.claude/sdlc.local.md` (not committed).

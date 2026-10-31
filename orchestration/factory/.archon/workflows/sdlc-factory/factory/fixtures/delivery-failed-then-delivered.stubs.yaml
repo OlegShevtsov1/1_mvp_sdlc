@@ -16,6 +16,7 @@ load-profile:
   lint_command: ""
   build_command: ""
   test_timeout_seconds: 1000
+  flaky_patterns: []
   remote: origin
   base_branch: develop
   merge_strategy: squash

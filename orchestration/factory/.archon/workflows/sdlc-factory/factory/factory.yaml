@@ -203,6 +203,9 @@ nodes:
         lint_command: { type: string }
         build_command: { type: string }
         test_timeout_seconds: { type: number }
+        flaky_patterns:
+          type: array
+          items: { type: string }
         remote: { type: string }
         base_branch: { type: string }
         merge_strategy: { type: string }
@@ -218,7 +221,61 @@ nodes:
         manual_merge_bases:
           type: array
           items: { type: string }
-      required: [language, test_command, test_timeout_seconds, remote, base_branch, merge_strategy, deploy_command, health_url, wait_seconds, rollback_command, monitoring_provider, window_minutes, secret_names, manual_merge_bases]
+        # Only with a stack.preflight block, so not required: without one the
+        # bindings below get "" and the preflight is skipped.
+        preflight:
+          type: object
+          properties:
+            tools:
+              type: array
+              items: { type: string }
+            services:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  tcp: { type: string }
+                  start: { type: string }
+                required: [name, tcp, start]
+            min_disk_free_pct: { type: number }
+          required: [tools, services, min_disk_free_pct]
+      required: [language, test_command, test_timeout_seconds, flaky_patterns, remote, base_branch, merge_strategy, deploy_command, health_url, wait_seconds, rollback_command, monitoring_provider, window_minutes, secret_names, manual_merge_bases]
+
+  # ── Host preflight ─────────────────────────────────────────────────────────
+  # PILOT-495 reached the merge twice with CI green and review ready, then the
+  # merge gate's tests failed on a test Postgres and a test Redis that were down
+  # on the Archon host. The profile's stack.preflight names the tools, free disk
+  # and TCP services the test command needs; this checks them before any work
+  # (merge-gate checks them again right before its commands). A down service
+  # with a start command is started once and polled for 60 s; disk below the
+  # threshold first loses the build leftovers. Anything still missing stops the
+  # run with the fix named. It sits after load-profile, not right after
+  # claude-auth, because the profile is its configuration and only load-profile
+  # parses it; on a first run the interview's profile has no block. No block →
+  # skipped. Steps are logged to preflight.log.
+  - id: preflight
+    script: preflight
+    runtime: bun
+    depends_on: [load-profile]
+    timeout: 1200000
+    with:
+      preflight: "$load-profile.output.preflight"
+      secret_names: "$load-profile.output.secret_names"
+    output_format:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, failed, skipped] }
+        problems:
+          type: array
+          items: { type: string }
+        message: { type: string }
+      required: [status, problems, message]
+
+  - id: preflight-stop
+    cancel: "Stopped before any work: $preflight.output.message Fix it on the Archon host, then start a new run."
+    depends_on: [preflight]
+    when: "$preflight.output.status == 'failed'"
 
   # Archon cuts the run worktree from the default branch, not the profile's
   # base_branch. Before the plan, this resets a run branch with no work of its
@@ -226,10 +283,15 @@ nodes:
   # A published branch, a checkout that is not a linked worktree, a dirty tree
   # or a branch with work is left as is, with the reason. A base that cannot be
   # fetched fails the run. Every decision is logged to sync-base.log.
+  # `preflight-stop` is a dependency only for ordering, as `claude-auth-stop`
+  # is for profile-check: skipped on the proceed path, and on the stop path it
+  # runs first and cancels the run before any work starts.
   - id: sync-base
     script: sync-base
     runtime: bun
-    depends_on: [load-profile]
+    depends_on: [load-profile, preflight, preflight-stop]
+    trigger_rule: none_failed_min_one_success
+    when: "$preflight.output.status != 'failed'"
     timeout: 120000
     with:
       remote: "$load-profile.output.remote"
@@ -791,8 +853,20 @@ nodes:
       required: [pr_url, action, source, reason]
 
   # ── Merge ──────────────────────────────────────────────────────────────────
-  # Every GitHub read of the merge guard lives here, so fixtures can stub it
-  # like every other node that talks to GitHub while merge-gate executes.
+  # Every GitHub call of the merge guard lives here, so fixtures can stub it
+  # like every other node that talks to GitHub while merge-gate executes. Its
+  # remedies run at most once each and are logged to pr-state.log: a pull
+  # request GitHub reports CONFLICTING, checked out clean at its head, is
+  # rebased onto <remote>/<base> and pushed with a lease on the head GitHub
+  # reported (a rebase that conflicts is aborted, its files reported); checks
+  # still pending after one wait get a second; when every red check is a
+  # failed Actions job that stack.flaky_patterns names (job name or its
+  # failed-step log), its run gets one `gh run rerun --failed` and CI is
+  # waited for again. A MERGED pull request is reported with its merge commit
+  # (merge_sha, and whether that commit introduced the checkout's HEAD); it is
+  # never rebased and its CI is not waited for. The merge node rebases once
+  # more when gh refuses the merge on a conflict that appeared after this node,
+  # and passes a pull request already merged at this run's head.
   - id: pr-state
     script: pr-state
     runtime: bun
@@ -801,10 +875,16 @@ nodes:
     # reach the merge, nor one the visual gate stopped.
     when: "$review-followup.output.ready == true && $visual-round.output.proceed == true"
     # Waits up to 20 minutes for queued or in-progress checks and workflow
-    # runs on the head: a body edit just before it restarts the head's CI.
-    timeout: 1500000
+    # runs on the head (a body edit just before it restarts the head's CI),
+    # and once more: four windows with a flaky rerun, plus fetch, push, rerun
+    # and the head re-reads.
+    timeout: 5700000
     with:
       delivery: "$review-followup.output"
+      remote: "$load-profile.output.remote"
+      flaky_patterns: "$load-profile.output.flaky_patterns"
+      # Only merge.ts's child run after gh refused the merge on a conflict sets it true.
+      merge_conflict: "false"
     output_format:
       type: object
       properties:
@@ -826,6 +906,18 @@ nodes:
               bucket: { type: string }
             required: [name, bucket]
         checks_read: { type: boolean }
+        checks_settled: { type: boolean }
+        waited_minutes: { type: number }
+        rerun_checks:
+          type: array
+          items: { type: string }
+        rebase: { type: string, enum: [none, rebased, conflicted, failed] }
+        conflict_files:
+          type: array
+          items: { type: string }
+        rebase_detail: { type: string }
+        merge_sha: { type: string }
+        merge_contains_checkout: { type: boolean }
       required: [pr_url, read, head, base, state, mergeable, is_draft, checkout_is_head, checkout_clean, checks, checks_read]
 
   - id: trello-review
@@ -850,15 +942,26 @@ nodes:
   # ready, or not what the checkout holds. A green PR whose base is in the
   # profile's manual_merge_bases gets action notify instead of merge: those
   # PRs are merged by the operator (decision 27). It also refuses when
-  # pr-body-sync could not republish the description. The test command runs
+  # pr-body-sync could not republish the description, when a check is still
+  # pending after pr-state's waits, and when pr-state's rebase conflicted or
+  # failed. Before the commands it removes ignored __pycache__/ and .terraform/
+  # leftovers from the checkout. The test command runs
   # under the profile's test_timeout_seconds (default 1000 s) and runs once more
   # after a timeout; lint and build get 1000 s each. The node timeout covers
-  # twice the 3600 s maximum plus both.
+  # twice the 3600 s maximum plus both, and the preflight's 1200 s: right
+  # before the commands it checks the profile's stack.preflight again (see the
+  # `preflight` node), and a host that lost a tool, its disk or a service
+  # refuses as preflight with the PR left open. Every refusal reason is one line
+  # that starts with its class: pending, flaky-after-rerun, failure, timeout,
+  # conflict or preflight.
+  # A PR already merged at this run's head (another process of a resumed run
+  # merged it) gets action merge with already_merged true and no command runs;
+  # merged at another head it is refused.
   - id: merge-gate
     script: merge-gate
     runtime: bun
     depends_on: [pr-state, pr-body-sync]
-    timeout: 9600000
+    timeout: 10800000
     with:
       pr: "$pr-state.output"
       body_sync: "$pr-body-sync.output"
@@ -866,8 +969,10 @@ nodes:
       lint_command: "$load-profile.output.lint_command"
       build_command: "$load-profile.output.build_command"
       test_timeout_seconds: "$load-profile.output.test_timeout_seconds"
+      remote: "$load-profile.output.remote"
       secret_names: "$load-profile.output.secret_names"
       manual_merge_bases: "$load-profile.output.manual_merge_bases"
+      preflight: "$load-profile.output.preflight"
     output_format:
       type: object
       properties:
@@ -876,69 +981,35 @@ nodes:
         head: { type: string }
         base: { type: string }
         reason: { type: string }
-      required: [action, pr_url, head, base, reason]
+        already_merged: { type: boolean }
+      required: [action, pr_url, head, base, reason, already_merged]
 
+  # When gh refuses the merge on a conflict that appeared after pr-state, the
+  # script runs pr-state.ts (one rebase) and merge-gate.ts again on the new head
+  # and merges only what that gate passes; with already_merged it only reads the
+  # merge commit. See scripts/merge.ts.
   - id: merge
-    bash: |
-      set -euo pipefail
-      # merge-gate read both from the pull request itself on GitHub.
-      PR_URL=$merge-gate.output.pr_url
-      HEAD_BRANCH=$merge-gate.output.head
-      # A merge that did not happen is a reported state, never a node failure:
-      # the engine never applies if_skipped to a failed producer, so a failed
-      # merge node would fail the report and every node that reads it.
-      refuse() {
-        MSG=$(printf '%s' "$1" | tr -s '[:cntrl:]' ' ' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
-        printf '%s\n' "$1" >&2
-        printf '{"merged":false,"merge_sha":"","head":"%s","error":"%s"}' "$HEAD_BRANCH" "$MSG"
-        exit 0
-      }
-      STRATEGY=$load-profile.output.merge_strategy
-      case "$STRATEGY" in squash|merge|rebase) ;; *) refuse "merge: unknown merge_strategy '$STRATEGY'";; esac
-      # git's own exit code is checked (a pipeline would report sed's, which always
-      # succeeds), then the URL is normalised to owner/repo and the shape is
-      # verified. Only the normalised form is ever passed on, so a token-bearing
-      # remote URL (https://<token>@host/...) never reaches a command line or a
-      # message; the raw URL is never printed.
-      ORIGIN_URL=$(git remote get-url origin 2>/dev/null) || refuse "merge: could not read the origin remote."
-      ORIGIN_REPO=$(printf '%s' "$ORIGIN_URL" | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#; s#\.git$##')
-      case "$ORIGIN_REPO" in
-        *[!A-Za-z0-9_.-]*/* | */*[!A-Za-z0-9_.-]* | */*/* | /* | */ | "")
-          refuse "merge: origin remote does not resolve to an owner/repo."
-          ;;
-      esac
-      # --repo pins every gh call to the origin remote: gh's default resolution in
-      # a fork clone targets the upstream parent instead. With --repo gh disables
-      # inference and REQUIRES an explicit selector — the PR URL is one.
-      if ! OUT=$(gh pr merge "$PR_URL" --repo "$ORIGIN_REPO" "--$STRATEGY" 2>&1); then
-        refuse "merge: gh pr merge failed: $OUT"
-      fi
-      STATE=$(gh pr view "$PR_URL" --repo "$ORIGIN_REPO" --json state --jq .state 2>/dev/null || true)
-      if [ "$STATE" != "MERGED" ]; then
-        refuse "merge: pull request is not MERGED after the merge (state: $STATE)."
-      fi
-      # Best effort; a protected or already-deleted branch must not fail the run.
-      git push origin --delete "$HEAD_BRANCH" >/dev/null 2>&1 || true
-      # GitHub is eventually consistent about mergeCommit: for a few seconds
-      # after a successful merge the field still reads null. `// ""` turns that
-      # null into an empty string so the loop can retry.
-      MERGE_SHA=""
-      ATTEMPT=1
-      while [ "$ATTEMPT" -le 5 ]; do
-        MERGE_SHA=$(gh pr view "$PR_URL" --repo "$ORIGIN_REPO" --json mergeCommit --jq '.mergeCommit.oid // ""' 2>/dev/null || true)
-        if [ -n "$MERGE_SHA" ]; then break; fi
-        ATTEMPT=$((ATTEMPT + 1))
-        if [ "$ATTEMPT" -le 5 ]; then sleep 3; fi
-      done
-      # The merge already happened, so this is reported, not a node failure: a
-      # failed producer never falls back to `if_skipped`, and `report` would
-      # fail with it. An empty merge_sha keeps deploy from running.
-      if [ -z "$MERGE_SHA" ]; then
-        printf '%s\n' "merge: pull request is merged but its merge commit could not be read yet" >&2
-      fi
-      MERGED_HEAD=$(gh pr view "$PR_URL" --repo "$ORIGIN_REPO" --json headRefName --jq .headRefName 2>/dev/null || true)
-      printf '{"merged":true,"merge_sha":"%s","head":"%s","error":""}' "$MERGE_SHA" "${MERGED_HEAD:-$HEAD_BRANCH}"
-    timeout: 300000
+    script: merge
+    runtime: bun
+    # The merge calls (300 s) plus, after a conflict, one pr-state run (5700 s)
+    # and one merge-gate run (10800 s) under their own node timeouts.
+    timeout: 17100000
+    with:
+      pr_url: "$merge-gate.output.pr_url"
+      head: "$merge-gate.output.head"
+      base: "$merge-gate.output.base"
+      already_merged: "$merge-gate.output.already_merged"
+      merge_strategy: "$load-profile.output.merge_strategy"
+      remote: "$load-profile.output.remote"
+      flaky_patterns: "$load-profile.output.flaky_patterns"
+      body_sync: "$pr-body-sync.output"
+      test_command: "$load-profile.output.test_command"
+      lint_command: "$load-profile.output.lint_command"
+      build_command: "$load-profile.output.build_command"
+      test_timeout_seconds: "$load-profile.output.test_timeout_seconds"
+      secret_names: "$load-profile.output.secret_names"
+      manual_merge_bases: "$load-profile.output.manual_merge_bases"
+      preflight: "$load-profile.output.preflight"
     depends_on: [merge-gate]
     when: "$merge-gate.output.action == 'merge'"
     output_format:

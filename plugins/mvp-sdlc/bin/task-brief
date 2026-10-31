@@ -16,11 +16,28 @@ SDLC-Task:, SDLC-AC: that pr-conventions-check and the squash commit need, and a
 the factory moves the card through (decision 53; renames from `trello.lists` in the factory profile). The text
 never names a branch and never carries a Trello link: the factory opens the PR from its own branch and finds the
 card by the title line.
+
+Usage: task-brief --check-after-merge <file|PR> [--strict] [--create-cards] [--card PILOT-<n>]
+Validates the `## After merge (operator)` section of a file or of a pull request body (`<owner>/<repo>#<n>` or its
+GitHub URL, read with gh) against the After merge format of the task-brief skill: steps `### A<n> — <title>`, or in
+the bold form release pull requests use `**A<n> — <title>**` (optional lock; one form per section, as post-merge
+reads it), one fenced `Run:` block, an `Expected:` list of `- check: <kind> <args>` and `- manual: <text>` lines. In
+bold form the `Run:` line is optional, and a prose `Expected:` item or a prose step whose commands are inline code is
+a warning; --strict makes warnings problems. Every problem and warning is printed on stderr with its line number and
+the line itself. A deferred step (no runnable
+command, or a title or prose such as "separate task", "after the release", "later") is refused with the Backlog card
+it becomes; with --create-cards (a file only) the card is adopted by name or created in Backlog, its description
+linking the task card (--card, else the only `PILOT-<n>:` line of the file), and the step is dropped from the file,
+which is rewritten only after every card exists. Exit 0 when the section is valid or absent, 1 otherwise.
 """
 import json
 import os
 import re
+import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -31,6 +48,8 @@ sys.dont_write_bytecode = True
 feature_start = sdlc_common.load_script("bin/feature-start")
 feature_state = feature_start.feature_state
 lint_prd = sdlc_common.load_script("scripts/lint-prd.py")
+Refused = feature_start.Refused
+TrelloError = feature_start.TrelloError
 
 LOCAL_SETTINGS = Path(".claude") / "sdlc.local.md"
 FACTORY_PROFILE = sdlc_common.FACTORY_PROFILE
@@ -290,6 +309,10 @@ def brief(root, slug, task_id, backend=None):
     out.append("- Board: the factory moves the card itself ({in_progress} → {review} → {test}; {blocked} while a gate "
                "waits for the operator); do not move the card by hand.".format(**lists))
     out += [
+        "- After merge: only when this task's Definition of Done names something to run by hand after the merge, end "
+        "the pull request description with a section headed exactly \"{}\" in the task-brief After merge format, and "
+        "check it with task-brief --check-after-merge <file> before opening the pull request; work that belongs to "
+        "later is its own Trello card, never a step.".format(AFTER_MERGE_HEADING),
         "- Pull request title, exactly this line:",
         "  " + title_line,
         "- Pull request description (it becomes the squash commit body): include these lines exactly, each on its "
@@ -323,6 +346,503 @@ def deploy_sections(profile_path):
     ]
 
 
+AFTER_MERGE_HEADING = "## After merge (operator)"
+AFTER_MERGE_USAGE = "usage: task-brief --check-after-merge <file|PR> [--strict] [--create-cards] [--card PILOT-<n>]"
+HEADING = re.compile(r"^(#{1,6})(?:[ \t]+(.*?))?[ \t]*$")
+AFTER_MERGE_LIKE = re.compile(r"after[\s-]*merge\b", re.I)
+STEP_HEADING = re.compile(r"^### A(\d{1,3})( 🔒)? — (\S.*)$")
+# BOLD_BOUNDARY is post-merge's BOLD_STEP and FENCE its FENCE (1_mvp_prompt orchestration/workflows/mvp-ops/
+# post-merge/scripts/_lib/markdown.ts). Once one unfenced line of the section matches BOLD_BOUNDARY, post-merge
+# starts steps at such lines only. A fence opens at any indent and closes on the next line starting with its marker.
+BOLD_BOUNDARY = re.compile(r"^\*\*(?:[A-Za-z]|Step\s+)?(\d{1,3})(?=[\s.:)\u2014\u2013-]|\*\*)", re.I)
+BOLD_STEP = re.compile(r"^\*\*A(\d{1,3})( 🔒)? — (?:🔒 )?(\S(?:.*?\S)?)\*\*(.*)$")
+INLINE_CODE = re.compile(r"`[^`\s][^`]*`")
+STEP_LIKE = re.compile(r"^(\*\*|#{3,6}\s*)(A|Step\s*)\d")
+FENCE = re.compile(r"^\s*(```|~~~)")
+CHECK_ITEM = re.compile(r"^- check:(.*)$")
+MANUAL_ITEM = re.compile(r"^- manual:(.*)$")
+THIS_PR, MERGE_SHA = "<this-pr>", "<merge-sha>"
+REPO = r"[\w.-]+/[\w.-]+"
+CHECK_ARGS = {
+    "pr": r"{}|{}#\d+|https://github\.com/{}/pull/\d+".format(re.escape(THIS_PR), REPO, REPO),
+    "mode": r"squash|merge|any",
+    "repo": REPO,
+    "workflow": r"(?s).*\S.*",
+    "sha": r"[0-9a-f]{{7,40}}|{}".format(re.escape(MERGE_SHA)),
+    "url": r"https?://\S+",
+    "tag": r"\S+",
+    "path": r"(?s).*\S.*",
+    "text": r"(?s).*\S.*",
+}
+# kind: (usage, required arguments, optional arguments)
+CHECK_KINDS = {
+    "gh-pr-merged": ("<pr> [squash|merge|any]", ("pr",), ("mode",)),
+    "workflow-run-success": ("<owner>/<repo> <workflow> <sha>", ("repo", "workflow", "sha"), ()),
+    "url-contains": ("<http(s) url> <text>", ("url", "text"), ()),
+    "http-ok": ("<http(s) url>", ("url",), ()),
+    "git-tag-at": ("<owner>/<repo> <tag> <sha>", ("repo", "tag", "sha"), ()),
+    "file-contains": ("<path> <text>", ("path", "text"), ()),
+}
+# The Ukrainian markers are escaped: the plugin is written in English (tests/test_language.py).
+DEFERRED_MARKERS = (
+    "separate task", "own task", "after the release", "later", "deferred", "follow-up",
+    "\u043e\u043a\u0440\u0435\u043c\u0430 \u0437\u0430\u0434\u0430\u0447\u0430",
+    "\u043e\u043a\u0440\u0435\u043c\u043e\u044e \u0437\u0430\u0434\u0430\u0447\u0435\u044e",
+    "\u043f\u0456\u0441\u043b\u044f \u0440\u0435\u043b\u0456\u0437\u0443",
+    "\u043f\u0456\u0437\u043d\u0456\u0448\u0435",
+    "\u0432\u0456\u0434\u043a\u043b\u0430\u0434\u0435\u043d\u043e",
+)
+DEFERRED = re.compile(r"(?<!\w)({})(?!\w)".format(
+    "|".join(r"\s+".join(map(re.escape, marker.split())) for marker in DEFERRED_MARKERS)), re.I)
+
+
+class Step:
+    """One `### A<n> — <title>` or bold `**A<n> — <title>**` step: its lines are [start, end) of the text."""
+
+    def __init__(self, number, title, start, bold=False):
+        self.number, self.title, self.start, self.end = number, title, start, None
+        self.bold, self.fenced, self.listing = bold, False, False
+        self.prose, self.commands, self.items, self.continued = [], [], 0, False
+        self.phase, self.run_at, self.expected_at = "prose", None, None
+        self.deferred = None
+
+    @property
+    def name(self):
+        return "A{}".format(self.number)
+
+
+def heading(line):
+    """(level, text) of a markdown ATX heading, else None."""
+    match = HEADING.match(line)
+    return (len(match.group(1)), match.group(2) or "") if match else None
+
+
+def fence_marks(lines):
+    """Per line "open", "inside", "close" or None (outside every fenced block), and the index of an unclosed fence."""
+    marks, fence, opened = [], None, None
+    for index, line in enumerate(lines):
+        match = FENCE.match(line)
+        if fence is None and match:
+            fence, opened = match.group(1), index
+            marks.append("open")
+        elif fence is None:
+            marks.append(None)
+        elif match and match.group(1) == fence:
+            fence = None
+            marks.append("close")
+        else:
+            marks.append("inside")
+    return marks, (opened if fence else None)
+
+
+def check_problem(text):
+    """Why `- check: <text>` does not follow CHECK_KINDS, else None."""
+    try:
+        words = shlex.split(text)
+    except ValueError:
+        return "unbalanced quote in the check"
+    if not words:
+        return "a check needs a kind: one of {}".format(", ".join(CHECK_KINDS))
+    kind, args = words[0], words[1:]
+    if kind not in CHECK_KINDS:
+        return "unknown check kind {!r}: use one of {}".format(kind, ", ".join(CHECK_KINDS))
+    usage, required, optional = CHECK_KINDS[kind]
+    usage = "usage: check: {} {}".format(kind, usage)
+    if not len(required) <= len(args) <= len(required) + len(optional):
+        return "{} takes {} argument(s); {}".format(kind, len(required) + len(optional), usage)
+    for name, value in zip(required + optional, args):
+        if not re.fullmatch(CHECK_ARGS[name], value):
+            return "bad {} {!r}; {}".format(name, value, usage)
+    return None
+
+
+def after_merge(lines, strict=False):
+    """(section, steps, problems, warnings) of the `## After merge (operator)` section: section is its [start, end)
+    line indices or None when there is none, problems are (line index, reason, deferred Step or None) in line order,
+    warnings are (line index, reason) of what post-merge runs but the format does not name; strict makes them
+    problems."""
+    marks, unclosed = fence_marks(lines)
+    problems, warnings, starts = [], [], []
+    for index, line in enumerate(lines):
+        title = heading(line) if marks[index] is None else None
+        if not (title and AFTER_MERGE_LIKE.match(title[1])):
+            continue
+        if line != AFTER_MERGE_HEADING:
+            problems.append((index, "the heading must be exactly `{}`".format(AFTER_MERGE_HEADING), None))
+        elif starts:
+            problems.append((index, "a second `{}` section: it comes once, not twice".format(AFTER_MERGE_HEADING),
+                             None))
+        else:
+            starts.append(index)
+    if not starts:
+        if unclosed is not None and any(heading(line) and AFTER_MERGE_LIKE.match(heading(line)[1])
+                                        for line in lines[unclosed + 1:]):
+            problems.append((unclosed, "this fenced block is never closed: it hides the `{}` section".format(
+                AFTER_MERGE_HEADING), None))
+        return None, [], sorted(problems, key=lambda problem: problem[0]), []
+    start = starts[0]
+    end = next((i for i in range(start + 1, len(lines))
+                if marks[i] is None and heading(lines[i]) and heading(lines[i])[0] <= 2), len(lines))
+    if unclosed is not None and start < unclosed < end:
+        problems.append((unclosed, "this fenced block is never closed", None))
+    steps = section_steps(lines, marks, start, end, problems, warnings)
+    if not steps:
+        problems.append((start, "the section has no step: write `### A<n> — <title>` or `**A<n> — <title>**` steps "
+                                "or drop the section", None))
+    if strict:
+        problems += [(index, reason, None) for index, reason in warnings]
+        warnings = []
+    return (start, end), steps, sorted(problems, key=lambda problem: problem[0]), warnings
+
+
+def section_steps(lines, marks, start, end, problems, warnings):
+    """The steps of the section [start, end). As in post-merge, any bold step line makes the section bold form:
+    only bold lines start steps there, and every other heading would be read as part of a step."""
+    bounds = [i for i in range(start + 1, end) if marks[i] is None and BOLD_BOUNDARY.match(lines[i])]
+    steps = []
+    for index in range(start + 1, end):
+        line, mark = lines[index], marks[index]
+        step = steps[-1] if steps else None
+        if mark in ("inside", "close"):
+            if step and step.bold:
+                if mark == "inside" and step.expected_at is None:
+                    step.commands.append(line)
+            elif step and step.phase in ("prose", "block") and mark == "inside":
+                step.commands.append(line)
+            elif step and step.phase == "block":
+                step.phase = "ran"
+            continue
+        if mark is None and index in bounds:
+            match = BOLD_STEP.match(line)
+            reason = ("a bold step starts a line with `**A<n> — <title>**` (🔒 after the number or the dash when it "
+                      "needs the operator's OK)")
+        elif mark is None and (heading(line) or STEP_LIKE.match(line)):
+            match = None if bounds else STEP_HEADING.match(line)
+            reason = ("this section's steps are bold `**A<n> — <title>**` lines, so post-merge reads this line as "
+                      "part of the step above: write every step in that one form; no other heading belongs here"
+                      if bounds else
+                      "a step starts with `### A<n> — <title>` (🔒 after the number when it needs the operator's "
+                      "OK); no other heading or step header belongs here")
+        else:
+            if step and step.bold:
+                bold_line(step, index, line, mark, problems, warnings)
+            elif step:
+                step_line(step, index, line, mark, problems)
+            continue
+        if match is None:
+            problems.append((index, reason, None))
+            continue
+        if step:
+            finish_step(step, index, problems, warnings)
+        number = int(match.group(1))
+        if step and number <= step.number:
+            problems.append((index, "A{} after {}: step numbers must increase".format(number, step.name), None))
+        steps.append(Step(number, match.group(3), index, bool(bounds)))
+        if bounds and match.group(4).strip():
+            steps[-1].prose.append(match.group(4))
+    if steps:
+        finish_step(steps[-1], end, problems, warnings)
+    return steps
+
+
+def step_line(step, index, line, mark, problems):
+    stripped = line.strip()
+    if stripped == "Run:" and step.phase != "prose":
+        problems.append((index, "a step has one `Run:` block", None))
+    elif step.phase == "prose":
+        if stripped == "Run:":
+            step.phase, step.run_at = "run", index
+        elif stripped == "Expected:":
+            problems.append((index, "`Expected:` comes after the `Run:` block", None))
+        elif mark == "open":
+            problems.append((index, "a command block comes after a `Run:` line", None))
+        elif mark is None:
+            step.prose.append(line)
+    elif step.phase == "run":
+        if mark == "open":
+            step.phase = "block"
+        elif stripped:
+            problems.append((index, "`Run:` must be followed by a fenced command block", None))
+            step.commands.append(line)
+            step.phase = "ran"
+    elif step.phase == "ran":
+        if stripped == "Expected:":
+            step.phase, step.expected_at = "expected", index
+        elif stripped:
+            problems.append((index, "after the `Run:` block comes `Expected:`", None))
+    elif not stripped:
+        step.continued = False
+    elif CHECK_ITEM.match(line):
+        step.items += 1
+        step.continued = False
+        item_problem(line, index, problems)
+    elif MANUAL_ITEM.match(line) and MANUAL_ITEM.match(line).group(1).strip():
+        step.items += 1
+        step.continued = True
+    elif not (line.startswith("  ") and step.continued):
+        problems.append((index, "after `Expected:` every line is `- check: <kind> <args>` or `- manual: <text>` "
+                                "(continued by lines indented two spaces)", None))
+
+
+def bold_line(step, index, line, mark, problems, warnings):
+    """A line of a bold step outside its fenced blocks, as post-merge reads it: fenced blocks before `Expected:` are
+    its commands; `Run:` is optional; what the format does not name in the expectations is a warning."""
+    stripped = line.strip()
+    prose_expectation = (index, "prose expectation: the format's items are `- check: <kind> <args>` and "
+                                "`- manual: <text>` (--strict refuses it)")
+    if stripped == "Expected:":
+        step.expected_at, step.listing = index, True
+    elif stripped.startswith("Expected:"):
+        step.expected_at, step.listing = index, False
+        warnings.append(prose_expectation)
+    elif step.expected_at is None:
+        if mark == "open":
+            step.fenced = True
+        else:
+            step.prose.append(line)
+    elif not step.listing:
+        return
+    elif not stripped:
+        step.continued = False
+    elif CHECK_ITEM.match(line) or MANUAL_ITEM.match(line):
+        step.items += 1
+        step.continued = bool(MANUAL_ITEM.match(line))
+        item_problem(line, index, problems)
+    elif not (line.startswith("  ") and step.continued):
+        step.items += 1
+        step.continued = mark is None
+        warnings.append(prose_expectation)
+
+
+def item_problem(line, index, problems):
+    """Records why a `- check:` or `- manual:` item of an `Expected:` list does not follow the format."""
+    check = CHECK_ITEM.match(line)
+    reason = check_problem(check.group(1)) if check else (
+        None if MANUAL_ITEM.match(line).group(1).strip() else "`- manual:` needs the text the operator checks")
+    if reason:
+        problems.append((index, reason, None))
+
+
+def finish_step(step, end, problems, warnings):
+    step.end = end
+    marker = DEFERRED.search("\n".join([step.title] + step.prose))
+    runnable = [c for c in step.commands if c.strip() and not c.lstrip().startswith("#")]
+    inline = step.bold and not step.fenced and any(INLINE_CODE.search(line) for line in step.prose)
+    if marker:
+        step.deferred = "it says {!r}".format(marker.group(0))
+    elif step.bold and not runnable and not inline:
+        step.deferred = "its command block is empty" if step.fenced else "it has no command"
+    elif not step.bold and step.phase == "prose" and not runnable:
+        step.deferred = "it has no `Run:` block"
+    elif not step.bold and step.phase != "run" and not runnable:
+        step.deferred = "its `Run:` block has no command"
+    if step.deferred:
+        problems.append((step.start, "step {} is deferred ({}): later work is its own Trello card, not a step; "
+                                     "--create-cards creates the card below and drops the step".format(
+                                         step.name, step.deferred), step))
+    elif inline:
+        warnings.append((step.start, "step {} is prose: its commands are inline code, with no fenced block{} "
+                                     "(--strict refuses it)".format(
+                                         step.name, "" if step.expected_at is not None else
+                                         " and no `Expected:` list")))
+    elif step.phase == "run":
+        problems.append((step.run_at, "`Run:` must be followed by a fenced command block", None))
+    elif step.phase == "ran" or step.bold and step.expected_at is None:
+        problems.append((step.start, "step {} has no `Expected:` list".format(step.name), None))
+    elif (step.phase == "expected" or step.listing) and not step.items:
+        problems.append((step.expected_at, "`Expected:` lists nothing", None))
+
+
+def deferred_card(lines, step, task):
+    """{name, desc} of the Backlog card a deferred step becomes; the task card is linked by its URL in `task`."""
+    return {
+        "name": " ".join(step.title.split()),
+        "desc": "Deferred from step {} of the After merge (operator) section of {}.\n\n{}".format(
+            step.name, task, "\n".join(lines[step.start:step.end]).rstrip()),
+    }
+
+
+def task_number(text, card):
+    """The task card's number: --card, else the only `PILOT-<n>:` the text names; None when neither names one."""
+    numbers = set(re.findall(r"\bPILOT-(\d+):", text))
+    return card or (int(numbers.pop()) if len(numbers) == 1 else None)
+
+
+def create_cards(root, environ, lines, steps, number):
+    """Adopt (same name, open, in Backlog) or create the card of every deferred step; ["A<n> PILOT-<m> created"]."""
+    key, token, board = feature_start.credentials(root, environ)
+    backlog_name = sdlc_common.board_lists(root)["backlog"]
+    trello = feature_start.Trello(key, token)
+    try:
+        cards = trello.call("GET", "/boards/{}/cards".format(board), {"fields": "name,idShort,idList,shortUrl,closed"})
+        lists = trello.call("GET", "/boards/{}/lists".format(board), {"fields": "name"})
+    except TrelloError as exc:
+        raise Refused("cannot read the board: {}".format(exc))
+    cards = [card for card in cards if not card.get("closed")]
+    task = next((card for card in cards if card.get("idShort") == number), None)
+    if task is None:
+        raise Refused("PILOT-{} is not an open card on the board".format(number))
+    backlog = next((i["id"] for i in lists if (i.get("name") or "").strip().lower() == backlog_name.lower()), None)
+    if backlog is None:
+        raise Refused("the board has no {} list".format(backlog_name))
+    done = []
+    try:
+        for step in steps:
+            card = deferred_card(lines, step, "PILOT-{} {}".format(number, task.get("shortUrl", "")))
+            made = next((c for c in cards if c.get("idList") == backlog
+                         and " ".join((c.get("name") or "").split()) == card["name"]), None)
+            word = "adopted"
+            if made is None:
+                made = trello.call("POST", "/cards", data=dict(card, idList=backlog, pos="bottom"))
+                word = "created"
+                if not feature_state.valid_card_number(made.get("idShort")):
+                    raise TrelloError("POST /cards: the answer has no card number")
+            done.append("{} PILOT-{} {}".format(step.name, made["idShort"], word))
+    except TrelloError as exc:
+        raise Refused("a Trello write failed ({}); the file is unchanged. Done before the failure: {}. Re-running is "
+                      "safe: it adopts these cards by name.".format(exc, "; ".join(done) or "nothing"))
+    return done
+
+
+def drop_deferred(text, section, steps):
+    """`text` without its deferred steps, or without the section when no step is left; every other byte kept."""
+    lines = text.splitlines(True)
+    if all(step.deferred for step in steps):
+        spans = [section]
+    else:
+        spans = [(step.start, step.end) for step in steps if step.deferred]
+    gone = {index for start, end in spans for index in range(start, end)}
+    return "".join(line for index, line in enumerate(lines) if index not in gone)
+
+
+def rewrite(path, text):
+    """Replace the file at `path` with `text` in one step: a failed write leaves it as it was."""
+    handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=os.path.dirname(path) or ".",
+                                         prefix=".task-brief-", delete=False)
+    try:
+        with handle:
+            handle.write(text)
+        shutil.copymode(path, handle.name)
+        os.replace(handle.name, path)
+    except OSError:
+        os.unlink(handle.name)
+        raise
+
+
+def pull_request(ref):
+    """(owner/repo, number) of `<owner>/<repo>#<n>` or its GitHub URL, else None."""
+    match = re.fullmatch(r"https://github\.com/({})/pull/(\d+)/?".format(REPO), ref) or re.fullmatch(
+        r"({})#(\d+)".format(REPO), ref)
+    return match.groups() if match else None
+
+
+def source_text(source):
+    if Path(source).is_file():
+        try:
+            with open(source, encoding="utf-8", newline="") as handle:
+                return handle.read()
+        except (OSError, ValueError) as exc:
+            raise Refused("cannot read {}: {}".format(source, exc))
+    pr = pull_request(source)
+    if pr is None:
+        raise Refused("{} is neither a file nor a pull request (<owner>/<repo>#<n> or its GitHub URL)".format(source))
+    try:
+        result = subprocess.run(["gh", "pr", "view", pr[1], "-R", pr[0], "--json", "body"], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, universal_newlines=True)
+    except OSError as exc:
+        raise Refused("cannot run gh: {}".format(exc))
+    try:
+        body = json.loads(result.stdout)["body"] if result.returncode == 0 else None
+    except (ValueError, KeyError, TypeError):
+        body = None
+    if not isinstance(body, str):
+        raise Refused("cannot read the body of pull request {}: {}".format(source, result.stderr.strip()))
+    return body
+
+
+def report(source, lines, section, steps, problems, warnings, task):
+    """Print the verdict on the section; the exit code."""
+    backlog = sdlc_common.board_lists(sdlc_common.repo_root() or ".")["backlog"]
+    notes = [(index, "warning: " + reason, None) for index, reason in warnings]
+    for index, reason, step in sorted(problems + notes, key=lambda problem: problem[0]):
+        print("task-brief: {}:{}: {}".format(source, index + 1, reason), file=sys.stderr)
+        print("  | " + lines[index], file=sys.stderr)
+        if step:
+            card = deferred_card(lines, step, task)
+            print("  card: {}\n  list: {}\n  description: {}".format(
+                card["name"], backlog, card["desc"].split("\n")[0]), file=sys.stderr)
+    if problems:
+        return 1
+    if section is None:
+        print("task-brief: {}: no After merge (operator) section; nothing runs after the merge".format(source))
+    else:
+        print("task-brief: {}: After merge (operator) OK, {} steps ({}){}".format(
+            source, len(steps), ", ".join(step.name for step in steps),
+            "; {} warning{}, refused with --strict".format(len(warnings), "" if len(warnings) == 1 else "s")
+            if warnings else ""))
+    return 0
+
+
+def after_merge_args(argv):
+    """(source, strict, create cards, task card number or None), or None when argv does not fit AFTER_MERGE_USAGE."""
+    sources, strict, create, card, rest = [], False, False, None, list(argv)
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--strict" and not strict:
+            strict = True
+        elif arg == "--create-cards" and not create:
+            create = True
+        elif arg == "--card" and card is None and rest and re.fullmatch(r"PILOT-[1-9]\d*", rest[0]):
+            card = int(rest.pop(0)[len("PILOT-"):])
+        elif not arg.startswith("-"):
+            sources.append(arg)
+        else:
+            return None
+    if len(sources) != 1 or (create and pull_request(sources[0]) and not Path(sources[0]).is_file()):
+        return None
+    return sources[0], strict, create, card
+
+
+def check_after_merge(argv, environ):
+    """--check-after-merge: validate the section of a file or a pull request body; with --create-cards (a file),
+    turn its deferred steps into Backlog cards and drop them from the file."""
+    parsed = after_merge_args(argv)
+    if parsed is None:
+        print(AFTER_MERGE_USAGE, file=sys.stderr)
+        return 1
+    source, strict, create, number = parsed
+    try:
+        text = source_text(source)
+        lines = text.splitlines()
+        section, steps, problems, warnings = after_merge(lines, strict)
+        deferred = [step for step in steps if step.deferred]
+        if create and deferred:
+            number = task_number(text, number)
+            if number is None:
+                raise Refused("the task card is not one PILOT-<n>: line of {}; name it with --card PILOT-<n>".format(
+                    source))
+            root = sdlc_common.repo_root()
+            if root is None:
+                raise Refused("not inside a git repository")
+            done = create_cards(root, environ, lines, deferred, number)
+            for line in done:
+                print("task-brief: " + line)
+            text = drop_deferred(text, section, steps)
+            try:
+                rewrite(source, text)
+            except OSError as exc:
+                raise Refused("cannot write {} ({}); its steps are not dropped, but the cards exist: {}. A re-run "
+                              "adopts them by name.".format(source, exc, "; ".join(done)))
+            lines = text.splitlines()
+            section, steps, problems, warnings = after_merge(lines, strict)
+    except Refused as exc:
+        print("task-brief: {}".format(exc), file=sys.stderr)
+        return 1
+    number = task_number(text, number)
+    task = "PILOT-{}".format(number) if number else "the task card (name it with --card PILOT-<n>)"
+    return report(source, lines, section, steps, problems, warnings, task)
+
+
 def parse_args(argv):
     """(slug, task id, {"--from": path, "--ref": ref}) or None when the arguments do not fit the usage."""
     if len(argv) < 2 or len(argv) % 2:
@@ -343,9 +863,11 @@ def default_ref(root):
 
 
 def main(argv):
+    if argv[:1] == ["--check-after-merge"]:
+        return check_after_merge(argv[1:], os.environ)
     parsed = parse_args(argv)
     if parsed is None:
-        print(USAGE, file=sys.stderr)
+        print(USAGE + "\n" + AFTER_MERGE_USAGE, file=sys.stderr)
         return 1
     slug, task_id, options = parsed
     try:

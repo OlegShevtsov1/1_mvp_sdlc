@@ -128,7 +128,7 @@ function outcome(i: ReportInput): ReportDoc {
     ? `Delivered: ${i.pr_url} merged as ${i.merge_sha}, deployed, health ${health}, monitoring ${monitoring}.`
     : !merged && i.delivery_ready === "false" ? `Not delivered: the delivery ended not ready (${i.delivery_reason || "no reason given"}). ${i.delivery_summary}`.trim()
     : !merged && i.visual_proceed === "false" ? `Not delivered: stopped at the visual gate (${i.visual_stop}). PR ${pr_url} is open and was not merged.`
-    : !merged && i.merge_refused ? `Not delivered: merge refused (${i.merge_refused}). PR ${i.pr_url} is open and was not merged.`
+    : !merged && i.merge_refused ? `Not delivered: merge refused (${i.merge_refused}). PR ${i.pr_url} was not merged by this run.`
     : !merged ? `Not delivered: PR ${i.pr_url || "(none)"} was not merged.`
     : !i.merge_sha ? `Not delivered: PR ${i.pr_url} is merged, but its merge commit could not be read, so nothing was deployed. Re-check with: gh pr view ${i.pr_url} --json mergeCommit`
     : !deployed ? `Not delivered: deploy ${deploy_status}. PR ${i.pr_url} merged as ${i.merge_sha}. See deploy.log.`

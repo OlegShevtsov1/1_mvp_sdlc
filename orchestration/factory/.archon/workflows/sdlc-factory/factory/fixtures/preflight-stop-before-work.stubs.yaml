@@ -1,0 +1,31 @@
+# PILOT-499: reproduces PILOT-495 (a test service the profile's test command
+# needs was down on the Archon host) earlier, as a missing tool. preflight
+# executes for real on a profile whose stack.preflight names a tool no host
+# has, and the run must stop at preflight-stop, naming it, before sync-base,
+# the plan or anything else runs.
+profile-check: '{"exists":true}'
+load-profile:
+  language: python
+  framework: fastapi
+  test_command: "true"
+  lint_command: ""
+  build_command: ""
+  test_timeout_seconds: 1000
+  flaky_patterns: []
+  remote: origin
+  base_branch: develop
+  merge_strategy: squash
+  deploy_command: "echo deploy"
+  health_url: "https://app.example.com/health"
+  wait_seconds: 120
+  rollback_command: "echo rollback"
+  monitoring_provider: none
+  window_minutes: 10
+  secret_names: []
+  manual_merge_bases: ["main"]
+  preflight: { tools: ["factory-preflight-missing-tool"], services: [], min_disk_free_pct: 0 }
+exec-code: true
+fixture:
+  expect: cancelled
+  inputs:
+    task: "add a /health endpoint"

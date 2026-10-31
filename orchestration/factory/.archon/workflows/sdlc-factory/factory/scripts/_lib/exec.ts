@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 export function redact(
@@ -149,6 +149,46 @@ export async function runLogged(command: string, opts: RunOptions): Promise<{ ex
     } else {
       exit_code = first;
     }
+  }
+  appendFileSync(opts.logPath, `\n[exit ${exit_code}]\n`);
+  return { exit_code, timed_out };
+}
+
+// Runs a command that may leave a daemon behind (`redis-server &`, `pg_ctl
+// start`) and waits only for the command itself to exit. Its output goes to
+// `logPath` directly, not through a pipe: a daemon keeps writing after this
+// process is gone, and a closed pipe would kill it with SIGPIPE. So that output
+// is not redacted, unlike runLogged's; only the command line is. Past
+// `timeoutMs` the command's process group is killed, as in runLogged.
+export async function runUntilExit(command: string, opts: RunOptions & { timeoutMs: number }): Promise<{ exit_code: number; timed_out: boolean }> {
+  mkdirSync(dirname(opts.logPath), { recursive: true });
+  appendFileSync(opts.logPath, `\n$ ${redact(command, opts.secretNames)}\n`);
+  const fd = openSync(opts.logPath, "a");
+  const setsid = Bun.which("setsid");
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    const shell = ["bash", "-c", command];
+    proc = Bun.spawn(setsid ? [setsid, ...shell] : shell, { cwd: opts.cwd, stdin: "ignore", stdout: fd, stderr: fd, env: process.env });
+  } finally {
+    closeSync(fd);
+  }
+  const exited = proc.exited.catch(() => -1);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), opts.timeoutMs);
+  });
+  const first = await Promise.race([exited, deadline]);
+  clearTimeout(timer);
+  let exit_code: number;
+  let timed_out = false;
+  if (first === "timeout") {
+    killAll(proc, "SIGTERM");
+    await Promise.race([exited, Bun.sleep(KILL_GRACE_MS)]);
+    killAll(proc, "SIGKILL");
+    exit_code = 124;
+    timed_out = true;
+  } else {
+    exit_code = first;
   }
   appendFileSync(opts.logPath, `\n[exit ${exit_code}]\n`);
   return { exit_code, timed_out };

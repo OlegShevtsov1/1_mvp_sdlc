@@ -250,6 +250,14 @@ must print without refusing first (the Definition of Ready).
    (finish the dependency, split the task, add the missing test level, run `task-cards`, start the feature from its
    card), never write the text by hand. A warning that the task has no card means the title falls back to the
    feature card: run `task-cards` first.
+   When a task needs something run by hand after the merge, the pull request description ends with a section
+   `## After merge (operator)`, the steps that post-merge runs. Check a hand-written factory message or a pull
+   request body before the merge with `task-brief --check-after-merge <file|PR> [--strict]` (the PR as
+   `<owner>/<repo>#<n>` or its link): it names every problem with its line. Steps are `### A<n> — <title>` headings
+   or, as release pull requests write them, bold `**A<n> — <title>**` lines; in bold form prose expectations are
+   warnings, which `--strict` refuses. A step that cannot run right after the merge ("separate task",
+   "after the release", no command) is refused with the Backlog card it should be; `--create-cards` creates that
+   card, linked to the task card, and drops the step from the file. The format is in the `task-brief` skill.
 3. Start the run with that whole file, unchanged, as the message (the shell's command substitution of
    `cat /tmp/<slug>-T<n>.txt` in double quotes keeps it one argument):
    `archon workflow run factory --cwd <repo> "<the task text>"`. The command prints the run ID; later,
@@ -435,6 +443,7 @@ Course basis: deterministic guards over instructions (M5.4), untrusted agent inp
 /mvp-sdlc:sync-spec <slug>             frontend repository, when the backend documents changed
 /mvp-sdlc:task-cards <slug>            one Trello card per task, after break-tasks (backend repository)
 /mvp-sdlc:task-brief <slug> T<n>       the factory task text (frontend: --from <be checkout>)
+/mvp-sdlc:task-brief --check-after-merge <file|PR> [--strict]   the After merge section before the PR
 archon workflow run factory --cwd <repo> "<the task text>"
 archon workflow respond <run-id> approve
 /sdlc:implement-tasks <slug>           instead of the factory, one task per pull request (step 6)

@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # The factory's deploy step: waits for the Dev Deploy run that Front CI on develop starts for a
-# merge commit (titled "Dev Deploy sha-<sha>"), and succeeds only when that run deployed
-# successfully. It never dispatches a deploy itself, so a missing automatic run stays visible.
+# merge commit (titled "Dev Deploy sha-<sha>"), and succeeds only when a run of that commit deployed
+# successfully, or when its run was cancelled and a run of a newer commit that contains it did. A
+# skipped duplicate of the commit's run is ignored while another one can still deploy. It never
+# dispatches a deploy itself, so a missing automatic run stays visible.
 # Usage: wait-dev-deploy [<40-hex sha>]                        (default: git rev-parse HEAD)
 #        wait-dev-deploy --dispatched-since <YYYY-MM-DDTHH:MM:SSZ>   (a run dispatched by hand)
 # Env: WAIT_DEV_DEPLOY_SECONDS (default 1200, under the factory's 25-minute deploy timeout),
 #      WAIT_DEV_DEPLOY_POLL_SECONDS (default 15). gh uses its own stored authentication.
+# Exit 0 deployed (also via a newer develop commit that contains it), 1 not deployed, 2 usage
+# error, 3 dev auto-deploy disabled (DEV_AUTO_DEPLOY is not "true").
 set -uo pipefail
 wait_seconds=${WAIT_DEV_DEPLOY_SECONDS:-1200}
 poll_seconds=${WAIT_DEV_DEPLOY_POLL_SECONDS:-15}
@@ -15,52 +19,129 @@ usage() {
   exit 2
 }
 
+list_runs() {
+  if ! gh run list --workflow "Dev Deploy" "$@" --limit 20 \
+    --json databaseId,status,conclusion,createdAt,displayTitle,url; then
+    echo "wait-dev-deploy: gh run list failed; retrying" >&2
+    return 1
+  fi
+}
+
+# Sets run to the latest dispatched run created since $since, empty when none; exits once it completed.
+check_dispatched() {
+  local runs conclusion url
+  runs=$(list_runs --event workflow_dispatch) || return 0
+  run=$(jq -c --arg since "${since}" \
+    '[.[] | select(.createdAt >= $since)] | sort_by(.createdAt) | last // empty' <<<"${runs}")
+  [ -n "${run}" ] && [ "$(jq -r .status <<<"${run}")" = completed ] || return 0
+  url=$(jq -r .url <<<"${run}")
+  conclusion=$(jq -r .conclusion <<<"${run}")
+  if [ "${conclusion}" = success ]; then
+    echo "Dev Deploy ${url}: success"
+    exit 0
+  fi
+  echo "Dev Deploy ${url}: ${conclusion}" >&2
+  exit 1
+}
+
+# Succeeds when the commit $1 contains sha; a failed compare counts as "not yet".
+contains() {
+  if [ -z "${compares[$1]:-}" ]; then
+    compares[$1]=$(gh api "repos/{owner}/{repo}/compare/${sha}...$1" --jq .status) || return 1
+  fi
+  [ "${compares[$1]}" = ahead ]
+}
+
+# Reads the latest Front CI push run of the commit after all of its Dev Deploy runs were skipped.
+# $1 the latest createdAt among them.
+check_skipped() {
+  local ci status conclusion updated_at
+  ci=$(gh run list --workflow "Front CI" --commit "${sha}" --event push --limit 1 \
+    --json status,conclusion,updatedAt) || return 0
+  status=$(jq -r '.[0].status // empty' <<<"${ci}")
+  conclusion=$(jq -r '.[0].conclusion // empty' <<<"${ci}")
+  updated_at=$(jq -r '.[0].updatedAt // empty' <<<"${ci}")
+  [ "${status}" = completed ] || return 0
+  if [ "${conclusion}" != success ]; then
+    echo "Dev Deploy ${url}: skipped: Front CI is ${conclusion} for ${sha:0:7}" >&2
+    exit 1
+  fi
+  # A run skipped before Front CI finished came from another trigger, not from the push.
+  if [[ ! "$1" < "${updated_at}" ]]; then
+    echo "Dev Deploy ${url}: skipped: dev auto-deploy disabled (the repository variable DEV_AUTO_DEPLOY is not true)" >&2
+    exit 3
+  fi
+}
+
+# Sets state (none, running, cancelled or skipped) and url from the runs of the commit; exits once
+# they decide the outcome.
+check_commit() {
+  local runs mine decided detail newer newer_url
+  runs=$(list_runs --event workflow_run) || return 0
+  state=none
+  mine=$(jq -c --arg title "Dev Deploy sha-${sha}" '[.[] | select(.displayTitle == $title)]' <<<"${runs}")
+  [ "$(jq length <<<"${mine}")" -gt 0 ] || return 0
+  decided=$(jq -r '
+    (map(select(.status == "completed" and .conclusion == "success")) | first | select(.) | "success \(.url)")
+    // (map(select(.status != "completed")) | first | select(.) | "running \(.url)")
+    // (map(select(.conclusion | IN("success", "skipped", "cancelled") | not)) | first | select(.) | "failed \(.url) \(.conclusion)")
+    // (map(select(.conclusion == "cancelled")) | first | select(.) | "cancelled \(.url)")
+    // (sort_by(.createdAt) | last | "skipped \(.url) \(.createdAt)")' <<<"${mine}")
+  read -r state url detail <<<"${decided}"
+  case ${state} in
+    success)
+      echo "Dev Deploy ${url}: success"
+      exit 0
+      ;;
+    failed)
+      echo "Dev Deploy ${url}: ${detail}" >&2
+      exit 1
+      ;;
+    cancelled)
+      while read -r newer newer_url; do
+        if contains "${newer}"; then
+          echo "Dev Deploy ${newer_url}: deployed via ${newer}"
+          exit 0
+        fi
+      done < <(jq -r --arg sha "${sha}" '.[] | select(.status == "completed" and .conclusion == "success")
+        | (.displayTitle // "" | capture("^Dev Deploy sha-(?<sha>[0-9a-f]{40})$").sha) as $newer
+        | select($newer != $sha) | "\($newer) \(.url)"' <<<"${runs}")
+      ;;
+    skipped)
+      check_skipped "${detail}"
+      ;;
+  esac
+}
+
 since=""
-title=""
 if [ "${1:-}" = --dispatched-since ]; then
   since=${2:-}
   [[ "${since}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || usage
-  filter=(--event workflow_dispatch)
   target="dispatched since ${since}"
 else
   sha=${1:-$(git rev-parse HEAD 2>/dev/null)}
   [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || usage
-  filter=(--event workflow_run)
-  title="Dev Deploy sha-${sha}"
   target="for ${sha:0:7}"
+  declare -A compares=()
 fi
 
 deadline=$((SECONDS + wait_seconds))
+run="" state=none url=""
 while :; do
-  if runs=$(gh run list --workflow "Dev Deploy" "${filter[@]}" --limit 20 \
-    --json databaseId,status,conclusion,createdAt,displayTitle,url); then
-    run=$(jq -c --arg since "${since}" --arg title "${title}" \
-      '[.[] | select(.createdAt >= $since and ($title == "" or .displayTitle == $title))]
-       | sort_by(.createdAt) | last // empty' <<<"${runs}")
-    if [ -n "${run}" ] && [ "$(jq -r .status <<<"${run}")" = completed ]; then
-      url=$(jq -r .url <<<"${run}")
-      conclusion=$(jq -r .conclusion <<<"${run}")
-      case ${conclusion} in
-        success)
-          echo "Dev Deploy ${url}: success"
-          exit 0
-          ;;
-        skipped)
-          echo "Dev Deploy ${url}: skipped: is the repository variable DEV_AUTO_DEPLOY true?" >&2
-          exit 1
-          ;;
-        *)
-          echo "Dev Deploy ${url}: ${conclusion}" >&2
-          exit 1
-          ;;
-      esac
-    fi
+  if [ -n "${since}" ]; then
+    check_dispatched
   else
-    echo "wait-dev-deploy: gh run list failed; retrying" >&2
+    check_commit
   fi
   if [ "${SECONDS}" -ge "${deadline}" ]; then
-    if [ -n "${run:-}" ]; then
+    if [ -n "${since}" ] && [ -n "${run}" ]; then
       echo "Dev Deploy $(jq -r .url <<<"${run}") did not finish within ${wait_seconds}s" >&2
+    elif [ "${state}" = running ]; then
+      echo "Dev Deploy ${url} did not finish within ${wait_seconds}s" >&2
+    elif [ "${state}" = cancelled ]; then
+      echo "Dev Deploy ${url} was cancelled and no newer deploy containing ${sha:0:7} succeeded within ${wait_seconds}s" >&2
+    elif [ "${state}" = skipped ]; then
+      echo "Dev Deploy ${url}: skipped, and no deploying run of ${sha:0:7} within ${wait_seconds}s" >&2
     else
       echo "no Dev Deploy run ${target} after ${wait_seconds}s (auto-deploy did not trigger; dispatch it by hand if intended)" >&2
     fi

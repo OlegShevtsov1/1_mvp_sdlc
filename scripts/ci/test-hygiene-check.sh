@@ -30,6 +30,7 @@ run_case() {
 }
 
 telegram_api=$(printf 'https://api.%s.org/bot' telegram)
+release_sha=$(printf '%s%s' 19d6502549584ea5046 88247989cd80df98f84eb)
 
 run_case "clean repo"                 0 fixture.txt "nothing to see here"
 run_case "private LAN IP"             1 fixture.txt "host $(printf '%s.%s.7.7' 192 168)" "private LAN IP"
@@ -39,6 +40,10 @@ run_case "vr8 hostname"               1 fixture.txt "ssh $(printf 'vr%s-db' 8)" 
 run_case "srvN.local hostname"        1 fixture.txt "ssh $(printf 'srv%s.local' 3)" "internal hostname srvN"
 run_case "bonfir[e] hostname"          1 fixture.txt "ssh $(printf 'bonfir%s' e)" "internal hostname (bonfir"
 run_case "12-digit account ID"        1 fixture.txt "account $(printf '%s%s' 123456 789012)" "AWS account ID"
+run_case "account ID in an ARN"       1 fixture.txt "$(printf 'arn:aws:iam::%s%s:role/x' 123456 789012)" "AWS account ID"
+run_case "account ID in an ECR host"  1 fixture.txt \
+  "$(printf '%s%s.dkr.ecr.eu-central-1.amazonaws.com/app' 123456 789012)" "AWS account ID"
+run_case "12 digits inside a git SHA" 0 fixture.txt "sha ${release_sha}"
 run_case "vendored UUID may end in 12 digits" 0 plugins/sdlc/skills/generate-data-model/SKILL.md \
   "id $(printf '00000000-0000-0000-0000-%s%s' 000000 000001)"
 run_case "Route53 zone ID"            1 fixture.txt "zone $(printf 'Z%s' 0ABCDEFGHIJK1)" "Route53 hosted zone ID"

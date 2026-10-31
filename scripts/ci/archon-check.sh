@@ -3,11 +3,17 @@
 # install.sh (which validates), `workflow test factory`, trace assertions per factory fixture (merge-gate
 # executes in every one), runs in which pr-state, merge-gate and merge (or, for a pull request into a
 # manual base, notify-operator) execute for real against the engine's own deliver output (only gh is
-# faked; they also cover a merge gh refuses and a pull request that conflicts with its base), and a stubbed
+# faked; they also cover a merge gh refuses on a conflict, which merge rebases once for real before the
+# rebase conflicts and is aborted, a merge gh refuses for another reason, a pull request already merged at
+# the run's head, which is delivered without `gh pr merge`, and a pull request that conflicts with its base,
+# which pr-state tries to rebase for real and aborts on the conflict), and a stubbed
 # dry run of every orchestration/workflows/*.yaml. The Trello card nodes and rag-context run in dry-run
 # mode in every fixture, and the traces assert each move at its node and rag-context before the plan.
 # The Claude login checks run as dry runs in every fixture: claude-auth before the profile, claude-auth-scan
 # before the report (also after a failed sync-base); one fixture stops at claude-auth-stop before the profile.
+# The host preflight (PILOT-499) executes in every fixture after load-profile and before sync-base, skipped
+# without a stack.preflight block; one fixture stops at preflight-stop on a missing tool before any work, one
+# reaches the merge gate, which checks again right before the test command and refuses as preflight.
 # sync-base is stubbed in every fixture and executes for real in a scratch run worktree cut from a
 # default branch that has diverged from the profile's base_branch, and from a base it cannot fetch (the
 # run must still end with a report). pr-body-sync is stubbed in every fixture and executes for real in
@@ -36,6 +42,12 @@ fixtures_dir=orchestration/factory/.archon/workflows/sdlc-factory/factory/fixtur
 red_fixture=validation-red-merge-refused
 # The fixture whose merge gh refused; the run must end not delivered with gh's words in the report.
 merge_failed_fixture=merge-refused-by-github
+# PILOT-492: gh refused the merge on a conflict that appeared after pr-state, merge rebased once and
+# merged (it must deploy); and a pull request already merged at the run's head (merge-gate passes it as
+# already merged) or at another head (merge-gate refuses it).
+merge_rebased_fixture=merge-conflict-rebased
+merged_same_fixture=already-merged-same-head
+merged_other_fixture=already-merged-other-head
 # The fixture whose validation is red for an environment cause while the PR's CI is green; it must merge.
 env_fixture=validation-environment-ci-green
 # The fixture whose review verdict is the interim one of PILOT-120; it must end before the merge path.
@@ -46,6 +58,10 @@ manual_fixture=manual-base-pending-operator
 body_sync_fixture=pr-body-sync-failed
 # The fixture whose Claude login has expired; it must stop at claude-auth-stop before the profile.
 auth_fixture=claude-login-expired
+# The preflight fixtures (PILOT-499): a missing tool stops the run before any work, and one the merge
+# gate finds missing refuses the merge with the pull request left open.
+preflight_work_fixture=preflight-stop-before-work
+preflight_gate_fixture=preflight-stop-before-merge-gate
 # The bundled delivery's artifact names pr-body-sync reads, as the binary embeds them: read from
 # _lib/pr-body.ts itself, so the check follows what the script relies on.
 pr_body_lib=orchestration/factory/.archon/workflows/sdlc-factory/factory/scripts/_lib/pr-body.ts
@@ -124,7 +140,7 @@ check_trello_moves() {
   esac
   case "${name}" in
   existing-profile | fresh-profile | "${env_fixture}" | "${visual_approved_fixture}" | "${visual_revised_fixture}" | \
-    "${followup_fixture}" | "${retry_fixture}") final=Test ;;
+    "${followup_fixture}" | "${retry_fixture}" | "${merge_rebased_fixture}" | "${merged_same_fixture}") final=Test ;;
   "${manual_fixture}") final=Review ;;
   esac
   expect_move "${version}" "${name}" "${trace}" trello-done "${final}"
@@ -142,7 +158,7 @@ check_claude_auth() {
   if [ "${name}" = "${auth_fixture}" ]; then
     grep -qE '^STUBBED +claude-auth \(' "${trace}" || fail "${version} ${name}" "claude-auth must be stubbed"
     grep -qE '^COMPLETED +claude-auth-stop' "${trace}" || fail "${version} ${name}" "claude-auth-stop did not stop the run"
-    ! grep -qE '^(COMPLETED|STUBBED|FAILED) +(profile-check|rag-context|plan__plan) \(' "${trace}" ||
+    ! grep -qE '^(COMPLETED|STUBBED|FAILED) +(profile-check|preflight|rag-context|plan__plan) \(' "${trace}" ||
       fail "${version} ${name}" "work ran after the login check failed: $(grep -E '^[A-Z]+ ' "${trace}" | tail -40)"
     grep -qF 'claude /login' "${trace}" || fail "${version} ${name}" "the stop does not name claude /login"
     return 0
@@ -154,12 +170,52 @@ check_claude_auth() {
   [ -n "${profile_line}" ] && [ "${auth_line}" -lt "${profile_line}" ] ||
     fail "${version} ${name}" "claude-auth must run before profile-check"
   expect_skipped "${version}" "${name}" "${trace}" claude-auth-stop
+  # The preflight stop cancels the run before the scan and the report.
+  [ "${name}" != "${preflight_work_fixture}" ] || return 0
   grep -qF '"status":"dry-run"' <<<"$(node_output "${trace}" claude-auth-scan)" ||
     fail "${version} ${name}" "claude-auth-scan did not run as a dry run: $(node_output "${trace}" claude-auth-scan)"
   scan_line=$(grep -nE '^COMPLETED +claude-auth-scan \(' "${trace}" | cut -d: -f1)
   report_line=$(grep -nE '^COMPLETED +report \(' "${trace}" | cut -d: -f1 || true)
   [ -z "${report_line}" ] || [ "${scan_line}" -lt "${report_line}" ] ||
     fail "${version} ${name}" "claude-auth-scan must run before the report"
+}
+
+# A missing tool stops the work fixture at preflight-stop before sync-base; the gate fixture's merge gate
+# refuses as preflight; every other fixture's preflight executes, skipped, before sync-base.
+check_preflight() {
+  local version=$1 name=$2 trace=$3 out want preflight_line sync_line
+  case "${name}" in
+  "${preflight_work_fixture}")
+    out=$(node_output "${trace}" preflight)
+    grep -qF '"status":"failed"' <<<"${out}" && grep -qF 'factory-preflight-missing-tool' <<<"${out}" ||
+      fail "${version} ${name}" "preflight must execute and fail on the missing tool; output: ${out:-none}"
+    grep -qE '^COMPLETED +preflight-stop' "${trace}" || fail "${version} ${name}" "preflight-stop did not stop the run"
+    grep -qF 'Stopped before any work: preflight: tools not on PATH: factory-preflight-missing-tool' "${trace}" ||
+      fail "${version} ${name}" "the stop does not name the missing tool"
+    ! grep -qE '^(COMPLETED|STUBBED|FAILED) +(sync-base|rag-context|plan__plan) \(' "${trace}" ||
+      fail "${version} ${name}" "work ran after the preflight failed: $(grep -E '^[A-Z]+ ' "${trace}" | tail -40)"
+    ;;
+  "${preflight_gate_fixture}")
+    grep -qE '^STUBBED +preflight \(' "${trace}" || fail "${version} ${name}" "preflight must be stubbed"
+    out=$(node_output "${trace}" merge-gate)
+    grep -qF '"action":"refuse"' <<<"${out}" &&
+      grep -qF '"reason":"preflight: tools not on PATH: factory-preflight-missing-tool' <<<"${out}" ||
+      fail "${version} ${name}" "merge-gate must refuse as preflight on the missing tool; output: ${out:-none}"
+    for want in 'SKIPPED +merge' 'SKIPPED +notify-operator' 'COMPLETED +not-delivered'; do
+      grep -qE "^${want}( |\$)" "${trace}" || fail "${version} ${name}" "trace lacks ${want}"
+    done
+    grep -qF 'merge refused (preflight:' "${trace}" || fail "${version} ${name}" "the report does not carry the preflight refusal"
+    ;;
+  *)
+    grep -qF '"status":"skipped"' <<<"$(node_output "${trace}" preflight)" ||
+      fail "${version} ${name}" "preflight must execute and skip without a block: $(node_output "${trace}" preflight)"
+    preflight_line=$(grep -nE '^COMPLETED +preflight \(' "${trace}" | cut -d: -f1)
+    sync_line=$(line_of "${trace}" sync-base)
+    [ -n "${sync_line}" ] && [ "${preflight_line}" -lt "${sync_line}" ] ||
+      fail "${version} ${name}" "preflight must run before sync-base"
+    expect_skipped "${version}" "${name}" "${trace}" preflight-stop
+    ;;
+  esac
 }
 
 # The line number of a node's first line in a trace.
@@ -271,6 +327,8 @@ check_fixture_trace() {
   local gate_lines state_lines body_lines notify_lines sync_lines rag_line plan_line node lines out allowed
   check_claude_auth "${version}" "${name}" "${trace}"
   [ "${name}" != "${auth_fixture}" ] || return 0
+  check_preflight "${version}" "${name}" "${trace}"
+  [ "${name}" != "${preflight_work_fixture}" ] || return 0
   check_trello_moves "${version}" "${name}" "${trace}"
   check_visual_trace "${version}" "${name}" "${trace}"
   check_retry_trace "${version}" "${name}" "${trace}"
@@ -376,6 +434,26 @@ check_fixture_trace() {
     done
     grep -qF 'merge refused (merge: gh pr merge failed:' "${trace}" || fail "${version} ${name}" "the report does not carry gh's refusal"
   fi
+  if [ "${name}" = "${merge_rebased_fixture}" ]; then
+    for want in 'COMPLETED +merge-gate' 'STUBBED +merge' 'STUBBED +deploy' 'SKIPPED +not-delivered'; do
+      grep -qE "^${want} \\(" "${trace}" || fail "${version} ${name}" "trace lacks ${want}: $(grep -E '^[A-Z]+ ' "${trace}" | tail -40)"
+    done
+  fi
+  if [ "${name}" = "${merged_same_fixture}" ]; then
+    grep -qF '"already_merged":true' <<<"$(node_output "${trace}" merge-gate)" ||
+      fail "${version} ${name}" "merge-gate must pass the merged pull request as already merged: $(node_output "${trace}" merge-gate)"
+    for want in 'STUBBED +merge' 'STUBBED +deploy' 'SKIPPED +not-delivered'; do
+      grep -qE "^${want} \\(" "${trace}" || fail "${version} ${name}" "trace lacks ${want}: $(grep -E '^[A-Z]+ ' "${trace}" | tail -40)"
+    done
+  fi
+  if [ "${name}" = "${merged_other_fixture}" ]; then
+    grep -qF '"already_merged":false' <<<"$(node_output "${trace}" merge-gate)" &&
+      grep -qF "already merged, but this run's head (the checkout) was not shown to be in the merge" "${trace}" ||
+      fail "${version} ${name}" "merge-gate did not refuse the pull request merged at another head: $(node_output "${trace}" merge-gate)"
+    for want in 'SKIPPED +merge' 'SKIPPED +deploy' 'COMPLETED +report' 'COMPLETED +not-delivered'; do
+      grep -qE "^${want}( |\$)" "${trace}" || fail "${version} ${name}" "trace lacks ${want}"
+    done
+  fi
   if [ "${name}" = "${red_fixture}" ]; then
     grep -qE '^COMPLETED +merge-gate \(' "${trace}" && grep -q 'test command exited 1 on the pull request head' "${trace}" ||
       fail "${version} ${name}" "merge-gate did not refuse on its own test run"
@@ -410,15 +488,30 @@ git init -q --bare "${work}/remote/example/repo.git"
 git init -q "${scratch}"
 git -C "${scratch}" -c user.name=archon-check -c user.email=archon-check@example.com commit -q --allow-empty -m init
 git -C "${scratch}" remote add origin "${work}/remote/example/repo.git"
+# The remote's develop and the checkout set conflict.txt differently, so the conflicting pull request's
+# rebase onto origin/develop really conflicts.
+printf 'base\n' >"${scratch}/conflict.txt"
+git -C "${scratch}" add conflict.txt
+git -C "${scratch}" -c user.name=archon-check -c user.email=archon-check@example.com commit -q -m base-side
+git -C "${scratch}" push -q origin HEAD:refs/heads/develop
+git -C "${scratch}" reset -q --hard HEAD~1
+printf 'head\n' >"${scratch}/conflict.txt"
+git -C "${scratch}" add conflict.txt
+git -C "${scratch}" -c user.name=archon-check -c user.email=archon-check@example.com commit -q -m head-side
 # Fixtures stub pr-state because `workflow test factory` also runs on an operator's host with a
 # real gh. Here a fake gh answers for the pull request whose head is the scratch checkout.
 mkdir -p "${work}/fake-bin"
 cat >"${work}/fake-bin/gh" <<'GH'
 #!/usr/bin/env bash
 case "$*" in
-  "pr view "*" --json headRefOid,headRefName,isDraft,state,baseRefName,mergeable")
-    printf '{"headRefOid":"%s","headRefName":"fixture-branch","isDraft":false,"state":"OPEN","baseRefName":"%s","mergeable":"%s"}\n' \
-      "${FAKE_GH_HEAD_OID}" "${FAKE_GH_BASE:-develop}" "${FAKE_GH_MERGEABLE:-MERGEABLE}" ;;
+  "pr view "*" --json headRefOid,headRefName,isDraft,state,baseRefName,mergeable,mergeCommit")
+    merge_commit=null
+    [ "${FAKE_GH_PR_STATE:-OPEN}" != MERGED ] || merge_commit="{\"oid\":\"${FAKE_GH_MERGE_COMMIT}\"}"
+    printf '{"headRefOid":"%s","headRefName":"fixture-branch","isDraft":false,"state":"%s","baseRefName":"%s","mergeable":"%s","mergeCommit":%s}\n' \
+      "${FAKE_GH_HEAD_OID}" "${FAKE_GH_PR_STATE:-OPEN}" "${FAKE_GH_BASE:-develop}" "${FAKE_GH_MERGEABLE:-MERGEABLE}" "${merge_commit}" ;;
+  *"--json state,headRefOid,mergeable")
+    printf '{"state":"%s","headRefOid":"%s","mergeable":"%s"}\n' "${FAKE_GH_STATE_AFTER_FAIL:-OPEN}" "${FAKE_GH_HEAD_OID}" \
+      "${FAKE_GH_MERGEABLE:-MERGEABLE}" ;;
   "pr view "*" --json statusCheckRollup") printf '%s\n' '{"statusCheckRollup":[]}' ;;
   "api repos/example/repo/actions/runs?head_sha="*) echo 0 ;;
   "pr merge "*) [ -z "${FAKE_GH_MERGE_ERROR:-}" ] || { printf '%s\n' "${FAKE_GH_MERGE_ERROR}" >&2; exit 1; } ;;
@@ -426,6 +519,7 @@ case "$*" in
   *"--json state --jq .state") echo "${FAKE_GH_STATE_AFTER_MERGE:-MERGED}" ;;
   *"--json mergeCommit "*) printf '%s\n' "${FAKE_GH_MERGE_COMMIT}" ;;
   *"--json headRefName --jq .headRefName") echo fixture-branch ;;
+  *"--json title --jq .title") echo "PILOT-3: fixture" ;;
   "pr view https://github.com/example/repo/pull/3 --json body --jq .body")
     # Stands in for the stubbed pr__prepare, which writes pr-body.md: the run's artifacts dir is only
     # known inside the run, and pr-body-sync reads the live body before it looks for the file.
@@ -452,13 +546,14 @@ sed -e '/^pr-body-sync:/d' -e '/^pr-state:/d' -e '/^merge:/d' -e '/^exec-code:/,
 # Runs the factory with pr-body-sync, pr-state, merge-gate, merge and notify-operator unstubbed against a pull
 # request into base (default develop) that GitHub reports as mergeable (default MERGEABLE); a non-empty
 # merge_error makes `gh pr merge` print it and exit 1; state_after_merge (default MERGED) is the state
-# gh reads back after the merge. The trace goes to trace.out.
+# gh reads back after the merge; pr_state (default OPEN) is the state pr-state reads. The trace goes to
+# trace.out.
 run_unstubbed_merge() {
   local archon_bin=$1 merge_commit=$2 base=${3:-develop} mergeable=${4:-MERGEABLE} merge_error=${5:-} \
-    state_after_merge=${6:-MERGED}
+    state_after_merge=${6:-MERGED} pr_state=${7:-OPEN}
   PATH="${work}/fake-bin:${PATH}" FAKE_GH_MERGE_COMMIT="${merge_commit}" FAKE_GH_BASE="${base}" \
     FAKE_GH_MERGEABLE="${mergeable}" FAKE_GH_MERGE_ERROR="${merge_error}" \
-    FAKE_GH_STATE_AFTER_MERGE="${state_after_merge}" \
+    FAKE_GH_STATE_AFTER_MERGE="${state_after_merge}" FAKE_GH_PR_STATE="${pr_state}" \
     "${archon_bin}" workflow run factory --cwd "${scratch}" --dry-run --stubs "${work}/unstubbed-merge.stubs.yaml" \
     --exec-code --input task=fixture 2>&1 | without_logs >"${work}/trace.out" || true
 }
@@ -529,8 +624,9 @@ check_unstubbed_merge() {
   grep -q 'ready for the operator: base main is manual' "${FAKE_GH_COMMENTS}" 2>/dev/null ||
     fail "${label}" "no operator comment was posted on the pull request"
 
-  # gh refuses the merge (its real conflict text): the run must end not delivered with gh's words,
-  # not fail at the report.
+  # gh refuses the merge (its real conflict text): merge rebases once for real, the rebase onto
+  # origin/develop conflicts and is aborted, and the run must end not delivered with gh's words and
+  # the conflict, not fail at the report.
   label="${version} gh pr merge refused"
   run_unstubbed_merge "${archon_bin}" "" develop MERGEABLE \
     $'X Pull request example/repo#3 is not mergeable: the merge commit cannot be cleanly created.\nTo have the pull request merged after all the requirements have been met, add the --auto flag.'
@@ -541,6 +637,32 @@ check_unstubbed_merge() {
   expect_trace "${label}" '^COMPLETED +trello-done \('
   expect_trace "${label}" '^COMPLETED +not-delivered'
   expect_trace "${label}" 'merge refused \(merge: gh pr merge failed: X Pull request example/repo#3 is not mergeable'
+  expect_trace "${label}" 'after one rebase onto develop: conflict: rebasing fixture-branch onto origin/develop conflicts in conflict.txt'
+  [ "$(git -C "${scratch}" rev-parse HEAD)" = "${FAKE_GH_HEAD_OID}" ] || fail "${label}" "the aborted rebase moved the checkout"
+  [ ! -e "$(git -C "${scratch}" rev-parse --git-path rebase-merge)" ] || fail "${label}" "the rebase was left in progress"
+
+  # gh refuses the merge for a reason that is not a conflict: no rebase, gh's words in the report.
+  label="${version} gh pr merge refused, not a conflict"
+  run_unstubbed_merge "${archon_bin}" "" develop MERGEABLE \
+    'X Pull request example/repo#3 is not mergeable: the base branch policy prohibits the merge.'
+  ! grep -q '^FAILED' "${work}/trace.out" || fail "${label}" "unexpected failure: $(grep '^FAILED' "${work}/trace.out")"
+  expect_trace "${label}" '^COMPLETED +merge \('
+  expect_trace "${label}" '^COMPLETED +not-delivered'
+  expect_trace "${label}" 'merge refused \(merge: gh pr merge failed: X Pull request example/repo#3 is not mergeable: the base branch policy'
+  ! grep -qF 'after one rebase' "${work}/trace.out" || fail "${label}" "a refusal that is not a conflict was rebased"
+
+  # A resumed second process finds the pull request merged at this run's head: delivered and
+  # deployed without calling `gh pr merge` (whose error would refuse it).
+  label="${version} already merged at this run's head"
+  run_unstubbed_merge "${archon_bin}" 0123456789abcdef0123456789abcdef01234567 develop MERGEABLE "should not be called" \
+    MERGED MERGED
+  ! grep -q '^FAILED' "${work}/trace.out" || fail "${label}" "unexpected failure: $(grep '^FAILED' "${work}/trace.out")"
+  expect_trace "${label}" '^COMPLETED +pr-state \('
+  expect_trace "${label}" '^COMPLETED +merge-gate \('
+  expect_trace "${label}" '^COMPLETED +merge \('
+  expect_trace "${label}" '^STUBBED +deploy \('
+  expect_trace "${label}" '^SKIPPED +not-delivered \('
+  ! grep -qF 'should not be called' "${work}/trace.out" || fail "${label}" "gh pr merge was called for a merged pull request"
 
   # gh reports success but the pull request reads back still open: the merge did not happen.
   label="${version} pull request not MERGED after the merge"
@@ -566,14 +688,18 @@ check_unstubbed_merge() {
   expect_trace "${label}" '^COMPLETED +not-delivered'
   expect_trace "${label}" 'the pull request description could not be republished: gh pr edit exited 1: HTTP 502: Bad Gateway'
 
-  # GitHub already reports the conflict: merge-gate refuses before anything is merged.
+  # GitHub reports the conflict: pr-state's rebase onto origin/develop conflicts and is aborted, and
+  # merge-gate refuses naming the file before anything is merged or pushed.
   label="${version} pull request conflicts with its base"
   run_unstubbed_merge "${archon_bin}" "" develop CONFLICTING
   ! grep -q '^FAILED' "${work}/trace.out" || fail "${label}" "unexpected failure: $(grep '^FAILED' "${work}/trace.out")"
+  expect_trace "${label}" '^COMPLETED +pr-state \('
   expect_trace "${label}" '^COMPLETED +merge-gate \('
   expect_trace "${label}" '^SKIPPED +merge \('
   expect_trace "${label}" '^COMPLETED +not-delivered'
-  expect_trace "${label}" 'merge refused \(the pull request is not mergeable: it conflicts with develop\)'
+  expect_trace "${label}" 'merge refused \(conflict: rebasing fixture-branch onto origin/develop conflicts in conflict.txt'
+  [ "$(git -C "${scratch}" rev-parse HEAD)" = "${FAKE_GH_HEAD_OID}" ] || fail "${label}" "the aborted rebase moved the checkout"
+  [ ! -e "$(git -C "${scratch}" rev-parse --git-path rebase-merge)" ] || fail "${label}" "the rebase was left in progress"
 }
 
 # Reproduces how Archon cuts a run worktree: from origin/main of a repository whose profile names

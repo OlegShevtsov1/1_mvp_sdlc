@@ -3,7 +3,7 @@
 # gitleaks and the hygiene check see committed/tracked content only, so run this after committing.
 # Every check listed here needs its own step in a workflow under .github/workflows/; test-check.sh enforces that.
 set -euo pipefail
-checks=(actionlint tests templates plugins mvp_sdlc docs factory archon hygiene gitleaks)
+checks=(actionlint tests templates plugins mvp_sdlc docs factory supervisor archon hygiene gitleaks)
 
 run_actionlint() { actionlint -color; }
 run_tests() {
@@ -18,6 +18,7 @@ run_docs() {
     python3 scripts/check_links.py README.md docs/sdlc docs/project-add.md templates/github templates/README.md orchestration/docs && python3 scripts/check_docs.py
 }
 run_factory() { (cd orchestration/factory && bun test); }
+run_supervisor() { (cd orchestration/supervisor && bun test); }
 run_archon() { bash scripts/ci/tools.sh archon && bash scripts/ci/archon-check.sh; }
 run_hygiene() { bash scripts/ci/hygiene-check.sh; }
 run_gitleaks() { gitleaks git --redact --exit-code 1 --verbose .; }

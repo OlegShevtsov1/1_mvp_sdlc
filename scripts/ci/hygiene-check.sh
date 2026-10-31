@@ -77,9 +77,10 @@ check "Route53 hosted zone ID"         -E  -e '(^|[^A-Za-z0-9+/])Z[A-Z0-9]{12,}(
 scan "Trello link" -iE -e 'trello\.com' -- . \
   ':(exclude)plugins/mvp-sdlc/bin/feature-start' ':(exclude)bin/project-add'
 check "Notion link or page ID"         -iE -e 'notion\.(so|site)' -e '(^|[^0-9a-f])[0-9a-f]{32}([^0-9a-f]|$)'
-# The notifier and project-add have to name the Bot API host; chat IDs and links are still banned everywhere else.
+# The notifier, project-add and the supervisor's Telegram client have to name the Bot API host; chat IDs and links
+# are still banned everywhere else.
 scan "Telegram link, API or chat ID" -iE -e 't\.me/' -e 'api\.telegram\.org' -e '-100[0-9]{9,}' -- . \
-  ':(exclude)scripts/ci/notify-telegram.sh' ':(exclude)bin/project-add'
+  ':(exclude)scripts/ci/notify-telegram.sh' ':(exclude)bin/project-add' ':(exclude)orchestration/supervisor/src/telegram.ts'
 check "local home path"                -E  -e '/home/de[v]'
 
 if [ "${status}" -eq 0 ]; then

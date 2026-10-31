@@ -95,6 +95,8 @@ PROSE_A2 = (
 )
 # Pull request bodies as merged, with home paths and Trello links replaced line for line:
 # sdlc-77.md is OlegShevtsov1/1_mvp_sdlc#77 (merge 5a12824), fe-91.md is OlegShevtsov1/1_mvp_pilot_fe#91 (merge 7fe5ab9).
+# The owner display name that sdlc-77.md's A3 owner scan quotes is replaced by <owner name>, so the mirror's own
+# owner scan does not match the fixture.
 FIXTURES = PLUGIN / "tests/fixtures/after-merge"
 REAL_BODIES = (("sdlc-77.md", "8 steps (A0, A1, A2, A3, A4, A5, A6, A7)"),
                ("fe-91.md", "7 steps (A0, A1, A2, A3, A4, A5, A6)"))

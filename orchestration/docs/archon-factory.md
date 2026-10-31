@@ -49,7 +49,21 @@ That installs the released factory. To test a change before it is released, use
 2. installs the factory pack and every `orchestration/workflows/*.yaml`. Other packs in `~/.archon/workflows/`
    (for example `mvp-ops`) are never touched;
 3. validates each installed workflow and exits 1 on a validation error, naming the backup and the restore command.
-   Deprecation `WARNINGS` for `plan-review` are expected and do not fail the install.
+   Deprecation `WARNINGS` for `plan-review` are expected and do not fail the install;
+4. only after validation passes, replaces `~/.archon/supervisor/` with `orchestration/supervisor/` (the
+   `sdlc-autopilot` supervisor) and renders its systemd user unit to
+   `${XDG_CONFIG_HOME:-~/.config}/systemd/user/sdlc-autopilot.service`. The unit is not enabled. The supervisor
+   reads Archon's run state read-only and writes one line per decision to `~/.local/state/sdlc-autopilot/ledger.jsonl`.
+   By its `policy.yaml` it answers routine plan and install gates and escalates every other pause, post-merge
+   gates included ([rules](../supervisor/README.md)); its rule `transient-resume`
+   resumes a failed run with a transient error up to 3 times (after 2, 5 and 15 minutes) and then escalates once. It also asks `gh` which PRs of factory runs that
+   ended in the last 14 days are merged, launches `post-merge` once for each through `launch.ts`, detached, and
+   writes one ledger line per launch. It starts each brief queued as `~/.config/sdlc-autopilot/queue/<repo>/<name>.md`
+   as a detached `archon workflow run factory` while fewer than 5 runs (3 per repo) are running, `MemAvailable` is
+   at least 1500 MB and load1 at most 8 (the `limits` in its `policy.yaml`), `1_mvp_sdlc` first, never together
+   with a run of the same repo whose brief names an overlapping path, and moves it to `queue/started/<repo>/`.
+   Once a day it removes test leftovers older than 24 h. Its queue directory is operator input: back it up with
+   the rest of `~/.config`.
 
 Runs that are already in progress keep the workflow source they started with; only new runs use the new install.
 

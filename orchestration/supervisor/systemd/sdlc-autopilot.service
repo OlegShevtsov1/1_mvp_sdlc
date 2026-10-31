@@ -1,0 +1,16 @@
+[Unit]
+Description=sdlc-autopilot: answers routine Archon pauses by policy (1_mvp_sdlc orchestration/supervisor)
+
+[Service]
+Type=simple
+Environment=ARCHON_HOME=@ARCHON_HOME@
+Environment=PATH=@PATH@
+ExecStart=@BUN@ run @SUPERVISOR_DIR@/src/main.ts
+Restart=on-failure
+RestartSec=30
+# Commands started with runDetached (archon workflow respond|resume|run) run the resumed workflow in the
+# foreground for hours; stopping or restarting the supervisor must not kill them with its cgroup.
+KillMode=process
+
+[Install]
+WantedBy=default.target

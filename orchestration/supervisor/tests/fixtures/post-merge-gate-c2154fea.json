@@ -1,0 +1,88 @@
+{
+  "source": "archon.db run c2154fea-2e08-4385-8589-d413204db098, events up to event_order 349335; status set to paused; paths, host and links scrubbed",
+  "run": {
+    "id": "c2154fea-2e08-4385-8589-d413204db098",
+    "workflow_name": "post-merge",
+    "status": "paused",
+    "working_path": "/home/operator/.archon/workspaces/OlegShevtsov1/1_mvp_sdlc/post-merge/20261031T143538Z-3293971/repo",
+    "user_message": "run=PILOT502 pr=https://github.com/OlegShevtsov1/1_mvp_sdlc/pull/85",
+    "metadata": "{\"execution_owner\":{\"host\":\"operator-host\",\"pid\":3312718,\"uid\":1000},\"approval\":{\"nodeId\":\"execute-cycle\",\"message\":\"post-merge PILOT502 — потрібне рішення оператора.\\nКрок: 7 — A7 — Operator, by hand: update mvp-sdlc in the pilot repositories and prove the plugin cache holds 0\\nТип: checkout\\nПричина: Крок A7 звертається до checkout оператора /home/operator/projects/mvp/1_mvp_pilot_be і /home/operator/projects/mvp/1_mvp_pilot_fe, тому post-merge його не виконує. Оператор має оновити mvp-sdlc у пілотних репозиторіях власноруч і відповісти approve (виконано поза post-merge), skip або abort.\\nЖурнал: $ARTIFACTS_DIR/ledger.jsonl\\n\\napprove → виконати крок (або прийняти розбіжність як OK)\\nskip    → пропустити крок і продовжити\\nabort   → зупинити виконання\\n\",\"type\":\"approval\",\"bodyGateId\":\"gate\",\"iteration\":9,\"sessionId\":\"1bfe3575-a414-407a-b54a-7e4b7f694548\",\"sessionProvider\":\"claude\",\"captureResponse\":false,\"execution\":{\"runId\":\"c2154fea-2e08-4385-8589-d413204db098\",\"path\":\"execute-cycle.gate\",\"node\":{\"id\":\"gate\",\"kind\":\"gate\"},\"invocation\":{\"id\":\"534e4979-aa72-4ffb-b6a8-5cc733b44722\",\"startedAt\":\"2026-10-31T15:03:12.512Z\",\"loopPath\":[{\"groupId\":\"execute-cycle\",\"iteration\":9}]},\"attempt\":{\"id\":\"b826727f-a240-4677-9614-7719bd1ad37d\",\"startedAt\":\"2026-10-31T15:03:12.514Z\"},\"binding\":{},\"timing\":{\"startedAt\":\"2026-10-31T15:03:12.514Z\",\"durationMs\":5},\"spend\":{\"tokens\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"costUsd\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"stopReason\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"numTurns\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"}},\"accounting\":\"node\",\"lifecycle\":{\"status\":\"suspended\",\"point\":\"approval\"}},\"decisionsAuthored\":true,\"decisions\":[{\"id\":\"approve\",\"label\":\"Approve — виконати/прийняти\"},{\"id\":\"skip\",\"label\":\"Skip — пропустити крок\"},{\"id\":\"abort\",\"label\":\"Abort — зупинити\"}],\"pauseId\":\"c968c8ad-4ca9-4e01-b5d3-a4273190566c\",\"resolved\":\"approved\",\"answeredVia\":\"cli\",\"answeredAt\":\"2026-10-31T15:03:48.238Z\"}}",
+    "started_at": "2026-10-31 15:03:51",
+    "last_activity_at": "2026-10-31 15:03:12",
+    "completed_at": null
+  },
+  "events": [
+    {
+      "id": "c4da167e-4347-43f9-b20c-857da4d5ce40",
+      "workflow_run_id": "c2154fea-2e08-4385-8589-d413204db098",
+      "event_order": 349155,
+      "event_type": "node_suspended",
+      "step_name": "execute-cycle.gate",
+      "data": "{\"node\":{\"id\":\"gate\",\"kind\":\"gate\"},\"invocation\":{\"id\":\"b5537584-50c0-4052-b238-08c6995bb73b\",\"startedAt\":\"2026-10-31T14:59:32.227Z\",\"loopPath\":[{\"groupId\":\"execute-cycle\",\"iteration\":4}]},\"attempt\":{\"id\":\"b9ceb16d-cfc3-4d85-885f-1930d34baed8\",\"startedAt\":\"2026-10-31T14:59:32.230Z\"},\"binding\":{},\"timing\":{\"startedAt\":\"2026-10-31T14:59:32.230Z\",\"durationMs\":5},\"spend\":{\"tokens\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"costUsd\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"stopReason\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"numTurns\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"}},\"accounting\":\"node\",\"type\":\"gate\",\"duration_ms\":5,\"suspend_point\":\"approval\",\"node_output\":\"\",\"iteration\":4}",
+      "created_at": "2026-10-31 14:59:32"
+    },
+    {
+      "id": "9443bdc8-5755-4944-ba77-13641247595c",
+      "workflow_run_id": "c2154fea-2e08-4385-8589-d413204db098",
+      "event_order": 349156,
+      "event_type": "approval_requested",
+      "step_name": "execute-cycle.gate",
+      "data": "{\"message\":\"post-merge PILOT502 — потрібне рішення оператора.\\nКрок: 3 — A3 — 🔒 Mirror sync (OlegShevtsov1/1_mvp_sdlc) from the released script, dry run then real\\nТип: mismatch\\nПричина: Синхронізацію дзеркала виконано: PR https://github.com/OlegShevtsov1/1_mvp_sdlc/pull/5 злито, тег v0.8.0 → f00c54a, rc=0. Проте owner-скан надрукував `1` замість `0`. Єдиний збіг — рядок 131 фікстури plugins/mvp-sdlc/tests/fixtures/after-merge/sdlc-77.md, де стоїть сам шаблон пошуку `'oleh shevtsov'`, а не витік імені власника. Оператору треба вирішити: approve (прийняти як хибнопозитивний збіг), skip або abort.\\nЖурнал: $ARTIFACTS_DIR/ledger.jsonl\\n\\napprove → виконати крок (або прийняти розбіжність як OK)\\nskip    → пропустити крок і продовжити\\nabort   → зупинити виконання\\n\"}",
+      "created_at": "2026-10-31 14:59:32"
+    },
+    {
+      "id": "a6c6a475-ca82-4db5-b89f-32775172144f",
+      "workflow_run_id": "c2154fea-2e08-4385-8589-d413204db098",
+      "event_order": 349157,
+      "event_type": "node_suspended",
+      "step_name": "execute-cycle",
+      "data": "{\"node\":{\"id\":\"execute-cycle\",\"kind\":\"loop_group\"},\"invocation\":{\"id\":\"c610759c-24b0-4c50-9def-8c973f777241\",\"startedAt\":\"2026-10-31T14:35:56.904Z\",\"loopPath\":[]},\"attempt\":{\"id\":\"089ef3f4-dcc8-411a-8a45-1eb98ad17da4\",\"startedAt\":\"2026-10-31T14:35:56.906Z\"},\"binding\":{},\"timing\":{\"startedAt\":\"2026-10-31T14:35:56.906Z\",\"durationMs\":1415348},\"spend\":{\"tokens\":{\"source\":\"provider\",\"value\":{\"input\":1478609,\"output\":17184,\"cacheRead\":1334340,\"cacheWrite\":112367}},\"costUsd\":{\"source\":\"provider\",\"value\":1.5110674},\"stopReason\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"numTurns\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"}},\"accounting\":\"aggregate\",\"type\":\"loop_group\",\"duration_ms\":1415348,\"cost_usd\":1.5110674,\"aggregate\":true,\"suspend_point\":\"approval\",\"node_output\":\"{\\\"status\\\":\\\"continue\\\",\\\"step\\\":\\\"2 — A2 — 🔒 Annotated tag v0.8.0 on the merge commit M (shape as v0.7.0; no GitHub Release)\\\",\\\"verdict\\\":\\\"OK\\\",\\\"kind\\\":\\\"\\\",\\\"reason\\\":\\\"Анотований тег v0.8.0 створено на merge-коміті M=e4c4f54 (PR #86) і надіслано в origin; форма збігається з v0.7.0, ls-remote ^{}=M, GitHub Release не створено (0).\\\"}\"}",
+      "created_at": "2026-10-31 14:59:32"
+    },
+    {
+      "id": "3ec312de-c2c9-44fd-93f6-017562988fb4",
+      "workflow_run_id": "c2154fea-2e08-4385-8589-d413204db098",
+      "event_order": 349159,
+      "event_type": "approval_received",
+      "step_name": "execute-cycle",
+      "data": "{\"via\":\"cli\",\"occurrence\":\"11c3fad2-3447-4a5d-91ac-db2f6e7b0056\",\"decision\":\"approved\",\"comment\":\"Accepted: mirror PR #5 merged, tag v0.8.0 -> f00c54a, rc=0. The single owner-scan hit is the scan pattern itself quoted in test fixture after-merge/sdlc-77.md:131, not an owner-name leak; follow-up card to make that fixture not contain the literal pattern.\"}",
+      "created_at": "2026-10-31 14:59:52"
+    },
+    {
+      "id": "5626f890-33a5-44f5-a21a-45b38da63fc0",
+      "workflow_run_id": "c2154fea-2e08-4385-8589-d413204db098",
+      "event_order": 349160,
+      "event_type": "workflow_unpaused",
+      "step_name": null,
+      "data": "{}",
+      "created_at": "2026-10-31 14:59:56"
+    },
+    {
+      "id": "d13280fe-8b0d-4de6-a014-87abfce50625",
+      "workflow_run_id": "c2154fea-2e08-4385-8589-d413204db098",
+      "event_order": 349333,
+      "event_type": "node_suspended",
+      "step_name": "execute-cycle.gate",
+      "data": "{\"node\":{\"id\":\"gate\",\"kind\":\"gate\"},\"invocation\":{\"id\":\"534e4979-aa72-4ffb-b6a8-5cc733b44722\",\"startedAt\":\"2026-10-31T15:03:12.512Z\",\"loopPath\":[{\"groupId\":\"execute-cycle\",\"iteration\":9}]},\"attempt\":{\"id\":\"b826727f-a240-4677-9614-7719bd1ad37d\",\"startedAt\":\"2026-10-31T15:03:12.514Z\"},\"binding\":{},\"timing\":{\"startedAt\":\"2026-10-31T15:03:12.514Z\",\"durationMs\":5},\"spend\":{\"tokens\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"costUsd\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"stopReason\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"numTurns\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"}},\"accounting\":\"node\",\"type\":\"gate\",\"duration_ms\":5,\"suspend_point\":\"approval\",\"node_output\":\"\",\"iteration\":9}",
+      "created_at": "2026-10-31 15:03:12"
+    },
+    {
+      "id": "7fe73cd6-bc76-4e42-8257-34a4265268d2",
+      "workflow_run_id": "c2154fea-2e08-4385-8589-d413204db098",
+      "event_order": 349334,
+      "event_type": "approval_requested",
+      "step_name": "execute-cycle.gate",
+      "data": "{\"message\":\"post-merge PILOT502 — потрібне рішення оператора.\\nКрок: 7 — A7 — Operator, by hand: update mvp-sdlc in the pilot repositories and prove the plugin cache holds 0\\nТип: checkout\\nПричина: Крок A7 звертається до checkout оператора /home/operator/projects/mvp/1_mvp_pilot_be і /home/operator/projects/mvp/1_mvp_pilot_fe, тому post-merge його не виконує. Оператор має оновити mvp-sdlc у пілотних репозиторіях власноруч і відповісти approve (виконано поза post-merge), skip або abort.\\nЖурнал: $ARTIFACTS_DIR/ledger.jsonl\\n\\napprove → виконати крок (або прийняти розбіжність як OK)\\nskip    → пропустити крок і продовжити\\nabort   → зупинити виконання\\n\"}",
+      "created_at": "2026-10-31 15:03:12"
+    },
+    {
+      "id": "9f4f8b41-fc5e-432e-88e5-643bae5eb8e7",
+      "workflow_run_id": "c2154fea-2e08-4385-8589-d413204db098",
+      "event_order": 349335,
+      "event_type": "node_suspended",
+      "step_name": "execute-cycle",
+      "data": "{\"node\":{\"id\":\"execute-cycle\",\"kind\":\"loop_group\"},\"invocation\":{\"id\":\"c610759c-24b0-4c50-9def-8c973f777241\",\"startedAt\":\"2026-10-31T14:35:56.904Z\",\"loopPath\":[]},\"attempt\":{\"id\":\"15e0283d-2b6a-4b36-a1a6-126feba4669e\",\"startedAt\":\"2026-10-31T14:59:58.168Z\"},\"binding\":{},\"timing\":{\"startedAt\":\"2026-10-31T14:59:58.168Z\",\"durationMs\":194371},\"spend\":{\"tokens\":{\"source\":\"provider\",\"value\":{\"input\":829736,\"output\":11145,\"cacheRead\":700625,\"cacheWrite\":89036}},\"costUsd\":{\"source\":\"provider\",\"value\":1.0772964},\"stopReason\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"numTurns\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"}},\"accounting\":\"aggregate\",\"type\":\"loop_group\",\"duration_ms\":194371,\"cost_usd\":1.0772964,\"aggregate\":true,\"suspend_point\":\"approval\",\"node_output\":\"{\\\"status\\\":\\\"continue\\\",\\\"step\\\":\\\"6 — A6 — The operator's marketplace `mvp` serves mvp-sdlc 0.8.0 with `task-brief --strict`\\\",\\\"verdict\\\":\\\"OK\\\",\\\"kind\\\":\\\"\\\",\\\"reason\\\":\\\"Маркетплейс mvp оновлено (rc=0), його HEAD = origin/main = M e4c4f54; версія mvp-sdlc 0.8.0, --strict у task-brief присутній (7). Усі Expected збіглися.\\\"}\"}",
+      "created_at": "2026-10-31 15:03:12"
+    }
+  ]
+}

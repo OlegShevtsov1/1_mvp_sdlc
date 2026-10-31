@@ -62,5 +62,8 @@ jobs:
       - name: Factory unit tests (bun)
         run: bash scripts/ci/check.sh factory
 
+      - name: Supervisor unit tests (bun)
+        run: bash scripts/ci/check.sh supervisor
+
       - name: Archon validate and dry-run fixtures on the pinned version
         run: bash scripts/ci/check.sh archon

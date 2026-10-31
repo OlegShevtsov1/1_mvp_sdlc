@@ -27,13 +27,15 @@ chmod +x "${tmp}/bin/archon" "${tmp}/bin/bun"
 home="${tmp}/archon-home"
 factory_src="${root}/orchestration/factory/.archon/workflows/sdlc-factory/factory"
 factory_dst="${home}/workflows/sdlc-factory/factory"
+supervisor_dst="${home}/supervisor"
+unit="${tmp}/config/systemd/user/sdlc-autopilot.service"
 
 # install [env assignments...]: runs install.sh, leaves its output in ${out} and exit code in ${rc}.
 install() {
   rc=0
   rm -f "${tmp}/validated.log"
   out=$(env PATH="${tmp}/bin:${PATH}" ARCHON_HOME="${home}" ARCHON_BIN="${tmp}/bin/archon" \
-    INSTALL_SKIP_RUNTIME_TOOLS=1 "$@" bash "${root}/install.sh" 2>&1) || rc=$?
+    XDG_CONFIG_HOME="${tmp}/config" INSTALL_SKIP_RUNTIME_TOOLS=1 "$@" bash "${root}/install.sh" 2>&1) || rc=$?
 }
 
 install
@@ -51,8 +53,18 @@ grep -qF "backup: nothing to back up" <<<"${out}" || fail "fresh install" "no 'n
   fail "fresh install" "validated: $(tr '\n' ' ' <"${tmp}/validated.log")"
 ! grep -q '^{"level"' <<<"${out}" || fail "fresh install" "Archon's JSON log lines were printed"
 echo "PASS fresh install copies and validates every workflow"
+diff -r "${root}/orchestration/supervisor" "${supervisor_dst}" >/dev/null ||
+  fail "fresh install" "installed supervisor differs from the repository"
+[ -f "${unit}" ] || fail "fresh install" "no unit at ${unit}"
+for want in "ExecStart=${tmp}/bin/bun run ${supervisor_dst}/src/main.ts" "Environment=ARCHON_HOME=${home}" "KillMode=process"; do
+  grep -qxF "${want}" "${unit}" || fail "fresh install" "unit lacks '${want}': $(cat "${unit}")"
+done
+[ "$(grep -c '@[A-Z_]*@' "${unit}" || true)" -eq 0 ] || fail "fresh install" "unit keeps a placeholder: $(cat "${unit}")"
+grep -qF "(not enabled;" <<<"${out}" || fail "fresh install" "no 'not enabled' line: ${out}"
+echo "PASS fresh install copies the supervisor and renders its unit, not enabled"
 
 echo stale > "${factory_dst}/stale.txt"
+echo stale > "${supervisor_dst}/stale.txt"
 mkdir -p "${home}/workflows/mvp-ops"
 echo "name: x" > "${home}/workflows/mvp-ops/x.yaml"
 install
@@ -63,11 +75,13 @@ grep -qF "backup: ${backups[0]}" <<<"${out}" || fail "reinstall" "backup dir not
 [ -f "${backups[0]}/sdlc-factory/factory/stale.txt" ] || fail "reinstall" "previous factory not backed up"
 [ -f "${backups[0]}/plan-review.yaml" ] && [ -f "${backups[0]}/plugin-probe.yaml" ] || fail "reinstall" "yaml files not backed up"
 [ ! -e "${factory_dst}/stale.txt" ] || fail "reinstall" "stale file survived the install"
+[ ! -e "${supervisor_dst}/stale.txt" ] || fail "reinstall" "stale supervisor file survived the install"
 [ -f "${home}/workflows/mvp-ops/x.yaml" ] || fail "reinstall" "another pack was touched"
 [ ! -e "${backups[0]}/mvp-ops" ] || fail "reinstall" "another pack was backed up"
 [ -z "$(find "${home}/workflows" -name '*backup*')" ] || fail "reinstall" "a backup landed inside workflows/, where Archon discovers it"
 echo "PASS reinstall backs up only what it replaces, outside workflows/"
 
+rm -rf "${supervisor_dst}"
 install ARCHON_STUB_FAIL=plan-review
 [ "${rc}" -eq 1 ] || fail "validation failure" "exit ${rc}, want 1: ${out}"
 backups=("${home}"/workflows-backup/*)
@@ -75,7 +89,8 @@ backups=("${home}"/workflows-backup/*)
 [ ! -e "${backups[1]}/sdlc-factory/factory/factory" ] || fail "validation failure" "backup nested into an earlier one"
 grep -qF "backup: ${backups[1]}" <<<"${out}" && grep -qF "is in ${backups[1]}" <<<"${out}" ||
   fail "validation failure" "message does not name the new backup: ${out}"
-echo "PASS a validation failure exits 1 and names the backup"
+[ ! -e "${supervisor_dst}" ] || fail "validation failure" "the supervisor was installed despite the failure"
+echo "PASS a validation failure exits 1, names the backup and installs no supervisor"
 
 rm -rf "${home}"
 install BUN_STUB_VERSION=1.1.0

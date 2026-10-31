@@ -60,8 +60,17 @@ This repository is the Claude Code plugin marketplace `mvp` (`.claude-plugin/mar
 - `orchestration/factory/` is the Archon `factory` workflow pack (plan → build → review → merge → deploy → health →
   rollback → report), imported with its history; its own [README](orchestration/factory/README.md) describes it.
 - `orchestration/workflows/` holds the single-file workflows `plan-review` and `plugin-probe`.
+- `orchestration/supervisor/` is the `sdlc-autopilot` supervisor (E2). It reads Archon's run state read-only and
+  records one ledger line per decision in `~/.local/state/sdlc-autopilot/ledger.jsonl`. By its `policy.yaml` it
+  answers routine plan and install gates and escalates every other pause, post-merge gates included; a failed run
+  with a transient error is resumed with backoff by the `transient-resume` rule. It also asks `gh` which PRs of finished
+  factory runs are merged and launches `post-merge` once for each, detached, with one ledger line per launch. It
+  starts the factory briefs queued in `~/.config/sdlc-autopilot/queue/<repo>/` within its run limits and host
+  threshold, and once a day removes test leftovers older than 24 h; its
+  [README](orchestration/supervisor/README.md) describes each rule.
 - `./install.sh` installs all of them into `~/.archon/workflows`, backing up what it replaces, and validates them.
-  Install from `main` for production, from `develop` to test a change.
+  It then copies the supervisor to `~/.archon/supervisor` and its systemd user unit to `~/.config/systemd/user/`,
+  without enabling it. Install from `main` for production, from `develop` to test a change.
 - The operator guide — requirements, install and rollback, tasks, gates, results, troubleshooting — is
   [orchestration/docs/archon-factory.md](orchestration/docs/archon-factory.md).
 - The `mvp-ops` post-merge pack (operator steps after a merge) is versioned in a private planning repository.

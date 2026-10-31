@@ -1,0 +1,52 @@
+{
+  "source": "archon.db run 4a7a0367-d50c-4828-95e1-3d36b9a736bb, events up to event_order 346847, plan node output trimmed to node and node_output; status set to paused; paths, host and links scrubbed",
+  "run": {
+    "id": "4a7a0367-d50c-4828-95e1-3d36b9a736bb",
+    "workflow_name": "factory",
+    "status": "paused",
+    "working_path": "/home/operator/.archon/workspaces/OlegShevtsov1/1_mvp_sdlc/worktrees/archon/task-factory-1793450592179",
+    "user_message": "Fix in THIS repository OlegShevtsov1/1_mvp_sdlc (orchestration/factory/.archon/workflows/sdlc-factory/factory: factory.yaml, a new preflight script + _lib, profile schema/loader, fixtures, docs; templates/project-be and templates/project-fe .archon/factory-profile.yaml.tmpl), base develop, one PR, squash. Trello PILOT-499 <trello card>. PR title «PILOT-499: sdlc factory: preflight checks the tools, disk and services the profile's test command needs, before work starts and before the merge gate», trailer «Type: feat». Size M.",
+    "metadata": "{\"execution_owner\":{\"host\":\"operator-host\",\"pid\":2810274,\"uid\":1000},\"wait\":{\"owner\":\"node\",\"nodeId\":\"plan-gate\",\"kind\":\"attention\",\"waitingSince\":\"2026-10-31T12:52:00.627Z\",\"message\":\"GATE 2 — the plan. Ready to build: true\\nSummary: The plan adds an optional profile block, stack.preflight, with tools, TCP services (each with an optional start command) and min_disk_free_pct (default 20; 0 turns the disk check off). profile.ts validates the block, load-profile emits it only when present, and factory.yaml declares it as an optional field.\\n\\nThe checks live in a new lib, _lib/preflight.ts:\\n- missing tools are reported together;\\n- low disk runs the existing PILOT-470 leftovers cleanup and measures again;\\n- a down service is started once (120 s cap) and polled for 60 s.\\n\\nThe lib runs in two places:\\n- A new preflight node after load-profile and before sync-base, with a preflight-stop cancel node modelled on claude-auth-stop.\\n- Inside merge-gate.ts, right before the command loop. A failure refuses with a new class, 'preflight', which takes the existing not-delivered path and leaves the PR open. merge passes the binding through, so the gate's re-run after a conflict rebase checks again.\\n\\nA spike showed that Archon binds \\\"\\\" for a declared but absent field, so a profile without the block behaves exactly as before and the 22 existing fixtures need no edits. Node timeouts grow by the preflight's bounded 1200 s.\\n\\nThe rest of the change:\\n- project-be (postgres and redis, check-only because the template has no compose file) and project-fe profile templates;\\n- two new fixtures: stop before work, and stop before the merge gate;\\n- archon-check.sh trace assertions, unit tests, docs, and a CHANGELOG Added entry.\\n\\nFull plan: /home/operator/.archon/workspaces/OlegShevtsov1/1_mvp_sdlc/artifacts/runs/4a7a0367-d50c-4828-95e1-3d36b9a736bb/plan.md\\nFull plan: $ARTIFACTS_DIR/plan.md\\n\",\"pauseId\":\"9b4fd859-c1f4-49c7-a3f4-fe5c4bf1dbc7\",\"form\":\"select\",\"options\":[{\"id\":\"approve\",\"label\":\"Approve\"},{\"id\":\"needs-revision\",\"label\":\"Needs revision\"},{\"id\":\"abort\",\"label\":\"Abort\"}]}}",
+    "started_at": "2026-10-31 12:52:32",
+    "last_activity_at": "2026-10-31 12:52:00",
+    "completed_at": null
+  },
+  "events": [
+    {
+      "id": "ae8c0575-e160-46fc-9c4a-f97fd64ef551",
+      "workflow_run_id": "4a7a0367-d50c-4828-95e1-3d36b9a736bb",
+      "event_order": 346841,
+      "event_type": "node_completed",
+      "step_name": "plan-cycle.plan__plan",
+      "data": "{\"node\":{\"id\":\"plan__plan\",\"kind\":\"agent\"},\"node_output\":\"{\\\"ready\\\":true,\\\"open_questions\\\":[\\\"Non-blocking: the before-work preflight runs right after load-profile, not literally right after claude-auth as the request says. The profile, which is the preflight's configuration, is only loaded there. Nothing between claude-auth and load-profile is LLM work when the profile exists, and a first-run profile written by the interview has no preflight block. Option A (chosen): a node after load-profile. It costs nothing and keeps a single YAML parser. Option B: a script that parses the profile itself right after claude-auth. That means a duplicate parser and validator, and fixtures could not inject a block. None of the person-call conditions applies: no shipped contract changes and the outcome is fully delivered. A line for the direction doc: 'Host preflight reads its configuration from load-profile and runs right after it; nothing before load-profile parses the profile.'\\\",\\\"Non-blocking, provisional: the exact wording of the preflight messages and the new merge-gate refusal class name 'preflight' (instead of reusing 'failure'). Both are cheap to change and no code parses the class. A line for the direction doc: 'Each distinct merge-gate stop cause gets its own refusal class.'\\\"],\\\"summary\\\":\\\"The plan adds an optional profile block, stack.preflight, with tools, TCP services (each with an optional start command) and min_disk_free_pct (default 20; 0 turns the disk check off). profile.ts validates the block, load-profile emits it only when present, and factory.yaml declares it as an optional field.\\\\n\\\\nThe checks live in a new lib, _lib/preflight.ts:\\\\n- missing tools are reported together;\\\\n- low disk runs the existing PILOT-470 leftovers cleanup and measures again;\\\\n- a down service is started once (120 s cap) and polled for 60 s.\\\\n\\\\nThe lib runs in two places:\\\\n- A new preflight node after load-profile and before sync-base, with a preflight-stop cancel node modelled on claude-auth-stop.\\\\n- Inside merge-gate.ts, right before the command loop. A failure refuses with a new class, 'preflight', which takes the existing not-delivered path and leaves the PR open. merge passes the binding through, so the gate's re-run after a conflict rebase checks again.\\\\n\\\\nA spike showed that Archon binds \\\\\\\"\\\\\\\" for a declared but absent field, so a profile without the block behaves exactly as before and the 22 existing fixtures need no edits. Node timeouts grow by the preflight's bounded 1200 s.\\\\n\\\\nThe rest of the change:\\\\n- project-be (postgres and redis, check-only because the template has no compose file) and project-fe profile templates;\\\\n- two new fixtures: stop before work, and stop before the merge gate;\\\\n- archon-check.sh trace assertions, unit tests, docs, and a CHANGELOG Added entry.\\\\n\\\\nFull plan: /home/operator/.archon/workspaces/OlegShevtsov1/1_mvp_sdlc/artifacts/runs/4a7a0367-d50c-4828-95e1-3d36b9a736bb/plan.md\\\",\\\"report\\\":{\\\"type\\\":\\\"archon_artifact\\\",\\\"run_id\\\":\\\"4a7a0367-d50c-4828-95e1-3d36b9a736bb\\\",\\\"path\\\":\\\"plan.md\\\"}}\"}",
+      "created_at": "2026-10-31 12:51:59"
+    },
+    {
+      "id": "2f0566bd-814a-4abf-93cf-d35d7617fcba",
+      "workflow_run_id": "4a7a0367-d50c-4828-95e1-3d36b9a736bb",
+      "event_order": 346845,
+      "event_type": "wait_started",
+      "step_name": "plan-cycle.plan-gate",
+      "data": "{\"kind\":\"attention\"}",
+      "created_at": "2026-10-31 12:52:00"
+    },
+    {
+      "id": "d6a22205-db96-458e-bc4e-9cb47d316fff",
+      "workflow_run_id": "4a7a0367-d50c-4828-95e1-3d36b9a736bb",
+      "event_order": 346846,
+      "event_type": "node_suspended",
+      "step_name": "plan-cycle.plan-gate",
+      "data": "{\"node\":{\"id\":\"plan-gate\",\"kind\":\"wait\"},\"invocation\":{\"id\":\"2d770b4a-6bd0-42cd-a526-41baf1a6be4e\",\"startedAt\":\"2026-10-31T12:52:00.626Z\",\"loopPath\":[{\"groupId\":\"plan-cycle\",\"iteration\":1}]},\"attempt\":{\"id\":\"da41085c-1a92-4f6b-ae15-239f90c54c0f\",\"startedAt\":\"2026-10-31T12:52:00.627Z\"},\"binding\":{},\"timing\":{\"startedAt\":\"2026-10-31T12:52:00.627Z\",\"durationMs\":15},\"spend\":{\"tokens\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"costUsd\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"stopReason\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"numTurns\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"}},\"accounting\":\"node\",\"type\":\"wait\",\"duration_ms\":15,\"suspend_point\":\"wait\",\"node_output\":\"\"}",
+      "created_at": "2026-10-31 12:52:00"
+    },
+    {
+      "id": "9908f9f2-c388-405a-a66c-bbabfc599979",
+      "workflow_run_id": "4a7a0367-d50c-4828-95e1-3d36b9a736bb",
+      "event_order": 346847,
+      "event_type": "node_suspended",
+      "step_name": "plan-cycle",
+      "data": "{\"node\":{\"id\":\"plan-cycle\",\"kind\":\"loop_group\"},\"invocation\":{\"id\":\"e3360f2c-88e1-4c23-b72d-dfb6b1da9d2c\",\"startedAt\":\"2026-10-31T12:43:25.417Z\",\"loopPath\":[]},\"attempt\":{\"id\":\"2759200e-4d73-4d40-a0cb-2ca8dbcd0ef2\",\"startedAt\":\"2026-10-31T12:43:25.423Z\"},\"binding\":{},\"timing\":{\"startedAt\":\"2026-10-31T12:43:25.423Z\",\"durationMs\":515224},\"spend\":{\"tokens\":{\"source\":\"provider\",\"value\":{\"input\":6201570,\"output\":49833,\"cacheRead\":6038583,\"cacheWrite\":155313}},\"costUsd\":{\"source\":\"provider\",\"value\":3.4475661},\"stopReason\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"numTurns\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"}},\"accounting\":\"aggregate\",\"type\":\"loop_group\",\"duration_ms\":515224,\"cost_usd\":3.4475661,\"aggregate\":true,\"suspend_point\":\"wait\",\"node_output\":\"\"}",
+      "created_at": "2026-10-31 12:52:00"
+    }
+  ]
+}

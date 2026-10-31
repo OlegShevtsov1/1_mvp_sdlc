@@ -8,6 +8,10 @@ stack:
   test_command: "npm test"
   lint_command: "npm run lint"
   build_command: "npm run build"
+  # Checked before any work and again right before the merge gate's test command.
+  preflight:
+    tools: ["node", "npm", "gh", "jq"]
+    min_disk_free_pct: 20
 # Factory PRs go to develop (decision 27); release and hotfix PRs into main are the operator's.
 repo:
   remote: "origin"

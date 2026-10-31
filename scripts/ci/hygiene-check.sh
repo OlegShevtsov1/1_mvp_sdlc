@@ -68,9 +68,10 @@ template_ipv4
 check "internal hostname (vr8 prefix)"  -iE -e 'vr8[-]'
 check "internal hostname srvN.local"   -iE -e 'srv[0-9]+\.local'
 check "internal hostname (bonfir[e])"  -iE -e 'bonfir[e]'
+# Letters count as part of the token, so 12 digits inside a hex git SHA are not an account ID.
 # The vendored upstream file has a UUID example whose last group is 12 digits; it cannot be edited (plugins/sdlc/UPSTREAM.md).
 check_except plugins/sdlc/skills/generate-data-model/SKILL.md \
-  "AWS account ID (12 digits)"         -E  -e '(^|[^0-9])[0-9]{12}([^0-9]|$)'
+  "AWS account ID (12 digits)"         -E  -e '(^|[^0-9A-Za-z])[0-9]{12}([^0-9A-Za-z]|$)'
 check "Route53 hosted zone ID"         -E  -e '(^|[^A-Za-z0-9+/])Z[A-Z0-9]{12,}([^A-Za-z0-9+/=]|$)'
 # feature-start and project-add have to call the Trello API; card and board links are still banned everywhere else.
 scan "Trello link" -iE -e 'trello\.com' -- . \

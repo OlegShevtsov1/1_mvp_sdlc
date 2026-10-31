@@ -23,6 +23,83 @@ release pull request `PILOT-<n>: Release vX.Y.Z` carries that section under `## 
 
 ### Security
 
+## [0.8.0] - 2026-10-31
+
+### Added
+
+- The factory profile takes an optional `stack.preflight` block: `tools` that must be on `PATH`, TCP `services`
+  (`{name, tcp: "host:port", start}` with an optional start command, at most 8) and `min_disk_free_pct` (default
+  20). The new `preflight` node checks it before any work, and `merge-gate` checks it again right before the test
+  command. A down service is started once and polled for 60 s; low disk runs the leftovers cleanup and is measured
+  again. Anything still missing stops the run with one message naming the fix: before any work as `Stopped before
+  any work: preflight: …`, at the merge gate as the refusal class `preflight` with the pull request left open. A
+  profile without the block behaves as before. The project-be (tools, test Postgres and Redis, check-only) and
+  project-fe (tools) profile templates declare their blocks (PILOT-499).
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- `scripts/ci/hygiene-check.sh` no longer reports 12 consecutive digits inside a hex git SHA (or any alphanumeric
+  token) as an AWS account ID, so `publish-mirror.sh` no longer refuses a sync whose `MIRROR_SOURCE.json` carries such
+  a SHA; a standalone account ID, one in an ARN and one in an ECR host are still caught (PILOT-482).
+- `task-brief --check-after-merge` accepts the bold `**A<n> — <title>**` steps that post-merge and release pull
+  requests use, with text after the closing `**` as post-merge allows: steps with a fenced block (its `Run:` line
+  optional) and prose steps whose commands are inline code. A section that mixes them with `### A<n>` steps is
+  refused, since post-merge would run the heading as part of the bold step above it. Prose expectations (an inline
+  `Expected: <text>`, a prose item, an output sample) and prose steps are warnings; the new `--strict` refuses them
+  (PILOT-478).
+- The factory's merge rebases once when `gh pr merge` fails on a conflict that appeared after `pr-state` (another PR
+  merged during the gate), then runs `pr-state` and `merge-gate` again on the new head before merging; a PR already
+  merged at the run's head is reported delivered and deployed instead of refused, while one merged at another head is
+  still refused (PILOT-492).
+- The factory's squash merge passes the pull request title plus ` (#<n>)` as the commit subject (`gh pr merge --squash
+  --subject`), so a one-commit PR keeps its `PILOT-<n>:` prefix instead of GitHub's default, that commit's subject; the
+  body is unchanged, and a PR already merged is still not merged again (PILOT-497).
+
+### Security
+
+## [0.7.0] - 2026-10-31
+
+### Added
+
+- `task-brief --check-after-merge <file|PR>` validates the `## After merge (operator)` section of a factory message
+  or a pull request body against a schema (`### A<n> — <title>` steps, optional 🔒, one fenced `Run:` block, an
+  `Expected:` list of `check: <kind> <args>` and `manual:` lines; kinds `gh-pr-merged`, `workflow-run-success`,
+  `url-contains`, `http-ok`, `git-tag-at`, `file-contains`) and reports each error with its line. A deferred step
+  (no command, or "separate task", "after the release", "later") is refused with the Backlog card it becomes;
+  `--create-cards` creates that card linked to the task card and drops the step. The brief points to the format
+  (PILOT-472).
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- `bin/wait-dev-deploy` of the be and fe templates finds the commit's Dev Deploy run by its title
+  `Dev Deploy sha-<sha>` (be gains the `run-name` and catches up with the be project's waiter), waits for the
+  duplicate that deploys instead of a skipped one, and reports success when a newer develop commit that contains
+  the merge deployed after its own run was superseded or cancelled. be retries GitHub 5xx and network errors (3
+  tries) and waits 1440 s by default. fe exits 3 with "dev auto-deploy disabled" when Front CI passed but
+  `DEV_AUTO_DEPLOY` is not `true` (PILOT-471).
+- The factory's merge gate no longer merges with unfinished CI and handles the causes it used to refuse on
+  (PILOT-470): a check still pending after `pr-state`'s 20-minute wait gets one more wait and then refuses
+  (`pending: checks still pending after N min`); a red check that the new profile setting `stack.flaky_patterns`
+  (substrings of a job name or its failed-step log, empty by default) names gets one `gh run rerun --failed` before
+  it refuses as `flaky-after-rerun`; ignored `__pycache__/` and `.terraform/` leftovers are removed before the test
+  command; a pull request that conflicts with its base is rebased once and pushed with `--force-with-lease`, and a
+  rebase that conflicts refuses with the conflicting files for a replan; every refusal reason is one line that
+  starts with its class (`pending`, `flaky-after-rerun`, `failure`, `timeout`, `conflict`).
+
+### Security
+
 ## [0.6.0] - 2026-10-29
 
 ### Added

@@ -69,6 +69,8 @@ class TaskBriefTest(TempTestCase):
         self.assertIn("https://demo.example.com/up", out)
         self.assertIn("90", out)
         self.assertIn("bin/deploy rollback", out)
+        self.assertIn('"## After merge (operator)"', out)
+        self.assertIn("task-brief --check-after-merge <file>", out)
 
     def test_acceptance_criteria_come_from_the_current_prd(self):
         old = "a shop manager whose shop has orders this month"

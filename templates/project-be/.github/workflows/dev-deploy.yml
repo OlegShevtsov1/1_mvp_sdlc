@@ -1,9 +1,12 @@
 name: Dev Deploy
+run-name: ${{ github.event_name == 'workflow_run' && format('Dev Deploy sha-{0}', github.event.workflow_run.head_sha) || format('Dev Deploy dispatched from {0}', github.ref_name) }}
 
 # Every commit pushed to develop or a hotfix/* branch that both Rails Tests and Rails CI passed
 # (decision 28) is built once into ECR (sha-<git sha>) and deployed to the dev host with Kamal 2,
 # through the shared mvp VPN (vpn-up/vpn-down from 1_mvp_infra). A main commit is deployed only by a
 # dispatch on main, as bin/wait-dev-deploy does for the factory. See README "Dev deploy".
+# Runs are titled with the commit so bin/wait-dev-deploy can find them; workflow_run runs use main's
+# copy of this file, so the title applies to them once it reaches main.
 #
 # No concurrency group on purpose: the VPN lock taken by vpn-up serializes the deploy part
 # across repositories, and Kamal's deploy lock serializes it on the host.

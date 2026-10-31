@@ -48,6 +48,11 @@ describe("buildReport", () => {
     expect(r.summary).toContain("test command exited 1");
     expect(r.summary).toContain("https://github.com/o/r/pull/7");
   });
+  test("a merge refused on an already-merged pull request does not call it open", () => {
+    const r = buildReport({ ...base, merged: "skipped", merge_sha: "", deployed: "skipped", healthy: "skipped", monitor_status: "skipped", merge_refused: "failure: the pull request is already merged, but this run's head abc was not shown to be in the merge (see pr-state.log)" });
+    expect(r.status).toBe("not-delivered");
+    expect(r.summary).toBe("Not delivered: merge refused (failure: the pull request is already merged, but this run's head abc was not shown to be in the merge (see pr-state.log)). PR https://github.com/o/r/pull/7 was not merged by this run.");
+  });
   test("an interim review verdict ends not delivered and quotes the delivery's reason and summary", () => {
     const r = buildReport({ ...notReady, delivery_reason: "review_open", delivery_summary: "Not ready: Round 1: review_open. Not yet finalized — still verifying." });
     expect(r.status).toBe("not-delivered");

@@ -33,7 +33,8 @@ factory runs that legitimately force-push their own branches. To switch it off i
 - `sync-spec` — run in the frontend repository to copy or check the backend's feature artifacts.
 - `task-cards` — `/mvp-sdlc:task-cards <slug>`. Runs the `task-cards` command after `break-tasks` (dry run first):
   one Trello card per task, recorded in `tasks.json` (decision 78).
-- `task-brief` — prints the factory task text for one task; a refusal is a Definition of Ready failure to fix.
+- `task-brief` — prints the factory task text for one task; a refusal is a Definition of Ready failure to fix. It
+  also checks an After merge (operator) section (`--check-after-merge`).
 - `bootstrap-project` — detects `be`/`fe`, runs the `bootstrap-project` command and asks before overwriting any
   file that differs, `CLAUDE.md` above all.
 
@@ -95,6 +96,12 @@ and carry on.
   factory profile) for frontend tasks, whose status the backend owns; the `sync-spec` copy of `tasks.json` is
   briefed only with `--from`. Refuses tasks that are not ready, invalid
   task card fields, and tasks with no card number at all. Never names a branch and never carries a Trello link.
+  `task-brief --check-after-merge <file|PR> [--strict] [--create-cards] [--card PILOT-<n>]` validates the `## After
+  merge (operator)` section of a file or a pull request body against the format in the `task-brief` skill, with steps
+  as `### A<n> — <title>` headings or as the bold `**A<n> — <title>**` lines release pull requests use, naming each
+  error with its line; in bold form a prose `Expected:` item or prose step is a warning that `--strict` refuses; a
+  deferred step is refused with the Backlog card it becomes, and `--create-cards` (a file only)
+  creates that card, linked to the task card, and drops the step from the file.
 - `stage-pr <slug> <stage> --message <msg> <path>...` — commits, pushes and opens one feature stage's docs pull
   request (decision 105 c); the feature-stage skills run it once the operator has approved the stage, the operator
   merges the pull request by hand and that merge is the stage's gate (R-C8.9). Fetches `origin/<base>` (the gate's

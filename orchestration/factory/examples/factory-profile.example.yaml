@@ -9,6 +9,17 @@ stack:
   build_command: ""                    # empty = no build step
   test_timeout_seconds: 1000           # the merge gate's limit for one run of test_command, 1-3600 s;
                                        # absent means 1000. A timed-out run is retried once.
+  flaky_patterns: []                   # substrings of known flaky CI failures (a job name or its failed-step
+                                       # log), e.g. ["tokenStore"]: such a red check gets one
+                                       # `gh run rerun --failed` before the merge gate refuses. Absent means [].
+  preflight:                           # optional; absent means no preflight. Checked before any work and
+                                       # again right before the merge gate's test command.
+    tools: ["pytest", "ruff", "docker"]  # command names that must be on PATH
+    services:                          # at most 8; each must answer TCP at host:port
+      - name: db
+        tcp: "localhost:5432"
+        start: "docker compose up -d db"   # optional; run once when it does not answer, must return (it may background the service), then polled 60 s
+    min_disk_free_pct: 20              # 0-99, absent means 20, 0 turns the disk check off
 repo:
   remote: origin
   base_branch: main

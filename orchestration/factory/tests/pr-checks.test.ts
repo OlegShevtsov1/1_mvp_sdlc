@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ciRefusal } from "../.archon/workflows/sdlc-factory/factory/scripts/_lib/merge-decision.ts";
-import { latestChecks } from "../.archon/workflows/sdlc-factory/factory/scripts/_lib/pr-checks.ts";
+import { actionsJob, isKnownFlaky, latestCheckRuns } from "../.archon/workflows/sdlc-factory/factory/scripts/_lib/pr-checks.ts";
 
 interface Run {
   __typename: "CheckRun";
@@ -43,10 +43,10 @@ const BE108: Run[] = [
 const OLD = "2026-10-28T14:00:00Z";
 const NEW = "2026-10-28T14:30:00Z";
 
-describe("latestChecks", () => {
+describe("latestCheckRuns", () => {
   test("a cancelled run superseded by a newer green run is not red (be#108)", () => {
-    const checks = latestChecks(BE108);
-    expect(checks).toEqual([
+    const checks = latestCheckRuns(BE108);
+    expect(checks).toMatchObject([
       { name: "TDD order", bucket: "pass" },
       { name: "CHANGELOG entry", bucket: "pass" },
       { name: "PR conventions", bucket: "pass" },
@@ -59,55 +59,95 @@ describe("latestChecks", () => {
 
   test("a cancelled run next to a newer green one is not red (fe#65)", () => {
     const name = "Branch name, PR title, Type line";
-    const checks = latestChecks([
+    const checks = latestCheckRuns([
       run("PR conventions", name, "CANCELLED", OLD, OLD),
       run("PR conventions", name, "SUCCESS", NEW, NEW),
     ]);
-    expect(checks).toEqual([{ name, bucket: "pass" }]);
+    expect(checks).toMatchObject([{ name, bucket: "pass" }]);
   });
 
   test("a latest run cancelled with nothing newer is refused", () => {
-    const checks = latestChecks([run("TDD check", "TDD order", "SUCCESS", OLD, OLD), run("TDD check", "TDD order", "CANCELLED", NEW, NEW)]);
-    expect(checks).toEqual([{ name: "TDD order", bucket: "cancel" }]);
+    const checks = latestCheckRuns([run("TDD check", "TDD order", "SUCCESS", OLD, OLD), run("TDD check", "TDD order", "CANCELLED", NEW, NEW)]);
+    expect(checks).toMatchObject([{ name: "TDD order", bucket: "cancel" }]);
     expect(ciRefusal(checks)).toBe("CI check TDD order is cancel on the pull request head");
   });
 
   test("a queued or in-progress run newer than a green one is pending", () => {
     for (const pending of [inFlight("TDD check", "TDD order", "IN_PROGRESS", NEW), inFlight("TDD check", "TDD order", "QUEUED", null)]) {
-      expect(latestChecks([run("TDD check", "TDD order", "SUCCESS", OLD, OLD), pending])).toEqual([{ name: "TDD order", bucket: "pending" }]);
+      expect(latestCheckRuns([run("TDD check", "TDD order", "SUCCESS", OLD, OLD), pending])).toMatchObject([{ name: "TDD order", bucket: "pending" }]);
     }
   });
 
   test("a latest run that failed or timed out is refused", () => {
     for (const conclusion of ["FAILURE", "TIMED_OUT"]) {
-      const checks = latestChecks([run("CI", "Tests", "SUCCESS", OLD, OLD), run("CI", "Tests", conclusion, NEW, NEW)]);
-      expect(checks).toEqual([{ name: "Tests", bucket: "fail" }]);
+      const checks = latestCheckRuns([run("CI", "Tests", "SUCCESS", OLD, OLD), run("CI", "Tests", conclusion, NEW, NEW)]);
+      expect(checks).toMatchObject([{ name: "Tests", bucket: "fail" }]);
       expect(ciRefusal(checks)).toBe("CI check Tests is fail on the pull request head");
     }
   });
 
   test("an older failure superseded by a newer green run is not red", () => {
-    expect(latestChecks([run("CI", "Tests", "FAILURE", OLD, OLD), run("CI", "Tests", "SUCCESS", NEW, NEW)])).toEqual([{ name: "Tests", bucket: "pass" }]);
+    expect(latestCheckRuns([run("CI", "Tests", "FAILURE", OLD, OLD), run("CI", "Tests", "SUCCESS", NEW, NEW)])).toMatchObject([{ name: "Tests", bucket: "pass" }]);
   });
 
   test("the same name in two workflows is two checks", () => {
-    const checks = latestChecks([run("A", "build", "SUCCESS", NEW, NEW), run("B", "build", "FAILURE", OLD, OLD)]);
-    expect(checks).toEqual([{ name: "build", bucket: "pass" }, { name: "build", bucket: "fail" }]);
+    const checks = latestCheckRuns([run("A", "build", "SUCCESS", NEW, NEW), run("B", "build", "FAILURE", OLD, OLD)]);
+    expect(checks).toMatchObject([{ name: "build", bucket: "pass" }, { name: "build", bucket: "fail" }]);
     expect(ciRefusal(checks)).toBe("CI check build is fail on the pull request head");
   });
 
   test("a commit status is judged by its context and state", () => {
-    expect(latestChecks([
+    expect(latestCheckRuns([
       { __typename: "StatusContext", context: "ci/legacy", state: "SUCCESS", startedAt: OLD },
       { __typename: "StatusContext", context: "ci/deploy", state: "ERROR", startedAt: OLD },
       { __typename: "StatusContext", context: "ci/slow", state: "PENDING", startedAt: OLD },
-    ])).toEqual([{ name: "ci/legacy", bucket: "pass" }, { name: "ci/deploy", bucket: "fail" }, { name: "ci/slow", bucket: "pending" }]);
+    ])).toMatchObject([{ name: "ci/legacy", bucket: "pass" }, { name: "ci/deploy", bucket: "fail" }, { name: "ci/slow", bucket: "pending" }]);
   });
 
   test("a skipped or neutral latest run is skipping; an entry without a name is dropped", () => {
-    expect(latestChecks([run("CI", "Deploy", "SKIPPED", OLD, OLD), run("CI", "Docs", "NEUTRAL", OLD, OLD), null, 7, {}])).toEqual([
+    expect(latestCheckRuns([run("CI", "Deploy", "SKIPPED", OLD, OLD), run("CI", "Docs", "NEUTRAL", OLD, OLD), null, 7, {}])).toMatchObject([
       { name: "Deploy", bucket: "skipping" },
       { name: "Docs", bucket: "skipping" },
     ]);
+  });
+
+  test("keeps the latest run's details URL", () => {
+    const url = "https://github.com/OlegShevtsov1/1_mvp_sdlc/actions/runs/40801047052/job/1232151809";
+    const entries = [
+      { ...run("CI", "Tests", "FAILURE", OLD, OLD), detailsUrl: "https://github.com/o/r/actions/runs/1/job/2" },
+      { ...run("CI", "Tests", "FAILURE", NEW, NEW), detailsUrl: url },
+      { __typename: "StatusContext", context: "ci/legacy", state: "SUCCESS", startedAt: OLD },
+    ];
+    expect(latestCheckRuns(entries)).toEqual([
+      { name: "Tests", bucket: "fail", detailsUrl: url },
+      { name: "ci/legacy", bucket: "pass", detailsUrl: "" },
+    ]);
+  });
+});
+
+describe("actionsJob", () => {
+  test("reads the run and job ids of a GitHub Actions job URL", () => {
+    expect(actionsJob("https://github.com/OlegShevtsov1/1_mvp_sdlc/actions/runs/40801047052/job/1232151809"))
+      .toEqual({ runId: "40801047052", jobId: "1232151809" });
+  });
+  test("any other URL is not an Actions job", () => {
+    for (const url of ["", "https://ci.example.com/build/7", "https://github.com/o/r/actions/runs/1", "https://github.com/o/r/actions/runs/1/job/2; rm -rf /"]) {
+      expect(actionsJob(url)).toBeNull();
+    }
+  });
+});
+
+describe("isKnownFlaky", () => {
+  test("a pattern in the job name or in its failed-step log makes it known flaky", () => {
+    expect(isKnownFlaky("fe / tokenStore", "", ["tokenStore"])).toBe(true);
+    expect(isKnownFlaky("Test", "FAIL src/auth/tokenStore.test.ts > refresh", ["tokenStore"])).toBe(true);
+  });
+  test("no pattern hit, or no patterns at all, is not flaky", () => {
+    expect(isKnownFlaky("Test", "FAIL src/api.test.ts", ["tokenStore"])).toBe(false);
+    expect(isKnownFlaky("tokenStore", "tokenStore", [])).toBe(false);
+  });
+  test("patterns are case-sensitive substrings, not regexes", () => {
+    expect(isKnownFlaky("Test", "tokenstore", ["tokenStore"])).toBe(false);
+    expect(isKnownFlaky("Test", "a.b", ["a*b"])).toBe(false);
   });
 });

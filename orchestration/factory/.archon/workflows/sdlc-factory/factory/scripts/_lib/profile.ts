@@ -11,6 +11,36 @@ export const DEFAULT_MANUAL_MERGE_BASES: readonly string[] = ["main"];
 export const DEFAULT_TEST_TIMEOUT_SECONDS = 1000;
 export const MAX_TEST_TIMEOUT_SECONDS = 3600;
 
+// stack.preflight (PILOT-499): what the test command needs from the Archon host,
+// checked before any work and again right before the merge gate's commands.
+export const DEFAULT_MIN_DISK_FREE_PCT = 20;
+// Bounds the preflight's worst case (one start per service, see _lib/host-check.ts).
+export const MAX_PREFLIGHT_SERVICES = 8;
+
+export interface PreflightService {
+  name: string;
+  tcp: string;
+  // A shell command run once when the service does not answer; "" means check only.
+  start: string;
+}
+
+export interface PreflightConfig {
+  tools: string[];
+  services: PreflightService[];
+  // 0 turns the disk check off.
+  min_disk_free_pct: number;
+}
+
+const COMMAND_NAME = /^[A-Za-z0-9._+-]+$/;
+const SERVICE_NAME = /^[A-Za-z0-9._-]+$/;
+const TCP_ADDRESS = /^(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+):([0-9]{1,5})$/;
+
+function isValidTcp(tcp: string): boolean {
+  const m = TCP_ADDRESS.exec(tcp);
+  const port = m ? Number(m[2]) : 0;
+  return port >= 1 && port <= 65535;
+}
+
 function isValidTestTimeout(n: unknown): n is number {
   return typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= MAX_TEST_TIMEOUT_SECONDS;
 }
@@ -20,6 +50,10 @@ export interface Profile {
   stack: {
     language: string; framework: string; test_command: string; lint_command: string; build_command: string;
     test_timeout_seconds: number;
+    // Substrings of a CI job name or of its failed-step log; a red check that
+    // matches gets one `gh run rerun --failed` before the merge gate refuses.
+    flaky_patterns: string[];
+    preflight?: PreflightConfig;
   };
   repo: {
     remote: string; base_branch: string; merge_strategy: (typeof MERGE_STRATEGIES)[number];
@@ -34,6 +68,8 @@ export interface FlatProfile {
   language: string; framework: string;
   test_command: string; lint_command: string; build_command: string;
   test_timeout_seconds: number;
+  flaky_patterns: string[];
+  preflight?: PreflightConfig;
   remote: string; base_branch: string; merge_strategy: string;
   deploy_command: string; health_url: string; wait_seconds: number; rollback_command: string;
   monitoring_provider: string; window_minutes: number;
@@ -71,6 +107,55 @@ function posInt(section: Record<string, unknown>, key: string, path: string, err
   return v;
 }
 
+export function validatePreflight(raw: unknown, errors: string[]): PreflightConfig | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    errors.push("stack.preflight must be a mapping");
+    return undefined;
+  }
+  const section = raw as Record<string, unknown>;
+  const cfg: PreflightConfig = { tools: [], services: [], min_disk_free_pct: DEFAULT_MIN_DISK_FREE_PCT };
+  const tools = section.tools;
+  if (tools !== undefined && tools !== null) {
+    if (!Array.isArray(tools)) {
+      errors.push("stack.preflight.tools must be a list of command names");
+    } else {
+      tools.forEach((t, i) => {
+        if (typeof t !== "string" || !COMMAND_NAME.test(t)) errors.push(`stack.preflight.tools[${i}] must be a command name`);
+        else cfg.tools.push(t);
+      });
+    }
+  }
+  const services = section.services;
+  if (services !== undefined && services !== null) {
+    if (!Array.isArray(services)) {
+      errors.push("stack.preflight.services must be a list of {name, tcp, start} mappings");
+    } else if (services.length > MAX_PREFLIGHT_SERVICES) {
+      errors.push(`stack.preflight.services must list at most ${MAX_PREFLIGHT_SERVICES} services`);
+    } else {
+      services.forEach((raw, i) => {
+        const path = `stack.preflight.services[${i}]`;
+        if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+          errors.push(`${path} must be a mapping`);
+          return;
+        }
+        const svc = raw as Record<string, unknown>;
+        const name = str(svc, "name", path, errors, true);
+        if (name !== "" && !SERVICE_NAME.test(name)) errors.push(`${path}.name must be a name like postgres`);
+        const tcp = str(svc, "tcp", path, errors, true);
+        if (tcp !== "" && !isValidTcp(tcp)) errors.push(`${path}.tcp must be host:port with a port from 1 to 65535`);
+        cfg.services.push({ name, tcp, start: str(svc, "start", path, errors, false) });
+      });
+    }
+  }
+  const pct = section.min_disk_free_pct;
+  if (pct !== undefined && pct !== null) {
+    if (typeof pct === "number" && Number.isInteger(pct) && pct >= 0 && pct <= 99) cfg.min_disk_free_pct = pct;
+    else errors.push("stack.preflight.min_disk_free_pct must be a whole number from 0 to 99");
+  }
+  return cfg;
+}
+
 export function validateProfile(doc: unknown): Validation {
   const errors: string[] = [];
   const root = obj(doc);
@@ -88,6 +173,7 @@ export function validateProfile(doc: unknown): Validation {
       lint_command: str(stack, "lint_command", "stack", errors, false),
       build_command: str(stack, "build_command", "stack", errors, false),
       test_timeout_seconds: DEFAULT_TEST_TIMEOUT_SECONDS,
+      flaky_patterns: [],
     },
     repo: {
       remote: str(repo, "remote", "repo", errors, true),
@@ -117,6 +203,22 @@ export function validateProfile(doc: unknown): Validation {
       errors.push(`stack.test_timeout_seconds must be a whole number of seconds between 1 and ${MAX_TEST_TIMEOUT_SECONDS}`);
     }
   }
+  const flaky = stack.flaky_patterns;
+  if (flaky !== undefined && flaky !== null) {
+    if (!Array.isArray(flaky)) {
+      errors.push("stack.flaky_patterns must be a list of strings");
+    } else {
+      flaky.forEach((f, i) => {
+        if (typeof f !== "string" || f.trim() === "" || f.includes("\n")) {
+          errors.push(`stack.flaky_patterns[${i}] must be a non-empty single-line string`);
+        } else {
+          profile.stack.flaky_patterns.push(f);
+        }
+      });
+    }
+  }
+  const preflight = validatePreflight(stack.preflight, errors);
+  if (preflight !== undefined) profile.stack.preflight = preflight;
   if (!MERGE_STRATEGIES.includes(profile.repo.merge_strategy)) {
     errors.push(`repo.merge_strategy must be one of ${MERGE_STRATEGIES.join(", ")}`);
   }
@@ -161,6 +263,8 @@ export function flattenProfile(p: Profile): FlatProfile {
     language: p.stack.language, framework: p.stack.framework,
     test_command: p.stack.test_command, lint_command: p.stack.lint_command, build_command: p.stack.build_command,
     test_timeout_seconds: p.stack.test_timeout_seconds,
+    flaky_patterns: [...p.stack.flaky_patterns],
+    ...(p.stack.preflight ? { preflight: structuredClone(p.stack.preflight) } : {}),
     remote: p.repo.remote, base_branch: p.repo.base_branch, merge_strategy: p.repo.merge_strategy,
     deploy_command: p.deploy.command, health_url: p.deploy.health_url,
     wait_seconds: p.deploy.wait_seconds, rollback_command: p.deploy.rollback_command,
@@ -173,6 +277,15 @@ export function flattenProfile(p: Profile): FlatProfile {
 // Every string is emitted as a JSON string literal, which is a valid YAML
 // double-quoted scalar, so no value can break the document.
 const q = (s: string): string => JSON.stringify(s);
+
+function preflightYaml(cfg: PreflightConfig): string[] {
+  return [
+    "  preflight:",
+    `    tools: ${JSON.stringify(cfg.tools)}`,
+    `    services: ${JSON.stringify(cfg.services.map((s) => ({ name: s.name, tcp: s.tcp, start: s.start })))}`,
+    `    min_disk_free_pct: ${cfg.min_disk_free_pct}`,
+  ];
+}
 
 export function profileToYaml(p: Profile): string {
   const lines = [
@@ -187,6 +300,8 @@ export function profileToYaml(p: Profile): string {
     `  lint_command: ${q(p.stack.lint_command)}`,
     `  build_command: ${q(p.stack.build_command)}`,
     `  test_timeout_seconds: ${p.stack.test_timeout_seconds}`,
+    `  flaky_patterns: ${JSON.stringify(p.stack.flaky_patterns)}`,
+    ...(p.stack.preflight ? preflightYaml(p.stack.preflight) : []),
     "repo:",
     `  remote: ${q(p.repo.remote)}`,
     `  base_branch: ${q(p.repo.base_branch)}`,

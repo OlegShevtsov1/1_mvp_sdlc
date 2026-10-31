@@ -248,7 +248,9 @@ archon workflow abandon <run-id>                  # close a stuck run
 | `completed`, report `status: delivered-pending-operator` | the PR's base is in the profile's `manual_merge_bases` (default `main`, decision 27). Every check was green, but the factory did **not** merge, deploy or check health; it commented `ready for the operator: …` on the PR | review and merge the PR yourself, then deploy as usual. If the summary says the notification could not be posted, the comment is missing but the PR is still waiting |
 | `cancelled`, summary `Stopped before any work: the Claude CLI login …` | the pre-flight `claude-auth` found the Claude CLI login of the Archon host expired or missing, sent one alert to `MVP_VPN_ALERTS`, and nothing else ran | run `claude /login` on the host, then start a new run |
 | `cancelled`, summary `Not delivered: the Claude CLI login on the Archon host has expired (node …)` | a later AI node failed with a provider auth error; `claude-auth-scan` found it in the run's transcript and sent the alert, once per run | run `claude /login` on the host, then start a new run. The PR, if any, is left open |
-| `cancelled`, summary `merge refused (…)` | the factory's merge gate found a red check, or the PR was not open and ready, or the checkout was not the PR head, or the PR conflicts with its base, or the factory could not republish the PR description, or `gh pr merge` refused it (gh's message is in the summary). The PR is open and was **not** merged | fix the cause and start a new run, or close the PR. `resume` does not work for `cancelled` |
+| `cancelled`, summary `Stopped before any work: preflight: …` | the `preflight` node found a tool, the free disk or a TCP service the profile's `stack.preflight` names missing on the Archon host (a down service with a start command was started once and polled for 60 s, and a start command that had not returned after 120 s was killed; low disk lost the build leftovers first; an unreadable `preflight` binding fails the check too); the message names each problem and its fix, and nothing else ran | fix it on the host (`preflight.log` has every step), then start a new run |
+| `cancelled`, summary `merge refused (…)` | the factory's merge gate found a red check, or a check still pending after two 20-minute waits, or the PR was not open and ready, or the checkout was not the PR head, or the PR conflicts with its base and could not be rebased onto it, or the factory could not republish the PR description, or `gh pr merge` refused it (gh's message is in the summary; when gh refused on a conflict that appeared after `pr-state`, the factory rebased once more and the reason continues `; after one rebase onto <base>: …`). The gate's reason starts with its class: `pending`, `flaky-after-rerun`, `failure`, `timeout`, `conflict` or `preflight` (§8). The PR is open and was **not** merged | fix the cause and start a new run, or close the PR. `resume` does not work for `cancelled` |
+| `cancelled`, summary `merge refused (failure: the pull request is already merged, but this run's head … was not shown to be in the merge …)` | the PR **is** merged, but this run could not show that the merge brought in its head: it was merged at another head, or the check in `pr-state.log` could not fetch the base or find the merge commit. Nothing was deployed | read `pr-state.log` and check what the merge brought into the base; if it is this run's work, deploy the merge commit the way the profile's deploy command does. Do not start a new run on the same PR |
 | `cancelled`, summary `… is merged, but its merge commit could not be read …` | the PR **is** merged; GitHub had not published the merge commit yet, so nothing was deployed | deploy the merge commit the way the profile's deploy command does, or start a new run once `gh pr view <url> --json mergeCommit` shows it |
 | `cancelled`, summary `stopped at the visual gate (…)` | you answered `abort` at the visual gate, approved a round that was not ready, or answered `needs-revision` in its last round; the PR is open and was **not** merged | start a new run on the same task to continue, or close the PR |
 | `cancelled`, reason `Stopped before the plan: … names no visual reference` | a UI task without a `Visual reference:` line | add the `dod` item, run `task-brief` again and start a new run |
@@ -258,8 +260,8 @@ archon workflow abandon <run-id>                  # close a stuck run
 | `failed`, report.json missing or not delivered | a node broke and the run ended without the report's verdict | `archon workflow get <run-id>` names the node; fix it; `archon workflow resume <run-id>` |
 
 Run artifacts: `~/.archon/workspaces/<owner>/<repo>/artifacts/runs/<run-id>/` — `report.json`, `plan.md`,
-`implementation.md`, `review/report.md`, `sync-base.log`, `rag-context.md`, `rag.log`, `merge-gate.log`,
-`trello.log`, `claude-auth.log`, `deploy.log`, `rollback.log`; for a UI task also `visual-gate.decision`, `visual-gate.text` and
+`implementation.md`, `review/report.md`, `sync-base.log`, `rag-context.md`, `rag.log`, `pr-state.log`, `merge-gate.log`, `merge.log`,
+`trello.log`, `claude-auth.log`, `preflight.log`, `deploy.log`, `rollback.log`; for a UI task also `visual-gate.decision`, `visual-gate.text` and
 `visual-gate.decisions` (your answers) and `visual-shots.json` and `visual.log` (each round's screenshots and
 readiness). `report.json` also records `rag_status` and `rag_sources`: whether the
 plan stage got project knowledge from `mvp-rag` (`ok`, `unavailable`, `dry-run`, or `skipped` when the plan stage
@@ -280,10 +282,35 @@ While a gate waits for you (gate 1, gate 2 or the visual gate) the card is in `B
   terminal.
 - **The CI step fails with "no pull requests found for branch"**: `gh` looks at the wrong repository;
   `gh repo set-default OlegShevtsov1/<repo>`.
-- **The run ends with `merge refused`**: read `merge-gate.log` in the run's artifacts. Often a check that is red on
-  `main` too (lint, security audit): make CI green in a separate PR first. A reason
-  `test command timed out after N s` means the test command outlived its limit twice (the gate retries it once): the
-  suite needs more time on the Archon host, so raise `stack.test_timeout_seconds` in the profile (at most 3600).
+- **The run ends with `merge refused`**: read `merge-gate.log` and `pr-state.log` in the run's artifacts. The reason
+  starts with its class:
+  - `failure` — a red command or CI check, or a precondition (PR not open and ready, checkout not the head,
+    description not republished). Often a check that is red on `main` too (lint, security audit): make CI green in a
+    separate PR first.
+  - `timeout` — `test command timed out after N s`: the test command outlived its limit twice (the gate retries it
+    once). The suite needs more time on the Archon host, so raise `stack.test_timeout_seconds` in the profile (at most
+    3600).
+  - `pending` — `checks still pending after N min`: CI on the head did not finish within two 20-minute waits, usually
+    a job queued on a busy or missing runner. Check the run on GitHub, then start a new run.
+  - `flaky-after-rerun` — a check `stack.flaky_patterns` names failed again after its one `gh run rerun --failed`: the
+    failure is real or the test is flakier than one rerun covers; fix the test, or narrow or extend the patterns.
+  - `conflict` — the PR conflicts with its base. With `conflicts in <files>; the change needs a replan` the factory's
+    one rebase onto the base conflicted in those files and was aborted (the PR branch is unchanged): start a new run
+    on the card, which plans again from the current base. With `the automatic rebase failed: …` the fetch, the
+    rebase or the `--force-with-lease` push failed (someone pushed to the branch meanwhile); the PR branch is as it
+    was. A conflict that appears only at the merge (another PR merged during the gate) gets the same one rebase, then
+    `pr-state` and `merge-gate` run again on the new head; the reason then reads `merge: gh pr merge failed: …; after
+    one rebase onto <base>: …`, and `merge.log` has the step-by-step record.
+  - `preflight` — right before its commands the gate checked the profile's `stack.preflight` again and a tool, the
+    free disk or a service was missing (the run's start passed it, so it went away during the run). The reason names
+    each problem and its fix; the PR stays open. Fix it on the Archon host and start a new run: the delivery is
+    already done, so the new run gets to the merge quickly.
+- **A PR that was already merged** (a resumed second process reached the merge after the first had merged it): when
+  it was merged at the run's head (the checkout), or its merge commit brought that head into the base, the run is
+  reported delivered and deploys as usual. Otherwise (merged at another head, or the check could not fetch the base
+  or find the merge commit) `merge-gate` refuses it with `failure: the pull request is already merged, but this
+  run's head (the checkout) was not shown to be in the merge (see pr-state.log) …`. A PR into a manual base keeps the
+  `not an open, ready pull request` refusal.
 - **The agent asks for permission to push or open a PR**: check the unattended-runs exception in
   `~/.claude/CLAUDE.md`.
 - **Health is always red**: request the health URL from the Archon host with `curl -i`; check the route to the
@@ -326,16 +353,31 @@ While a gate waits for you (gate 1, gate 2 or the visual gate) the card is in `B
   with prose.
 - **The factory's own merge guard.** The factory's nodes cannot depend on nodes inside the deliver block, and the
   bundled delivery judges red with an agent. `pr-state` reads the PR, its CI checks and the checkout from GitHub and
-  git, waiting (bounded, 20 min) until the head's checks and workflow runs settle and keeping the latest run of each
-  check; `merge-gate` re-runs the profile's test and build commands on the exact PR head (verified against GitHub, with
+  git, waiting (bounded, 20 min, and once more when checks are still pending) until the head's checks and workflow
+  runs settle and keeping the latest run of each check. It is also the one node that writes to GitHub for the guard,
+  each at most once: a PR GitHub reports `CONFLICTING`, checked out clean at its head, is rebased onto
+  `<remote>/<base>` and pushed with `--force-with-lease` on the head GitHub reported (a conflicting rebase is aborted
+  and its files reported), and when every red check is a failed Actions job named by `stack.flaky_patterns` its run
+  gets one `gh run rerun --failed`, after which CI is waited for again. Fixtures stub it, so `workflow test` never
+  writes to GitHub; `merge-gate` re-runs the profile's test and build commands on the exact PR head (verified against GitHub, with
   no uncommitted changes) and `merge` runs only when it is green. The lint command runs too, unless the PR has a
   passing CI check whose name contains the word lint (`Lint`, `Rails CI / Lint`; not `Actionlint` or `ESLint`): run in
   the run's worktree, under a path that contains `.archon/`, RuboCop's excludes miss and it refused a PR whose CI Lint
-  was green. **`merge-gate` refuses any red command and any CI check whose latest run failed or was cancelled** (a
-  cancelled run superseded by a newer run is ignored), including red that the deliver block would have accepted as
+  was green. **`merge-gate` refuses any red command, any CI check whose latest run failed or was cancelled** (a
+  cancelled run superseded by a newer run is ignored) **and any check still pending after `pr-state`'s waits** (there
+  is no branch protection on the free plan to stop unfinished CI), including red that the deliver block would have accepted as
   `inherited` or `environment`; test and build run twice on the happy path. The test command runs under the profile's
   `stack.test_timeout_seconds` (default 1000 s, at most 3600 s) and once more after a timeout; lint and build have
-  1000 s each, and the `merge-gate` node timeout (9600 s) covers the worst case of all of them.
+  1000 s each, and the `merge-gate` node timeout (10800 s) covers the worst case of all of them plus the preflight's
+  1200 s: right before the commands it checks the profile's `stack.preflight` again and refuses as `preflight` when
+  the host lacks a tool, its disk or a service. When `gh pr merge`
+  then fails on a conflict that appeared after `pr-state`, `merge` runs `pr-state` (one rebase) and `merge-gate` again
+  as child processes and merges only what that gate passes, at most once; a PR already merged at the run's head passes
+  `merge-gate` as `already_merged` and `merge` only reads its merge commit. Before the commands
+  it removes ignored `__pycache__/` and `.terraform/` directories from the checkout, one exact entry from
+  `git ls-files -o -i --directory` at a time (a pathspec-limited `git clean -X` also removes `node_modules/` and
+  `.tools/`). Every refusal reason is one line that starts with its class (`pending`, `flaky-after-rerun`,
+  `failure`, `timeout`, `conflict`, `preflight`), so the report, the card comment and the Telegram message show it.
 - **The visual gate's loop (v0.12.1, PILOT-278).** A wait node must be the last node of its loop, and nothing outside
   a loop can read a node inside it. The `visual-cycle` loop therefore follows the PILOT-217 pattern of the other
   gates: its `until_bash` saves each answer to `visual-gate.decision`, `visual-gate.text` and
@@ -382,17 +424,23 @@ bash scripts/ci/check.sh archon    # install + validate + fixtures + trace asser
 `check.sh archon` downloads the pinned Archon v0.12.1 release binary into `.tools/bin/` (gitignored, sha256-checked,
 pinned in `scripts/ci/tools.sh`) and never installs it. Every Archon call in the check uses a throwaway
 `ARCHON_HOME`, so it never reads or writes your live `~/.archon`; the check first runs `archon provider add claude`
-in that home. It then runs `install.sh`, `archon workflow test factory` (nineteen fixtures; each stubs the inner nodes of
+in that home. It then runs `install.sh`, `archon workflow test factory` (twenty-four fixtures; each stubs the inner nodes of
 `archon-plan-block` and `archon-deliver-block`), and asserts on each fixture's dry-run trace: `merge-gate` executes in
 every fixture and `pr-state`, `pr-body-sync`, `review-state` and `followup-judge` are stubbed or skipped, because `workflow test factory` also runs on an operator's host
 with a real `gh`; `sync-base` is stubbed in every fixture, because it fetches and resets the checkout; `rag-context`
 executes in every fixture as a dry run (no request) before the plan, and the report records `rag_status` `dry-run`;
 `claude-auth` (before `profile-check`) and `claude-auth-scan` (before the report) run as dry runs in every fixture,
-and the claude-login-expired fixture stops at `claude-auth-stop` before the profile;
+and the claude-login-expired fixture stops at `claude-auth-stop` before the profile; `preflight` executes in every
+fixture after `load-profile` and before `sync-base`, `skipped` without a `stack.preflight` block, the
+preflight-stop-before-work fixture stops at `preflight-stop` on a missing tool before `sync-base`, and in the
+preflight-stop-before-merge-gate fixture `merge-gate` refuses as `preflight` on that tool before its test command;
 in the red fixture the delivery ends ready and `merge-gate` refuses on its own test run, so `merge` is skipped; the environment-red fixture is handed on to review and CI, defers lint to the PR's passing `Lint` check
 and merges; in the interim-verdict fixture the delivery ends `review_open`, `pr-state` and `merge-gate` are skipped,
 and the report quotes `review_open`; in the merge-refused-by-github fixture `merge` reports gh's refusal, `deploy` is
-skipped and the report carries gh's words; in the pr-body-sync-failed fixture `merge-gate` refuses the description
+skipped and the report carries gh's words; in the merge-conflict-rebased fixture the merge (stubbed as rebased once and
+merged) leads to the deploy; in the already-merged-same-head fixture `merge-gate` passes the merged PR as
+`already_merged` and the run deploys; in the already-merged-other-head fixture `merge-gate` refuses it and the run
+ends not delivered; in the pr-body-sync-failed fixture `merge-gate` refuses the description
 that could not be republished. `review-followup` executes in every fixture and passes every other delivery through;
 in the review-followup-ready fixture a round-3 `replan` whose only open blocker R6 re-raises a round-2 finding on a
 narrower case is followed up with a dry-run card and merges, and the report names the card; in the
@@ -411,10 +459,13 @@ runs the green fixture again with `pr-body-sync`, `pr-state`, `merge-gate` and `
 executing for real against the engine's own deliver output (a fake `gh` answers for the PR, a local bare repository
 is `origin`) — once with a readable merge commit, where `pr-body-sync` replaces a stale description before `pr-state`
 and the ready delivery skips `review-state` and passes `review-followup` untouched, once with one GitHub has not published yet, which must end
-`cancelled` with a report and no deploy — and four more that must each end `cancelled` with a report: a failed edit of the description, which
+`cancelled` with a report and no deploy, once already merged at the run's head, which deploys without `gh pr merge` —
+and five more that must each end `cancelled` with a report: a failed edit of the description, which
 `merge-gate` refuses, `gh pr merge`
-refusing the merge, the pull request reading back not `MERGED` after the merge, and GitHub reporting the pull request
-as conflicting with its base (refused by `merge-gate` before any merge). Then it runs it with `sync-base` executing for
+refusing the merge on a conflict (`merge` rebases once for real, the rebase conflicts and is aborted with the checkout
+unchanged), `gh pr merge` refusing it for another reason (no rebase), the pull request reading back not `MERGED` after the merge, and GitHub reporting the pull request
+as conflicting with its base (`pr-state` rebases it onto `origin/develop` for real, the rebase conflicts and is
+aborted with the checkout unchanged, and `merge-gate` refuses naming the conflicting file before any merge). Then it runs it with `sync-base` executing for
 real in a run worktree cut from `origin/main` of a scratch repository whose `develop` has diverged: the run branch must
 be at `develop` before the plan starts. It runs the green fixture once more with a UI task that names no visual
 reference: `visual-scope` executes, `abort-visual-scope` cancels the run, and neither the plan nor the delivery

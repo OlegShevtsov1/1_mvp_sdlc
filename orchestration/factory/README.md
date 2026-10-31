@@ -125,7 +125,30 @@ A full annotated example with every field is in
   for a project that has no tests yet. `test_timeout_seconds` is the merge
   gate's limit for one run of the test command, a whole number of seconds from
   1 to 3600; absent means 1000. After a timeout the test command runs once more
-  before the gate refuses with `test command timed out after N s`.
+  before the gate refuses with `timeout: test command timed out after N s`.
+  `flaky_patterns` is a list of plain, case-sensitive substrings naming known
+  flaky CI failures, empty (absent) by default. When every red check on the pull
+  request head is a failed GitHub Actions job whose name or failed-step log
+  contains one of them, the factory runs `gh run rerun <run> --failed` once and
+  waits for CI again; a check still red after that refuses as
+  `flaky-after-rerun`. Example: `flaky_patterns: ["tokenStore"]`.
+  `preflight` (optional) names what the test command needs from the Archon
+  host: `tools` (command names that must be on `PATH`), `services` (at most 8
+  `{name, tcp: "host:port", start}`; `start` is an optional shell command) and
+  `min_disk_free_pct` (0–99, absent means 20, 0 turns the disk check off). The
+  `preflight` node checks it before any work, and `merge-gate` checks it again
+  right before its commands. A service that does not answer TCP is started
+  once with its `start` command and polled for 60 s. The command must return
+  once the service is launched; it may leave it running in the background
+  (`docker compose up -d`, `redis-server &`), and one that has not returned
+  after 120 s is killed and reported. Free disk below the
+  threshold first loses the build leftovers (below) and is measured again.
+  Anything still missing stops the run with one message naming each problem
+  and its fix: before any work as `Stopped before any work: preflight: …`, at
+  the merge gate as the refusal class `preflight` with the pull request left
+  open. Without the block nothing is checked; a block whose binding reaches
+  the check unreadable fails it rather than skipping it. Steps are logged to
+  `preflight.log` (before work) and `merge-gate.log`.
 - `repo` — `remote`, `base_branch`, `merge_strategy` (`squash` | `merge` |
   `rebase`), `manual_merge_bases` — the bases whose pull requests the operator
   merges by hand. Absent means `["main"]`, so a profile whose `base_branch` is
@@ -226,19 +249,36 @@ latest body file (the run's `pr-body.md`, unless the PR opened with it and no
 round rewrote it since; else the newest `pr-body*.md`), and `merge-gate`
 refuses when it could not. The `pr-state` node then reads the pull request,
 its CI checks and the checkout, and the `merge-gate` node re-runs the profile's test and build commands on the exact
-pull request head. The lint command runs too, unless the pull request has a
+pull request head, after removing ignored `__pycache__/` and `.terraform/`
+leftovers from the checkout (only those, and only where the project ignores them) and checking the profile's
+`stack.preflight` once more (a host that lost a tool, its disk or a service refuses as `preflight`). The lint command runs too, unless the pull request has a
 passing CI check named lint, which stands in for it. The test command runs
 under the profile's `stack.test_timeout_seconds` (default 1000 s) and gets one
 retry after a timeout; lint and build have 1000 s each. On any red command, any
 CI check whose latest run on the head failed or was cancelled (`pr-state` waits up
-to 20 minutes for queued or in-progress runs first), or when the pull request is
+to 20 minutes for queued or in-progress runs first, and reruns a known flaky
+failure once, see `stack.flaky_patterns`), any check still pending after one
+more 20-minute wait, or when the pull request is
 not open and ready, is
-not what the checkout holds, or GitHub reports it as conflicting with its base,
-it refuses. The merge is skipped and the run ends `cancelled` with
-`Not delivered: merge refused (…)`: the pull request stays open and unmerged
+not what the checkout holds, or conflicts with its base, it refuses. A pull
+request GitHub reports as conflicting is first rebased once onto
+`<remote>/<base>` and pushed with `--force-with-lease` (on the head GitHub
+reported), and CI is waited for on the new head; when that rebase itself
+conflicts it is aborted and the refusal lists the conflicting files and asks for
+a replan: the next run on the card plans again from the current base. Every
+refusal reason is one line that starts with its class: `pending`,
+`flaky-after-rerun`, `failure`, `timeout`, `conflict` or `preflight` (`pr-state.log` in the
+artifacts shows every wait, rerun and rebase). The merge is skipped and the run ends `cancelled` with
+`Not delivered: merge refused (…)`: this run does not merge the pull request
 (`merge-gate.log` in the artifacts shows the checks). When `gh pr merge` itself
-refuses, the run ends the same way, with gh's message in
-`Not delivered: merge refused (…)`. A delivery
+refuses because the pull request became conflicting after `pr-state` (another
+pull request merged during the gate), the merge node rebases it once and runs
+`pr-state` and `merge-gate` again on the new head before it merges
+(`merge.log` shows each step). Any other refusal of `gh pr merge`, or a second
+one, ends the run the same way, with gh's message in
+`Not delivered: merge refused (…)`. A pull request already merged at the run's
+head (a resumed second process found the first had merged it) is reported
+delivered and deployed; merged at another head it is refused. A delivery
 that fails before a mergeable pull request also ends `cancelled` with a report.
 
 A pull request whose base is listed in `repo.manual_merge_bases` is not merged
@@ -291,7 +331,7 @@ bash scripts/ci/check.sh factory
 The unit tests include the Trello card reference parser, the move for every
 point of the run, and the Trello calls against a stubbed `fetch`.
 
-Install, validation, the nineteen dry-run fixtures with trace assertions (each
+Install, validation, the twenty-four dry-run fixtures with trace assertions (each
 Trello move at its node, in dry-run mode, with no network), a run in
 which `sync-base` moves a run worktree cut from a diverged default branch to
 `develop`, a run in which a UI task without a visual reference stops before

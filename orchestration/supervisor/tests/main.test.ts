@@ -102,7 +102,7 @@ describe("loadPolicy", () => {
   test("loadPolicy reads the shipped policy and rejects a file without version", () => {
     expect(loadPolicy(POLICY).rules).toContainEqual(expect.objectContaining({ id: "transient-resume" }));
     expect(Object.keys(gateRules(loadPolicy(POLICY).rules)).sort())
-      .toEqual(["install-gate", "plan-gate"]);
+      .toEqual(["install-gate", "plan-gate", "post-merge-allowlist"]);
     const bad = join(dir, "bad.yaml");
     writeFileSync(bad, "rules: []\n");
     expect(() => loadPolicy(bad)).toThrow();

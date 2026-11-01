@@ -1,9 +1,9 @@
 {
   "repo": "1_mvp_sdlc",
   "source_ref": "origin/main",
-  "source_sha": "6565fd525d28caf95d0eb8fc3a6d45d4a950798e",
-  "mirror_sha": "98a6841c42e433bbf5aa628196f4e6b1becbf686",
-  "synced_at": "2026-11-01T07:59:41Z",
+  "source_sha": "f2e2a146f92b58efb2229f476d190f846f9edde7",
+  "mirror_sha": "f11ea2f81f56629a1965d607b919daad74be157a",
+  "synced_at": "2026-11-01T13:33:45Z",
   "tags": [
     {
       "tag": "v0.2.0",
@@ -58,6 +58,12 @@
       "primary_sha": "6565fd525d28caf95d0eb8fc3a6d45d4a950798e",
       "mirror_sha": "98a6841c42e433bbf5aa628196f4e6b1becbf686",
       "synced_at": "2026-11-01T07:59:41Z"
+    },
+    {
+      "tag": "v0.9.4",
+      "primary_sha": "f2e2a146f92b58efb2229f476d190f846f9edde7",
+      "mirror_sha": "f11ea2f81f56629a1965d607b919daad74be157a",
+      "synced_at": "2026-11-01T13:33:45Z"
     }
   ]
 }

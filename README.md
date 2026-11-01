@@ -62,10 +62,10 @@ This repository is the Claude Code plugin marketplace `mvp` (`.claude-plugin/mar
 - `orchestration/workflows/` holds the single-file workflows `plan-review` and `plugin-probe`.
 - `orchestration/supervisor/` is the `sdlc-autopilot` supervisor (E2). It reads Archon's run state read-only and
   records one ledger line per decision in `~/.local/state/sdlc-autopilot/ledger.jsonl`. By its `policy.yaml` it
-  answers routine plan and install gates and escalates every other pause, post-merge gates included; a failed run
-  with a transient error is resumed with backoff by the `transient-resume` rule. It also asks `gh` which PRs of finished
-  factory runs are merged and launches `post-merge` once for each, detached, with one ledger line per launch. It
-  starts the factory briefs queued in `~/.config/sdlc-autopilot/queue/<repo>/` within its run limits and host
+  answers routine plan and install gates and escalates every other pause, post-merge gates included, except release
+  steps its `post-merge-allowlist` approves; a failed run with a transient error is resumed with backoff by the
+  `transient-resume` rule. It also asks `gh` which PRs of finished factory runs are merged and launches `post-merge`
+  once for each, detached, with one ledger line per launch. It starts the factory briefs queued in `~/.config/sdlc-autopilot/queue/<repo>/` within its run limits and host
   threshold, and once a day removes test leftovers older than 24 h; its
   [README](orchestration/supervisor/README.md) describes each rule.
 - `./install.sh` installs all of them into `~/.archon/workflows`, backing up what it replaces, and validates them.
@@ -107,8 +107,10 @@ on the next run: [docs/project-add.md](docs/project-add.md).
 - `main` is the released plugins and factory. It stays the default branch, which marketplace consumers read; install
   the factory from `main`.
 - A release is a PR `develop → main`, titled `PILOT-<n>: Release vX.Y.Z` with the release's own card (decision
-  91), whose body carries `## Changelog` with the version's section of [CHANGELOG.md](CHANGELOG.md); the operator
-  merges it with a merge commit, followed by an annotated tag `vX.Y.Z` equal to the `mvp-sdlc` version in
+  91), whose body carries `## Changelog` with the version's section of [CHANGELOG.md](CHANGELOG.md). The post-merge
+  run of the release-prep PR merges it with a merge commit through `scripts/release.sh`
+  ([scripts/release.README.md](scripts/release.README.md)), approved by the supervisor's release allowlist, followed by
+  the annotated tag `vX.Y.Z` from `release.sh tag`, equal to the `mvp-sdlc` version in
   `plugins/mvp-sdlc/.claude-plugin/plugin.json`.
 - Every change goes through a PR, no direct pushes (decision 54). `pr-conventions-check.yml` checks the branch name,
   the `PILOT-<n>: …` title and the single `Type:` line of every PR into `develop` and `main`, and that a release PR

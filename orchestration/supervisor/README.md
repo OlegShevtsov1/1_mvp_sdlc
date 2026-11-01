@@ -30,8 +30,8 @@ briefs (PILOT-511). This README describes the gate rules, post-merge launches an
 
 `~/.local/state/sdlc-autopilot/ledger.jsonl` (override: `SDLC_AUTOPILOT_LEDGER`) gets one JSON line per decision:
 `{ts, run_id, workflow, kind, rule, action, evidence: {event_id, node, text, message}}`. `rule` names the rule that
-decided; `action` of a gate decision is `approve`, `retry` or `escalate`; for `approve` and `retry` it records that the
-respond was dispatched, not its outcome. `evidence.text` is the pause or error text Archon shows, and
+decided; `action` of a gate decision is `approve` (`plan-gate`, `post-merge-allowlist`), `retry` or `escalate`; for
+`approve` and `retry` it records that the respond was dispatched, not its outcome. `evidence.text` is the pause or error text Archon shows, and
 `evidence.message` the decision's own text for the operator, the reason of an escalation. An answer the operator gave
 through a Telegram button is a line with `rule: operator` and the pause's decision as `action`: `approve`, `retry`,
 `skip` or `abort`.
@@ -55,23 +55,44 @@ id it logs `Telegram disabled` at start and sends nothing. The token is never wr
 or the journal: every Telegram error is logged with the token masked.
 
 After its decisions, each tick sends every `escalate` ledger line of the last 24 h that it has not sent yet, whichever
-part of the supervisor wrote it: `Прогін`, `Крок` and `Причина` (`evidence.message`, else `evidence.text`), plain text
-without markup. A line counts as sent once Telegram accepted it, so a send that fails is retried on the next tick; a
-crash right after a send can send that one message again. When the line is about the run's open pause, the message
-also carries the pause text and one button per decision the pause itself declares — `approve`/`skip`/`abort` on a
-post-merge gate, `retry`/`abort` on an install gate, `approve`/`abort` on a plan gate (`needs-revision` needs a
-feedback text and stays an `archon workflow respond` by hand).
+part of the supervisor wrote it. A line counts as sent once Telegram accepted it, so a send that fails is retried on
+the next tick; a crash right after a send can send that one message again. The message is HTML in plain Ukrainian,
+built by fixed rules in `src/humanize.ts`:
+
+- one header, `🟡 Потрібне твоє рішення: …`, naming the release (`реліз sdlc v0.9.3`, from the PR title post-merge's
+  `fetch` read), the card (`PILOT-<n>: …`) or else the workflow and repository;
+- the step in words: `Крок <n> з <last>: <title>` on a post-merge gate (the plan's own step numbers, the last one from
+  the run's `steps.json`), `План задачі готовий до перевірки` on a plan gate, `Встановлення чекає, поки завершиться
+  прогін фабрики` on an install gate;
+- `Що сталося:` — one sentence by pause type, with the value a failed check observed when it can be read (`GitHub
+  відповів "не знайдено"` for HTTP 404, `команда завершилась з кодом N`);
+- `Що рекомендую:` only where a rule gives one (a checkout step, an install gate out of retries);
+- the original pause text in a collapsed block, without the pack's own header, the `$ARTIFACTS_DIR` lines and the
+  decision legend; the block is cut with `…` so the message stays under Telegram's 4096 characters.
+
+When the line is about the run's open pause, the message carries one button per decision the pause itself declares:
+`✅ Прийняти` (`✅ Готово` on a checkout step), `⏭ Пропустити крок`, `⛔ Зупинити`, `🔁 Чекати ще`. The plan gate's
+`needs-revision` needs a feedback text and stays an `archon workflow respond` by hand.
 
 A button press runs `archon workflow respond <run-id> <decision> <text> --occurrence <pause-id>` the way a policy
-answer does, writes the `rule: operator` ledger line and replaces the buttons with the answer. It is answered only on
-the pause the message was sent for, while that pause is still open, once, and only with a decision of that pause; a
-respond that cannot start is escalated again with the buttons. `/status` in the chat answers with a digest: the
-running runs, the runs waiting for the operator, the queued briefs and the next one to start. Updates are read once
-per tick with `getUpdates`, so an answer takes up to 30 s, and only from the operator's chat; updates from any other
-chat are dropped without a reply. Another `getUpdates` reader of the same bot, such as a manual topic lookup with
-`curl`, takes the updates away from the supervisor while it runs.
+answer does and writes the `rule: operator` ledger line. It is answered only on the pause the message was sent for,
+while that pause is still open, once, and only with a decision of that pause; a respond that cannot start is escalated
+again with the buttons. Once the pause is answered — by a button, outside Telegram (`approval_received` or
+`wait_answered` in Archon's events), or because the run moved on — the message is edited once: it keeps its text, gets
+`✅ Вирішено: прийнято|пропущено|зупинено|продовжено (кнопкою|поза Telegram)` and loses its buttons. `/status` in the chat answers with a digest: the
+running runs, the runs waiting for the operator, the queued briefs and the next one to start, as of the last tick.
 
-The update offset, the sent lines and the messages with open buttons are kept in
+Updates are read by their own loop next to the tick, by `getUpdates` long polling (25 s), so a press arrives within
+about a second, and only from the operator's chat; updates from any other chat are dropped without a reply. Every
+press is answered at once, within Telegram's ~15 s window for a button, with a toast: `✅ Прийнято, виконую`,
+`⏭ Пропускаю крок`, `⛔ Зупиняю` or `🔁 Чекаю далі`, then the respond runs. Only the first press on an open pause
+acts; a press on a pause that is no longer open or was already answered gets `Це питання вже вирішене`, and a button
+the pause does not declare `Кнопка вже не діє`. A press whose run or ledger could not be read gets
+`⚠️ Не вдалося прочитати стан — натисніть ще раз` and keeps its buttons. A failed poll is retried after 5 s, 15 s, then every 60 s, without
+holding back the tick. Another `getUpdates` reader of the same bot, such as a manual topic lookup with `curl`, makes
+the loop's polls fail (Telegram answers `409 Conflict`) and takes the updates away from the supervisor while it runs.
+
+The update offset, the sent lines and the messages with open buttons (with the HTML each was sent with) are kept in
 `~/.local/state/sdlc-autopilot/telegram.json`, next to the ledger. Deleting it re-sends the escalations of the last
 24 h.
 
@@ -152,11 +173,57 @@ every 15 minutes. Field: `max_retries` (4, ≈1 h).
 
 ### post-merge-gate
 
-A post-merge step that needs a person always goes to the operator. Every post-merge gate escalates with rule
-`post-merge-gate` — 🔒 (`Тип: approval`), `checkout`, `mismatch` and `manual` alike — naming the step's `Крок:` label
-and its `Тип`. An `approved-by: decision-<N>` marker is not honoured, because no list of destructive words can be
-complete (operator decision, PILOT-509 round 3); its Telegram message's buttons answer it. The rule has no fields
-and no `policy.yaml` entry.
+A post-merge gate escalates with rule `post-merge-gate` unless [`post-merge-allowlist`](#post-merge-allowlist)
+approves it, naming the step's `Крок:` label and its `Тип`, and in parentheses why the allowlist did not approve it.
+`checkout` and `mismatch` gates always escalate. An `approved-by: decision-<N>` marker is not honoured; its Telegram
+message's buttons answer it. The rule has no fields and no `policy.yaml` entry.
+
+### post-merge-allowlist
+
+Approves a release step whose only write is one line of [`scripts/release.sh`](../../scripts/release.README.md).
+Fields: `repo` (`owner/name`: only runs whose worktree is in this repo's Archon workspace are judged) and
+`subcommands` (a non-empty subset of `merge-release-pr`, `tag`, `mirror`, `install`, `verify`, the subcommands
+`release.sh` has; `policy.yaml` can narrow the list, never extend it). The step is read from the run's own
+`<ARCHON_HOME>/workspaces/<repo>/artifacts/runs/<run_id>/steps.json`, by the number in the pause's `Крок: <n> — …`:
+the commands the PR author wrote, never the agent's ledger prose.
+
+| Situation | Decision |
+| --- | --- |
+| The rule is missing, `Тип` is not `approval` or `manual` (`mismatch`, `checkout`), or the run is in another repo | escalate |
+| The step cannot be read from `steps.json` | escalate |
+| The ledger already has a `post-merge-allowlist` approve for this run and step | escalate |
+| The step text is not the bold title, exactly one fenced block (`bash`, `sh`, `shell` or none) and, from `Expected:` on, list items | escalate |
+| A command is unparsable, denied, or not on the allowlist, or the block does not have exactly one release line | escalate, naming the command |
+| Otherwise | approve with `Approved by sdlc-autopilot policy post-merge-allowlist: <command> → <entry>; …` |
+
+The block is read line by line, `\`-continuations joined, blank and `#` lines dropped, and split into commands on
+`;`, `&&`, `||` and `|`, quotes removed. A line is unparsable when it has a command substitution (`` ` `` or `$(`),
+a subshell or group (`(`, `{`), a redirection other than `2>&1`, `>/dev/null`, `2>/dev/null` and `&>/dev/null`, a
+glob, a lone `&`, `$` outside double quotes (`$?` aside) or an unclosed quote. Every word of every command is
+checked against `rm`, `rmdir`, `reset`, `delete`, `destroy`, `--delete`, `-f`, `-rf`, `-fr`, `-Rf` and anything
+containing `--force`. A word with a variable reaches a command other than `echo`, `test`, `grep`, `jq` and `cat` only
+when the whole word is `$?` or `"$NAME"` of a name the step assigned; `"$A--output=x"` or `"-$X"` could be any flag.
+Each command must then be one of:
+
+| Entry | Command |
+| --- | --- |
+| `release.sh <subcommand>` | exactly `bash scripts/release.sh <subcommand> v<X.Y.Z>`, `<subcommand>` in `subcommands`; exactly one per step |
+| `cd run worktree` | exactly `cd <the run's worktree>` |
+| `assignment` | only `NAME=value` words, with a short local name (one to three letters or digits, not `IFS`, `ENV`, `PWD`, `TMP` or `PS1`–`PS4`) and a value that is `$?` or a literal that does not start with `-`: an assignment to `PATH`, `BASH_ENV` or `GIT_*` would change what the release line runs |
+| `read-only <name>` | `gh pr view\|list\|checks`; `gh api` without a method other than `GET` and without `-F`, `-f`, `--field`, `--raw-field` or `--input`; `git fetch\|log\|rev-parse\|show\|diff\|status` directly after `git` and without an option that abbreviates `--output`, `--upload-pack` or `--exec`; `echo`, `test`, `grep`, `jq`, `cat` |
+
+The approve text is the ledger line's `evidence.message`, so the ledger names the matched entry of every command. The
+matcher is `src/allowlist.ts`; `policy.yaml` lists the entries for the operator.
+
+A step is approved at most once per run: a step that pauses again after its approve (an `install` that still waits
+for factory runs, say) goes to the operator instead of running again.
+
+Design note: on 2026-11-01 the operator decided that the supervisor approves routine release steps by itself
+(PILOT-545). This replaces PILOT-509 round 3, under which every post-merge gate escalated because no list of
+destructive words can be complete. That reason still holds for free step text, so free text is never approved:
+the real v0.9.x steps used `cd`, `$(…)`, subshells, loops, `rm -rf` and `worktree remove --force`, and no argv
+allowlist can judge them. The release logic moved into reviewed, tested code instead (`scripts/release.sh`), and an
+approve covers only a step whose one write is a line of it. The `approved-by` marker is still not honoured.
 
 ### default-escalate
 

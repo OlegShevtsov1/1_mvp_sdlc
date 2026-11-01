@@ -78,6 +78,17 @@ const PLAN_SQL = `SELECT data FROM remote_agent_workflow_events
     AND event_order < ?
   ORDER BY event_order DESC LIMIT 1`;
 
+// Post-merge's `fetch` names the PR the run delivers; Archon also replays it as `node_skipped_prior_success` on resume.
+const FETCH_SQL = `SELECT data FROM remote_agent_workflow_events
+  WHERE workflow_run_id = ? AND event_type = 'node_completed' AND step_name = 'fetch'
+  ORDER BY event_order DESC LIMIT 1`;
+
+// An answer given anywhere (CLI, web, a respond) follows the pause it answers as the run's next answer event.
+const ANSWER_SQL = `SELECT data FROM remote_agent_workflow_events
+  WHERE workflow_run_id = ? AND event_type IN ('approval_received', 'wait_answered')
+    AND event_order > (SELECT event_order FROM remote_agent_workflow_events WHERE id = ?)
+  ORDER BY event_order LIMIT 1`;
+
 const KINDS: Record<string, PauseKind> = {
   "factory/plan-gate": "plan-gate",
   "post-merge/install-gate": "install-gate",
@@ -158,6 +169,23 @@ function readPlan(db: Database, runId: string, before: number): Pause["plan"] {
   return { ready: plan.ready, openQuestions: questions };
 }
 
+// The PR title post-merge's `fetch` read, "" when the run has none.
+export function readFetchTitle(db: Database, runId: string): string {
+  const row = db.query(FETCH_SQL).get(runId) as { data: string | null } | null;
+  const output = data(row ?? undefined).node_output;
+  const title = parse(typeof output === "string" ? output : undefined).title;
+  return typeof title === "string" ? title : "";
+}
+
+// The decision that answered pause event `eventId`: a gate's `approved|skip|abort|retry|needs-revision|rejected`, or a
+// wait's chosen option; undefined while nothing answered it.
+export function readAnswer(db: Database, runId: string, eventId: string): string | undefined {
+  const row = db.query(ANSWER_SQL).get(runId, eventId) as { data: string | null } | null;
+  const answer = data(row ?? undefined);
+  const decision = answer.decision ?? answer.answer?.decision;
+  return typeof decision === "string" ? decision : undefined;
+}
+
 // A wait leaves no text event; Archon keeps the rendered text in metadata.wait until the wait is answered.
 function waitMessage(run: RunRow): string {
   const wait = parse(run.metadata).wait as { message?: unknown } | undefined;
@@ -178,6 +206,8 @@ type EventData = {
   message?: unknown;
   error?: string;
   reason?: string;
+  decision?: unknown;
+  answer?: { decision?: unknown };
 };
 
 function data(e: { data: string | null } | undefined): EventData {

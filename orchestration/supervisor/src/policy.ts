@@ -1,19 +1,28 @@
 import type { Decision } from "./act.ts";
+import { isReleaseSubcommand, matchReleaseStep, type ReleaseSubcommand, readStep } from "./allowlist.ts";
+import { readLedger } from "./ledger.ts";
 import type { Policy } from "./main.ts";
-import type { Pause, RunView } from "./runs.ts";
+import { type Pause, repoOf, type RunView } from "./runs.ts";
 
 export type GateRules = {
   "plan-gate"?: { approve_text: string; open_question_prefix: string };
   "install-gate"?: { max_retries: number };
+  "post-merge-allowlist"?: { repo: string; subcommands: ReleaseSubcommand[] };
 };
 
 const OPERATOR = "потрібне рішення оператора.";
+// The install gate's out-of-retries reason starts with this; the Telegram wording recognises it by it.
+export const INSTALL_WAIT_EXHAUSTED = "Встановлення чекає вже після";
 
 const isText = (v: unknown): v is string => typeof v === "string" && v !== "";
 
 const SHAPES: { [K in keyof GateRules]-?: (r: Record<string, unknown>) => boolean } = {
   "plan-gate": (r) => isText(r.approve_text) && isText(r.open_question_prefix),
   "install-gate": (r) => Number.isInteger(r.max_retries) && (r.max_retries as number) >= 0,
+  "post-merge-allowlist": (r) =>
+    typeof r.repo === "string" && /^[^/\s]+\/[^/\s]+$/.test(r.repo) && Array.isArray(r.subcommands) &&
+    r.subcommands.length > 0 && r.subcommands.every(isReleaseSubcommand) &&
+    new Set(r.subcommands).size === r.subcommands.length,
 };
 
 const isGate = (id: unknown): id is keyof GateRules => typeof id === "string" && Object.hasOwn(SHAPES, id);
@@ -38,7 +47,7 @@ export function decide(run: RunView, policy: Policy, ctx: { activeFactoryRuns: s
   const gates = gateRules(policy.rules);
   if (pause.kind === "plan-gate" && gates["plan-gate"]) return planGate(pause, gates["plan-gate"]);
   if (pause.kind === "install-gate" && gates["install-gate"]) return installGate(pause, gates["install-gate"], ctx);
-  if (pause.kind === "post-merge-gate") return postMergeGate(pause);
+  if (pause.kind === "post-merge-gate") return postMergeGate(run, pause, gates["post-merge-allowlist"]);
   return {
     action: "escalate",
     rule: "default-escalate",
@@ -75,7 +84,7 @@ function installGate(
   }
   if (pause.iteration - 1 >= rule.max_retries) {
     return escalate(id,
-      `Встановлення чекає вже після ${rule.max_retries} retry (≈1 год), factory досі активний: ${line} — ${OPERATOR}`);
+      `${INSTALL_WAIT_EXHAUSTED} ${rule.max_retries} retry (≈1 год), factory досі активний: ${line} — ${OPERATOR}`);
   }
   return {
     action: "retry",
@@ -84,12 +93,29 @@ function installGate(
   };
 }
 
-// A post-merge step that needs a person always gets one: no list of destructive words can be complete, so no
-// 🔒 step is approved by marker, and checkout and mismatch steps are the operator's too.
-function postMergeGate(pause: Pause): Decision {
-  const field = (name: string) =>
-    pause.text.split("\n").find((l) => l.startsWith(`${name}: `))?.slice(name.length + 2).trim() ?? "";
-  const step = field("Крок").slice(0, 200) || pause.node;
-  return escalate("post-merge-gate",
-    `Крок post-merge «${step}» (тип ${field("Тип") || "невідомий"}) схвалює лише оператор — ${OPERATOR}`);
+const ALLOWLIST = "post-merge-allowlist";
+const STEP_NUMBER = /^(\S+) — /;
+
+const field = (text: string, name: string) =>
+  text.split("\n").find((l) => l.startsWith(`${name}: `))?.slice(name.length + 2).trim() ?? "";
+
+// A post-merge step goes to the operator unless it is a release step the allowlist approves (operator decision
+// 2026-11-01, PILOT-545, replacing PILOT-509's every-step escalation); checkout and mismatch steps always do.
+function postMergeGate(run: RunView, pause: Pause, rule: GateRules["post-merge-allowlist"]): Decision {
+  const step = field(pause.text, "Крок").slice(0, 200) || pause.node;
+  const type = field(pause.text, "Тип");
+  const operator = (reason?: string) => escalate("post-merge-gate",
+    `Крок post-merge «${step}» (тип ${type || "невідомий"}) схвалює лише оператор${reason ? ` (${reason})` : ""} — ${OPERATOR}`);
+  if (!rule || (type !== "approval" && type !== "manual") || repoOf(run.cwd) !== rule.repo) return operator();
+  const n = field(pause.text, "Крок").match(STEP_NUMBER)?.[1];
+  const definition = n === undefined ? undefined : readStep(run.id, run.cwd, n);
+  if (n === undefined || !definition) return operator("визначення кроку не прочитано");
+  // A step that pauses again after its approve (a busy install, say) would otherwise be approved, and run, each time.
+  const approvedBefore = readLedger().some((e) => e.run_id === run.id && e.rule === ALLOWLIST &&
+    e.action === "approve" && field(e.evidence?.text ?? "", "Крок").match(STEP_NUMBER)?.[1] === n);
+  if (approvedBefore) return operator("крок уже раз схвалено автоматично");
+  const match = matchReleaseStep(definition.text, { cwd: run.cwd, subcommands: rule.subcommands });
+  if (!match.ok) return operator(match.reason);
+  const evidence = match.matched.map((m) => `${m.command} → ${m.entry}`).join("; ");
+  return { action: "approve", rule: ALLOWLIST, text: `Approved by sdlc-autopilot policy ${ALLOWLIST}: ${evidence}` };
 }

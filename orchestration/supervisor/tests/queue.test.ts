@@ -243,7 +243,7 @@ describe("queue", () => {
     brief("1_mvp_sdlc", "PILOT-621.md", "PILOT-621: edit docs/x.md");
     const q = fake();
     const postMerge: PostMergeDeps = {
-      mergedPrs: (repo) => (repo === "OlegShevtsov1/1_mvp_prompt" ? [{ url: pr, title: "PILOT-7: something" }] : []),
+      mergedPrs: (repo) => (repo === "OlegShevtsov1/1_mvp_prompt" ? [{ url: pr, title: "PILOT-7: something", mergedAt: "2026-11-01T07:00:00Z" }] : []),
       launch: q.launch,
       host: q.host,
     };

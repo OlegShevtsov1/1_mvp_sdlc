@@ -24,7 +24,7 @@ existed before the supervisor started are judged on its first tick.
 
 A failed run is not a pause: the `transient-resume` rule resumes it with backoff or escalates it (PILOT-508). After
 the pauses, the tick launches `post-merge` for merged PRs of finished factory runs (PILOT-510), then starts queued
-briefs (PILOT-511). This README describes the gate rules and the queue.
+briefs (PILOT-511). This README describes the gate rules, post-merge launches and the queue.
 
 ## The ledger
 
@@ -74,6 +74,21 @@ chat are dropped without a reply. Another `getUpdates` reader of the same bot, s
 The update offset, the sent lines and the messages with open buttons are kept in
 `~/.local/state/sdlc-autopilot/telegram.json`, next to the ledger. Deleting it re-sends the escalations of the last
 24 h.
+
+## Post-merge launches
+
+The tick looks at the factory runs that finished (completed or cancelled) in the last 14 days and whose report has a
+`pr_url`, and asks `gh` which of those PRs are merged. A merged PR is owed one `post-merge` run only when GitHub merged
+it at or after the cutoff: `post_merge.since` in `policy.yaml` (an ISO timestamp with `Z` or `±hh:mm`; any other value
+stops the supervisor at start), else the supervisor's first start. The first start is written once to
+`~/.local/state/sdlc-autopilot/state.json` (`first_start`) on the first tick and never moved; deleting the file makes
+the next start the cutoff. So enabling the supervisor never re-runs post-merge for PRs merged before.
+
+A PR is not launched again when the ledger already has its launch, or when any `post-merge` run, failed ones included,
+names it: by a `github.com/<owner>/<repo>/pull/<n>` URL anywhere in its message, by `<owner>/<repo>#<n>`, or by a
+`#<n>`, `pr=<n>` or `pr=#<n>` token in a run whose working path is in the same repo. A PR in a repo outside the
+supervisor's bounds escalates once (`post-merge-forbidden-repo`), and so does one whose title has no `PILOT-<n>:`
+prefix (`post-merge-no-card`) or whose launch fails (`post-merge-launch-failed`). A launch waits for the limits below.
 
 ## Queue and limits
 

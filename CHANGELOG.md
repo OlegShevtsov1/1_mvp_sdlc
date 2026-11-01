@@ -23,6 +23,27 @@ release pull request `PILOT-<n>: Release vX.Y.Z` carries that section under `## 
 
 ### Security
 
+## [0.9.2] - 2026-11-01
+
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- `publish-mirror` judges each check of the mirror PR by its newest run, so a run cancelled because publish-mirror's own
+  title edit superseded it no longer counts as red and blocks the merge; a cancelled newest run still does (PILOT-528).
+- The `sdlc-autopilot` supervisor launches `post-merge` only for PRs merged at or after `post_merge.since` in its
+  `policy.yaml` (set to 2026-11-01 06:00 UTC), else its first start, kept in `~/.local/state/sdlc-autopilot/state.json`,
+  so enabling it no longer re-runs post-merge for PRs merged before; a `post-merge` run naming the PR by URL,
+  `owner/repo#n` or `#n` in its repo suppresses the launch (PILOT-533).
+
+### Security
+
 ## [0.9.1] - 2026-11-01
 
 ### Added

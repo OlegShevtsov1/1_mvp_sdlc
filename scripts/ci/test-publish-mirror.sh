@@ -62,6 +62,7 @@ fake_prs() { cat "${tmp}/gh-state/prs.json" 2>/dev/null || echo '[]'; }
 # The fake gh: `auth token -u OlegShevtsov1` and `api -X <M> repos/OlegShevtsov1/<repo>/<path> -f k=v...` for the
 # four PR endpoints; every invocation is logged to calls.log. Any other auth subcommand (switch) exits 99; an api
 # call without the mirror token or outside the mirror exits 98. FAKE_GH_CHECKS: success | failure | pending.
+# FAKE_GH_CHECK_RUNS=<file>: the check runs, a JSON array, instead.
 # FAKE_GH_MERGE=squash makes the merge a squash commit instead of a merge commit.
 mkdir -p "${tmp}/fakegh"
 cat > "${tmp}/fakegh/gh" <<'PY'
@@ -107,10 +108,15 @@ elif method == "PATCH" and rest.startswith("pulls/"):
     save()
     print(json.dumps(pr))
 elif method == "GET" and rest.endswith("/check-runs"):
-    conclusion = os.environ.get("FAKE_GH_CHECKS", "success")
-    second = {"pending": {"status": "in_progress", "conclusion": None}}.get(
-        conclusion, {"status": "completed", "conclusion": conclusion})
-    runs = [{"name": "CI", "status": "completed", "conclusion": "success"}, {"name": "PR conventions", **second}]
+    if os.environ.get("FAKE_GH_CHECK_RUNS"):
+        with open(os.environ["FAKE_GH_CHECK_RUNS"]) as f:
+            runs = json.load(f)
+    else:
+        conclusion = os.environ.get("FAKE_GH_CHECKS", "success")
+        second = {"pending": {"status": "in_progress", "conclusion": None}}.get(
+            conclusion, {"status": "completed", "conclusion": conclusion})
+        runs = [{"id": 1, "name": "CI", "status": "completed", "conclusion": "success"},
+                {"id": 2, "name": "PR conventions", **second}]
     print(json.dumps({"total_count": len(runs), "check_runs": runs}))
 elif method == "PUT" and rest.endswith("/merge"):
     pr = prs[int(rest.split("/")[1]) - 1]
@@ -313,6 +319,71 @@ grep -qF "timed out" <<<"${err}" || fail "timeout" "stderr: ${err}"
 [ "$(mirror_head)" = "${seed}" ] || fail "timeout" "mirror main moved"
 if calls | grep -qF '"PUT"'; then fail "timeout" "merge was called"; fi
 echo "PASS pending checks time out without a merge"
+
+# --- each check is judged by its newest run
+# check_runs <name> <json>: writes the check runs fixture, a CI success run plus <json>, and prints its path.
+check_runs() {
+  printf '[{"id": 1, "name": "CI", "status": "completed", "conclusion": "success",
+    "started_at": "2026-11-01T02:43:40Z", "completed_at": "2026-11-01T02:44:10Z"}, %s]\n' "$2" >"${tmp}/$1.json"
+  echo "${tmp}/$1.json"
+}
+# conventions_run <id> <status> <conclusion|null> <started_at> <completed_at|null>: one PR conventions run as JSON.
+conventions_run() {
+  local conclusion=null completed=null
+  [ "$3" = null ] || conclusion="\"$3\""
+  [ "$5" = null ] || completed="\"2026-11-01T$5Z\""
+  printf '{"id": %s, "name": "PR conventions", "status": "%s", "conclusion": %s, "started_at": "2026-11-01T%sZ", "completed_at": %s}' \
+    "$1" "$2" "${conclusion}" "$4" "${completed}"
+}
+expect_no_merge() {
+  local name=$1 want=$2
+  [ "${rc}" -eq 3 ] || fail "${name}" "exit ${rc}, want 3: ${err}"
+  grep -qF "${want}" <<<"${err}" || fail "${name}" "stderr does not say ${want}: ${err}"
+  [ "$(mirror_head)" = "${seed}" ] || fail "${name}" "mirror main moved"
+  if calls | grep -qF '"PUT"'; then fail "${name}" "merge was called"; fi
+}
+
+cancelled=$(conventions_run 2 completed cancelled 02:43:46 02:43:52)
+
+new_fixture
+seed=$(mirror_head)
+runs_file=$(check_runs superseded "$(conventions_run 3 completed success 02:43:51 02:44:20), ${cancelled}")
+FAKE_GH_CHECK_RUNS=${runs_file} publish 1_mvp_pilot_be
+[ "${rc}" -eq 0 ] || fail "superseded cancelled" "exit ${rc}: ${err}"
+[ "$(mirror_head)" != "${seed}" ] || fail "superseded cancelled" "mirror main did not move"
+[ "$(git -C "${tmp}/mirror.git" rev-parse main^2)" = "$(mirror_develop)" ] ||
+  fail "superseded cancelled" "main is not the merge of develop"
+calls | grep -qF '"PUT"' || fail "superseded cancelled" "merge was not called"
+
+new_fixture
+seed=$(mirror_head)
+older_cancelled_higher_id=$(conventions_run 3 completed cancelled 02:43:46 02:43:52)
+runs_file=$(check_runs rerun-lower-id "$(conventions_run 2 completed success 02:43:51 02:44:20), ${older_cancelled_higher_id}")
+FAKE_GH_CHECK_RUNS=${runs_file} publish 1_mvp_pilot_be
+[ "${rc}" -eq 0 ] || fail "newest by time, not id" "exit ${rc}: ${err}"
+calls | grep -qF '"PUT"' || fail "newest by time, not id" "merge was not called"
+
+new_fixture
+seed=$(mirror_head)
+runs_file=$(check_runs lone "${cancelled}")
+FAKE_GH_CHECK_RUNS=${runs_file} publish 1_mvp_pilot_be
+expect_no_merge "lone cancelled" "checks failed: PR conventions"
+
+new_fixture
+seed=$(mirror_head)
+older_success=$(conventions_run 2 completed success 02:43:46 02:44:00)
+runs_file=$(check_runs newer-failure "${older_success}, $(conventions_run 3 completed failure 02:43:51 02:44:20)")
+FAKE_GH_CHECK_RUNS=${runs_file} publish 1_mvp_pilot_be
+expect_no_merge "newer failure" "checks failed: PR conventions"
+
+new_fixture
+seed=$(mirror_head)
+older_failure=$(conventions_run 2 completed failure 02:43:46 02:44:00)
+runs_file=$(check_runs pending "${older_failure}, $(conventions_run 3 in_progress null 02:43:51 null)")
+FAKE_GH_CHECK_RUNS=${runs_file} publish 1_mvp_pilot_be
+expect_no_merge "pending newest" "timed out"
+if grep -qF "checks failed" <<<"${err}"; then fail "pending newest" "an older failure counted: ${err}"; fi
+echo "PASS each check is judged by its newest run"
 
 # release_tag_fixture: an annotated v0.2.0 on the primary main whose message has the primary login, on the
 # release-prep commit of card PILOT-165, and as negatives a lightweight v0.3.0 on main and an annotated v9.9.9 on

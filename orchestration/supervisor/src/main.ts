@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { type Decision, respond } from "./act.ts";
 import { housekeep } from "./housekeeping.ts";
 import { alreadyActed, appendLedger, readLedger } from "./ledger.ts";
-import { launchPostMerges, type PostMergeDeps, realPostMergeDeps } from "./postmerge.ts";
+import { launchPostMerges, parseSince, type PostMergeDeps, postMergeCutoff, realPostMergeDeps } from "./postmerge.ts";
 import { decide, gateRules } from "./policy.ts";
 import { inFlight, nextTasks, type QueueDeps, realQueueDeps, startQueued } from "./queue.ts";
 import { activeRuns, type Host, limits, readHost } from "./resources.ts";
@@ -13,7 +13,7 @@ import { OPEN_STATUSES, type RunView, readRuns } from "./runs.ts";
 import { digest, type OperatorAnswer, realTelegramDeps, type TelegramDeps, telegramStatus } from "./telegram.ts";
 import { handleFailure, resumeDetached, transientRule } from "./transient.ts";
 
-export type Policy = { version: 1; rules: unknown[] };
+export type Policy = { version: 1; rules: unknown[]; postMergeSince?: Date };
 
 const TICK_MS = 30_000;
 const HISTORY_HOURS = 24;
@@ -23,9 +23,14 @@ const HOUSEKEEPING_MS = 24 * 60 * 60 * 1000;
 const OPERATOR_TEXT = "Відповідь оператора в Telegram (sdlc-autopilot).";
 
 export function loadPolicy(path: string): Policy {
-  const p = Bun.YAML.parse(readFileSync(path, "utf8")) as Partial<Policy> | null;
+  const p = Bun.YAML.parse(readFileSync(path, "utf8")) as (Partial<Policy> & { post_merge?: unknown }) | null;
   if (p?.version !== 1 || !Array.isArray(p.rules)) throw new Error(`${path}: want version: 1 and a rules list`);
-  const policy: Policy = { version: 1, rules: p.rules };
+  if (p.post_merge !== undefined && (typeof p.post_merge !== "object" || p.post_merge === null)) {
+    throw new Error(`${path}: post_merge must be a mapping`);
+  }
+  const policy: Policy = {
+    version: 1, rules: p.rules, postMergeSince: parseSince((p.post_merge as { since?: unknown } | undefined)?.since, path),
+  };
   transientRule(policy);
   gateRules(policy.rules);
   return policy;
@@ -43,6 +48,7 @@ export async function tick(deps: {
   telegram?: TelegramDeps;
 }): Promise<void> {
   let decided = 0;
+  const now = (deps.now ?? (() => new Date()))();
   const runs = readRuns(deps.db, HISTORY_HOURS);
   // Gate policy (PILOT-509): the install gate is retried only while the factory runs blocking it are open.
   const ctx = {
@@ -54,7 +60,6 @@ export async function tick(deps: {
     // Transient failures (PILOT-508): resume with backoff, escalate after the last attempt. One run's error must not
     // keep the runs after it undecided.
     if (run.status === "failed") {
-      const now = (deps.now ?? (() => new Date()))();
       const resume = deps.resume ?? resumeDetached;
       try {
         if (handleFailure(run, deps.policy, { now, host: deps.host ?? readHost, resume })) decided++;
@@ -90,7 +95,9 @@ export async function tick(deps: {
   const recent = readRuns(deps.db, POST_MERGE_HISTORY_HOURS);
   const queued = deps.queue ? inFlight(recent) : { views: [], written: 0 };
   const active = [...activeRuns(recent), ...queued.views];
-  if (deps.postMerge) decided += launchPostMerges(deps.db, recent, deps.postMerge, active);
+  if (deps.postMerge) {
+    decided += launchPostMerges(deps.db, recent, deps.postMerge, postMergeCutoff(deps.policy, now), active);
+  }
   const open = [...recent.filter((r) => OPEN_STATUSES.includes(r.status)), ...queued.views];
   if (deps.queue) decided += queued.written + startQueued(active, open, deps.queue);
 

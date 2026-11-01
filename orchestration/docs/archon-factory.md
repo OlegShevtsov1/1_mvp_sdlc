@@ -57,7 +57,7 @@ That installs the released factory. To test a change before it is released, use
    By its `policy.yaml` it answers routine plan and install gates and escalates every other pause, post-merge
    gates included ([rules](../supervisor/README.md)); its rule `transient-resume`
    resumes a failed run with a transient error up to 3 times (after 2, 5 and 15 minutes) and then escalates once. It also asks `gh` which PRs of factory runs that
-   ended in the last 14 days are merged, launches `post-merge` once for each through `launch.ts`, detached, and
+   ended in the last 14 days are merged at or after `post_merge.since` (else its first start), launches `post-merge` once for each through `launch.ts`, detached, and
    writes one ledger line per launch. It starts each brief queued as `~/.config/sdlc-autopilot/queue/<repo>/<name>.md`
    as a detached `archon workflow run factory` while fewer than 5 runs (3 per repo) are running, `MemAvailable` is
    at least 1500 MB and load1 at most 8 (the `limits` in its `policy.yaml`), `1_mvp_sdlc` first, never together

@@ -23,6 +23,31 @@ release pull request `PILOT-<n>: Release vX.Y.Z` carries that section under `## 
 
 ### Security
 
+## [0.9.3] - 2026-11-01
+
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- The supervisor fixture `orchestration/supervisor/tests/fixtures/post-merge-gate-c2154fea.json` no longer quotes the
+  owner display name from the v0.8.0 A3 pause text (now `<owner name>`), so the release owner scan of the public
+  mirror prints 0 again. Primary CI now runs the mirror owner scan (`check.sh owner`) over the tree publish-mirror
+  would publish, using publish-mirror's own leftover scan. That scan now also refuses the owner display name in any
+  letter case, as the release scan does, and publish-mirror no longer stops silently on a tree with no owner string
+  (PILOT-536).
+- The supervisor's `limits.min_mem_available_mb` is now 800 (was 1500, above the 7.9 GB host's idle MemAvailable of
+  about 1342 MB, so no queued brief or post-merge launch ever started). A brief or post-merge launch that waits only
+  for the host now names the limit and the measured value in the journal, e.g. `MemAvailable 700 MB < 800 MB`
+  (PILOT-540).
+
+### Security
+
 ## [0.9.2] - 2026-11-01
 
 ### Added

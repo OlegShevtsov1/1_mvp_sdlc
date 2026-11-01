@@ -1,5 +1,5 @@
 {
-  "source": "archon.db run c2154fea-2e08-4385-8589-d413204db098, events up to event_order 349335; status set to paused; paths, host and links scrubbed",
+  "source": "archon.db run c2154fea-2e08-4385-8589-d413204db098, events up to event_order 349335; status set to paused; paths, host and links scrubbed; the owner display name the A3 pause text quotes is replaced by <owner name>",
   "run": {
     "id": "c2154fea-2e08-4385-8589-d413204db098",
     "workflow_name": "post-merge",
@@ -27,7 +27,7 @@
       "event_order": 349156,
       "event_type": "approval_requested",
       "step_name": "execute-cycle.gate",
-      "data": "{\"message\":\"post-merge PILOT502 — потрібне рішення оператора.\\nКрок: 3 — A3 — 🔒 Mirror sync (OlegShevtsov1/1_mvp_sdlc) from the released script, dry run then real\\nТип: mismatch\\nПричина: Синхронізацію дзеркала виконано: PR https://github.com/OlegShevtsov1/1_mvp_sdlc/pull/5 злито, тег v0.8.0 → f00c54a, rc=0. Проте owner-скан надрукував `1` замість `0`. Єдиний збіг — рядок 131 фікстури plugins/mvp-sdlc/tests/fixtures/after-merge/sdlc-77.md, де стоїть сам шаблон пошуку `'oleh shevtsov'`, а не витік імені власника. Оператору треба вирішити: approve (прийняти як хибнопозитивний збіг), skip або abort.\\nЖурнал: $ARTIFACTS_DIR/ledger.jsonl\\n\\napprove → виконати крок (або прийняти розбіжність як OK)\\nskip    → пропустити крок і продовжити\\nabort   → зупинити виконання\\n\"}",
+      "data": "{\"message\":\"post-merge PILOT502 — потрібне рішення оператора.\\nКрок: 3 — A3 — 🔒 Mirror sync (OlegShevtsov1/1_mvp_sdlc) from the released script, dry run then real\\nТип: mismatch\\nПричина: Синхронізацію дзеркала виконано: PR https://github.com/OlegShevtsov1/1_mvp_sdlc/pull/5 злито, тег v0.8.0 → f00c54a, rc=0. Проте owner-скан надрукував `1` замість `0`. Єдиний збіг — рядок 131 фікстури plugins/mvp-sdlc/tests/fixtures/after-merge/sdlc-77.md, де стоїть сам шаблон пошуку `'<owner name>'`, а не витік імені власника. Оператору треба вирішити: approve (прийняти як хибнопозитивний збіг), skip або abort.\\nЖурнал: $ARTIFACTS_DIR/ledger.jsonl\\n\\napprove → виконати крок (або прийняти розбіжність як OK)\\nskip    → пропустити крок і продовжити\\nabort   → зупинити виконання\\n\"}",
       "created_at": "2026-10-31 14:59:32"
     },
     {

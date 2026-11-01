@@ -46,8 +46,9 @@ After a sync the only stdout line is the new mirror `main` sha (the merge commit
 1. Exports the primary: clones it, resolves `<ref>`, exports the tree with `git archive`, drops what is not synced
    (below), replaces in every text file the primary account's login (lowercase and capitalised forms) with
    `OlegShevtsov1` and the primary owner's full name with `Oleg Shevtsov`, and refuses (exit 2) if the primary login
-   is still found anywhere: in any letter case, in binary files or in path names. Only file paths are printed. A scan
-   that cannot read the tree refuses too.
+   or full name is still found anywhere: in any letter case, in binary files or in path names. Only file paths are
+   printed. A scan that cannot read the tree refuses too. A tree with nothing to replace passes through.
+   `scripts/ci/owner-scan.sh` sources this script and runs these steps on the PR, so it must stay sourceable.
 2. Clones the mirror and checks out its `develop` (or `main` when there is no `develop` yet: the push in step 5 then
    creates `develop` from `main`). Refuses (exit 1) when the mirror `main` has changes that are not on `develop`.
    Replaces the tree with the export.

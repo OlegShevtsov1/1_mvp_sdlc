@@ -649,6 +649,12 @@ expect_refusal "leftover in another case"
 echo "PASS refusal on a leftover in another case"
 
 new_fixture
+primary_commit NOTES.md "owner ${src_name,,}\n"
+expect_refusal "display name left over"
+grep -qF "NOTES.md" <<<"${err}" || fail "display name left over" "output does not name the file: ${err}"
+echo "PASS refusal on the display name left over"
+
+new_fixture
 primary_commit "notes/${src_login^^}-notes.txt" "nothing here\n"
 expect_refusal "leftover in a path name"
 grep -qF "${src_login^^}-notes.txt" <<<"${err}" || fail "leftover in a path name" "output does not name the file: ${err}"

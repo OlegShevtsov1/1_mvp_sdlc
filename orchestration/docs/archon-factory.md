@@ -60,7 +60,7 @@ That installs the released factory. To test a change before it is released, use
    ended in the last 14 days are merged at or after `post_merge.since` (else its first start), launches `post-merge` once for each through `launch.ts`, detached, and
    writes one ledger line per launch. It starts each brief queued as `~/.config/sdlc-autopilot/queue/<repo>/<name>.md`
    as a detached `archon workflow run factory` while fewer than 5 runs (3 per repo) are running, `MemAvailable` is
-   at least 1500 MB and load1 at most 8 (the `limits` in its `policy.yaml`), `1_mvp_sdlc` first, never together
+   at least 800 MB and load1 at most 8 (the `limits` in its `policy.yaml`), `1_mvp_sdlc` first, never together
    with a run of the same repo whose brief names an overlapping path, and moves it to `queue/started/<repo>/`.
    Once a day it removes test leftovers older than 24 h. Its queue directory is operator input: back it up with
    the rest of `~/.config`.

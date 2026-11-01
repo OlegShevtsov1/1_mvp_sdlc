@@ -4,7 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { runDetached } from "./act.ts";
 import { alreadyActed, appendLedger, ledgerPath } from "./ledger.ts";
 import { archonHome, type PostMergeDeps } from "./postmerge.ts";
-import { canStart, readHost } from "./resources.ts";
+import { canStart, hostShortfall, readHost, slotFree } from "./resources.ts";
 import { isForbiddenRepo, repoOf, type RunView } from "./runs.ts";
 
 // `repo` is `<owner>/<repo>` and `cwd` its Archon `source` checkout; both are empty when the owner is not unique.
@@ -137,6 +137,8 @@ export function startQueued(active: RunView[], open: RunView[], deps: QueueDeps)
   const known = knownNames();
   let written = 0;
   let deferred = 0;
+  let hostDeferred = 0;
+  let shortfall: string | null = null;
   for (const t of nextTasks()) {
     const dir = basename(dirname(t.briefFile));
     const file = basename(t.briefFile);
@@ -164,8 +166,13 @@ export function startQueued(active: RunView[], open: RunView[], deps: QueueDeps)
     const paths = pathTokens(text, known);
     const blocked = open.some((r) =>
       r.workflow === "factory" && repoOf(r.cwd) === t.repo && pathsOverlap(paths, pathTokens(r.message, known)));
-    if (blocked || !canStart(t.repo, active, deps.host())) {
-      deferred++;
+    const host = deps.host();
+    if (blocked || !canStart(t.repo, active, host)) {
+      const missed = !blocked && slotFree(t.repo, active) ? hostShortfall(host) : null;
+      if (missed) {
+        hostDeferred++;
+        shortfall = missed;
+      } else deferred++;
       continue;
     }
 
@@ -192,7 +199,8 @@ export function startQueued(active: RunView[], open: RunView[], deps: QueueDeps)
     active.push(view);
     open.push(view);
   }
-  if (deferred > 0) console.log(`sdlc-autopilot: ${deferred} queued brief(s) wait for run slots, host resources or overlapping runs`);
+  if (hostDeferred > 0) console.log(`sdlc-autopilot: ${hostDeferred} queued brief(s) wait for host resources: ${shortfall}`);
+  if (deferred > 0) console.log(`sdlc-autopilot: ${deferred} queued brief(s) wait for run slots or overlapping runs`);
   return written;
 }
 

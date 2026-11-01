@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -64,7 +64,34 @@ const complete = (db: Database, id: string) =>
 
 const run = (db: Database, q: QueueDeps) => tick({ db, policy: loadPolicy(POLICY), respond: () => {}, queue: q });
 
+const logged = (log: { mock: { calls: unknown[][] } }) => log.mock.calls.map((c) => String(c[0]));
+
 describe("queue", () => {
+  test("a brief waiting only for host resources names the limit in the log", async () => {
+    const db = fixtureDb();
+    brief("1_mvp_sdlc", "PILOT-702.md", "PILOT-702: edit docs/c.md");
+    const log = spyOn(console, "log");
+    try {
+      const low = fake({ memAvailableMb: 700, load1: 0.8 });
+      await run(db, low);
+      expect(low.launches).toHaveLength(0);
+      expect(logged(log)).toContain("sdlc-autopilot: 1 queued brief(s) wait for host resources: MemAvailable 700 MB < 800 MB");
+
+      const busy = fixtureDb();
+      for (let i = 0; i < 3; i++) factoryRun(busy, "1_mvp_sdlc", "Deliver PILOT-1 in README.md");
+      log.mockClear();
+      await run(busy, fake({ memAvailableMb: 700, load1: 0.8 }));
+      expect(logged(log)).toContain("sdlc-autopilot: 1 queued brief(s) wait for run slots or overlapping runs");
+      expect(logged(log).some((l) => l.includes("host resources"))).toBe(false);
+    } finally {
+      log.mockRestore();
+    }
+
+    const idle = fake({ memAvailableMb: 1342, load1: 0.8 });
+    await run(db, idle);
+    expect(launched(idle)).toEqual(["PILOT-702"]);
+  });
+
   test("sdlc queue drains first", async () => {
     const db = fixtureDb();
     for (const repo of ["x_one", "x_one", "x_two", "x_two"]) factoryRun(db, repo, "Deliver PILOT-1 in README.md");

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -167,11 +167,21 @@ describe("launchPostMerges", () => {
     factoryRun(db, "dddd0088", "completed", "1_mvp_sdlc", ["delivered", `${SDLC}/88`]);
     const merged = { "OlegShevtsov1/1_mvp_sdlc": [{ url: `${SDLC}/88`, title: "PILOT-507: sdlc supervisor" }] };
 
-    for (const host of [{ memAvailableMb: 1000, load1: 1 }, { memAvailableMb: 8000, load1: 9 }]) {
-      const f = fake(merged, host);
-      await run(db, f);
-      expect(f.launches).toHaveLength(0);
-      expect(lines()).toHaveLength(0);
+    const log = spyOn(console, "log");
+    try {
+      for (const [host, shortfall] of [
+        [{ memAvailableMb: 700, load1: 1 }, "MemAvailable 700 MB < 800 MB"],
+        [{ memAvailableMb: 8000, load1: 9 }, "load1 9 > 8"],
+      ] as const) {
+        const f = fake(merged, host);
+        await run(db, f);
+        expect(f.launches).toHaveLength(0);
+        expect(lines()).toHaveLength(0);
+        expect(log.mock.calls.map((c) => String(c[0])))
+          .toContain(`sdlc-autopilot: 1 post-merge launch(es) wait for host resources: ${shortfall}`);
+      }
+    } finally {
+      log.mockRestore();
     }
 
     const f = fake(merged);

@@ -128,6 +128,7 @@ bash scripts/ci/check.sh mvp_sdlc   # mvp-sdlc plugin tests: hooks, phase gate, 
 bash scripts/ci/check.sh docs       # SDLC docs: links, references that exist, English only
 bash scripts/ci/check.sh factory    # the factory's bun unit tests (bun >= 1.2.21)
 bash scripts/ci/check.sh archon     # install, validate, fixtures and dry runs on Archon v0.12.1 (bun)
+bash scripts/ci/check.sh owner      # what the public mirror would still name after the owner replacement
 ```
 
 `check.sh` runs locally exactly what CI runs. `scripts/ci/tools.sh` fetches the pinned actionlint and gitleaks
@@ -136,7 +137,7 @@ for the two Archon release binaries the `archon` check runs (`.tools/bin/archon-
 and the check runs them with a throwaway `ARCHON_HOME`. Dependabot only updates GitHub Actions, so bump these pins
 by hand in `scripts/ci/tools.sh`.
 
-The hygiene check and gitleaks look at tracked files and committed history, so run the checks after committing.
+The hygiene check, the owner scan and gitleaks look at tracked files and committed history, so run the checks after committing.
 
 `scripts/ci/hygiene-check.sh` is the public-repo rule shared with the app repositories. Tracked files must not
 contain: internal or private IP addresses, internal hostnames, AWS account IDs, Route53 hosted zone IDs,
@@ -146,6 +147,10 @@ never the matching text. Four exceptions: `scripts/ci/notify-telegram.sh` may na
 `plugins/sdlc/skills/generate-data-model/SKILL.md` is exempt from the 12-digit rule only (a UUID example). The
 project templates have their own IPv4 rule: loopback, the bind-all address and the RFC 5737 documentation ranges are allowed
 there, and the backend `Gemfile`, `Gemfile.lock` and `config/brakeman.ignore` may carry four-part gem versions.
+
+`scripts/ci/owner-scan.sh` exports the committed tree as `scripts/publish-mirror.sh` does, applies its owner
+replacement and fails on any owner login or display name left over, in any letter case, in content or path names
+(only paths are printed). A fixture or doc that would make the release's mirror owner scan non-zero fails the PR.
 
 ### LLM evals
 

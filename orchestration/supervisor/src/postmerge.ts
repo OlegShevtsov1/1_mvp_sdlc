@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { runDetached } from "./act.ts";
 import { alreadyActed, appendLedger, ledgerPath } from "./ledger.ts";
 import type { Policy } from "./main.ts";
-import { activeRuns, canStart, type Host, readHost } from "./resources.ts";
+import { activeRuns, canStart, type Host, hostShortfall, readHost, slotFree } from "./resources.ts";
 import { isForbiddenRepo, repoOf, type RunView } from "./runs.ts";
 
 export type MergedPr = { url: string; title: string; mergedAt: string };
@@ -114,6 +114,8 @@ export function launchPostMerges(
   const merged = new Map<string, Map<string, MergedPr> | null>();
   let written = 0;
   let deferred = 0;
+  let hostDeferred = 0;
+  let shortfall: string | null = null;
   for (const c of candidates) {
     if (!merged.has(c.repo)) {
       const prs = deps.mergedPrs(c.repo);
@@ -137,8 +139,13 @@ export function launchPostMerges(
       written += escalate(c, "post-merge-no-card", `Post-merge не запущено: у назві PR ${c.url} немає префікса PILOT-<n>:.`);
       continue;
     }
-    if (!canStart(c.repo, active, deps.host())) {
-      deferred++;
+    const host = deps.host();
+    if (!canStart(c.repo, active, host)) {
+      const missed = slotFree(c.repo, active) ? hostShortfall(host) : null;
+      if (missed) {
+        hostDeferred++;
+        shortfall = missed;
+      } else deferred++;
       continue;
     }
     try {
@@ -160,7 +167,8 @@ export function launchPostMerges(
     });
     written++;
   }
-  if (deferred > 0) console.log(`sdlc-autopilot: ${deferred} post-merge launch(es) wait for host resources or run slots`);
+  if (hostDeferred > 0) console.log(`sdlc-autopilot: ${hostDeferred} post-merge launch(es) wait for host resources: ${shortfall}`);
+  if (deferred > 0) console.log(`sdlc-autopilot: ${deferred} post-merge launch(es) wait for run slots`);
   return written;
 }
 

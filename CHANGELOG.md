@@ -23,6 +23,28 @@ release pull request `PILOT-<n>: Release vX.Y.Z` carries that section under `## 
 
 ### Security
 
+## [0.9.1] - 2026-11-01
+
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- The `sdlc-autopilot` supervisor's ledger no longer masks a file path with a mixed-case segment (such as the mirror's
+  `OlegShevtsov1` owner) as a base64 secret: the base64 rule now stops at `/` and masks only contiguous blobs
+  (PILOT-521).
+- The `sdlc-autopilot` systemd unit that `install.sh` renders now puts the Claude CLI's directory (`command -v
+  claude`, else `~/.local/bin` with a warning) and the bun, archon and gh directories on its `PATH`, each once and
+  ahead of `/usr/local/bin:/usr/bin:/bin`; `scripts/ci/archon-check.sh` renders the unit into a scratch
+  `XDG_CONFIG_HOME` instead of overwriting the operator's (PILOT-524).
+
+### Security
+
 ## [0.9.0] - 2026-11-01
 
 ### Added

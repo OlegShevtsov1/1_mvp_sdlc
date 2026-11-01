@@ -18,7 +18,7 @@ export function ledgerPath(): string {
 }
 
 // Evidence text is Archon's error or pause text, and the message may quote it, so either may hold a token. The base64
-// run needs upper case, lower case and a digit so that paths and run ids stay readable.
+// run needs upper case, lower case and a digit, and `/` ends it, so paths (mixed-case too) and run ids stay readable.
 const SECRETS: [RegExp, string][] = [
   [/\b(Bearer)\s+[A-Za-z0-9._~+/=-]+/gi, "$1 [REDACTED]"],
   [/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, "[REDACTED]"],
@@ -26,7 +26,7 @@ const SECRETS: [RegExp, string][] = [
   [/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "[REDACTED]"],
   [/\b[0-9a-fA-F]{32,}\b/g, "[REDACTED]"],
   [
-    /(?=[A-Za-z0-9+/_-]*[A-Z])(?=[A-Za-z0-9+/_-]*[a-z])(?=[A-Za-z0-9+/_-]*[0-9])[A-Za-z0-9+/_-]{32,}={0,2}/g,
+    /(?=[A-Za-z0-9+_-]*[A-Z])(?=[A-Za-z0-9+_-]*[a-z])(?=[A-Za-z0-9+_-]*[0-9])[A-Za-z0-9+_-]{32,}={0,2}/g,
     "[REDACTED]",
   ],
 ];

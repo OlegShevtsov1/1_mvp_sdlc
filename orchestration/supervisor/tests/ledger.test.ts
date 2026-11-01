@@ -67,11 +67,20 @@ describe("ledger", () => {
     expect(JSON.parse(line)).toMatchObject({ run_id: "run-a", evidence: { event_id: "event-1", node: "n" } });
   });
 
+  test("redact masks a base64 blob next to a path", () => {
+    const blob = `${"Xy7".repeat(11)}Q==`;
+    expect(redact(`token ${blob} end`)).toBe("token [REDACTED] end");
+    expect(redact(`/srv/OlegShevtsov1/${blob}`)).toBe("/srv/OlegShevtsov1/[REDACTED]");
+  });
+
   test("redact keeps ordinary error text", () => {
     const texts = [
       "Node 'review__code' failed: Cannot list Claude plugins (`claude plugin list --json` via ~/.local/bin/claude " +
         "failed): killed by SIGTERM",
       "/home/operator/.archon/workspaces/OlegShevtsov1/1_mvp_sdlc/worktrees/archon/task-factory-1793469185220",
+      "/home/operator/.archon/workspaces/OlegShevtsov1/1_mvp_sdlc/worktrees/archon/task-factory-1793469185220",
+      "/srv/Operator/MyProjects/RepoName2024/worktrees/archon/task-factory-1793469185220",
+      "/tmp/task-factory-1793469185220-worktree-logs/OlegShevtsov1",
       "run 69aea63f-1c2d-4e5f-8a9b-0c1d2e3f4a5b failed",
       "gh: HTTP 502: Bad Gateway (https://api.github.com/repos/OlegShevtsov1/1_mvp_sdlc/pulls)",
     ];

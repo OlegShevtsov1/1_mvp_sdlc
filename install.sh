@@ -9,7 +9,8 @@
 # (orchestration/supervisor) is copied to <ARCHON_HOME>/supervisor and its systemd user unit rendered into
 # <XDG_CONFIG_HOME>/systemd/user/sdlc-autopilot.service; the unit is not enabled.
 # Knobs: ARCHON_HOME (default ~/.archon), ARCHON_BIN (default archon), XDG_CONFIG_HOME (default ~/.config),
-# INSTALL_SKIP_RUNTIME_TOOLS=1 skips the gh/claude checks (needed to run workflows, not to install them).
+# INSTALL_SKIP_RUNTIME_TOOLS=1 skips the gh/claude checks (needed to run workflows, not to install them); a claude
+# not found then leaves the unit's PATH assuming ~/.local/bin, with a warning.
 # Install from `main` for production; check out `develop` to test a change before it is released.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,12 +87,26 @@ unit_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 unit="${unit_dir}/sdlc-autopilot.service"
 rm -rf "${supervisor}"
 cp -R "${supervisor_src}" "${supervisor}"
-# A user unit does not inherit the login PATH; bun and archon must resolve under systemd too.
+# A user unit does not inherit the login PATH; bun, archon, claude and gh must resolve under systemd too.
 bun_bin="$(command -v bun)"
 archon_bin="$(command -v "${ARCHON_BIN}")"
+claude_bin="$(command -v claude || true)"
+if [ -n "${claude_bin}" ]; then
+  claude_dir="$(dirname "${claude_bin}")"
+else
+  claude_dir="${HOME}/.local/bin"
+  echo "install: warning: claude not found; the unit's PATH assumes ${claude_dir}" >&2
+fi
+gh_bin="$(command -v gh || true)"
+# Tool directories in this order, each once; the standard directories stay last, in their usual order.
+unit_path=""
+for d in "$(dirname "${bun_bin}")" "$(dirname "${archon_bin}")" "${claude_dir}" ${gh_bin:+"$(dirname "${gh_bin}")"}; do
+  case ":${unit_path}/usr/local/bin:/usr/bin:/bin:" in *":${d}:"*) ;; *) unit_path="${unit_path}${d}:" ;; esac
+done
+unit_path="${unit_path}/usr/local/bin:/usr/bin:/bin"
 mkdir -p "${unit_dir}"
 sed -e "s|@BUN@|${bun_bin}|g" -e "s|@SUPERVISOR_DIR@|${supervisor}|g" -e "s|@ARCHON_HOME@|${ARCHON_HOME}|g" \
-  -e "s|@PATH@|$(dirname "${bun_bin}"):$(dirname "${archon_bin}"):/usr/local/bin:/usr/bin:/bin|g" \
+  -e "s|@PATH@|${unit_path}|g" \
   "${supervisor_src}/systemd/sdlc-autopilot.service" >"${unit}"
 chmod 0644 "${unit}"
 echo "installed: supervisor into ${supervisor}, unit ${unit} (not enabled; enable with: systemctl --user daemon-reload && systemctl --user enable --now sdlc-autopilot)"

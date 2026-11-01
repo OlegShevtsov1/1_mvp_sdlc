@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Behaviour test for the root install.sh: what it copies, what it backs up, and when it refuses.
 # A stub archon and a stub bun stand in for the real tools; no network, a throwaway ARCHON_HOME.
+# Also checks the unit's PATH (bun, archon, claude and gh directories, each once) and that archon-check.sh renders
+# the unit into a scratch XDG_CONFIG_HOME rather than the operator's.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 tmp=$(mktemp -d)
@@ -22,7 +24,10 @@ cat > "${tmp}/bin/bun" <<'STUB'
 #!/usr/bin/env bash
 echo "${BUN_STUB_VERSION:-1.4.2}"
 STUB
-chmod +x "${tmp}/bin/archon" "${tmp}/bin/bun"
+mkdir "${tmp}/claude-bin" "${tmp}/gh-bin"
+printf '#!/usr/bin/env bash\n' > "${tmp}/claude-bin/claude"
+printf '#!/usr/bin/env bash\n' > "${tmp}/gh-bin/gh"
+chmod +x "${tmp}/bin/archon" "${tmp}/bin/bun" "${tmp}/claude-bin/claude" "${tmp}/gh-bin/gh"
 
 home="${tmp}/archon-home"
 factory_src="${root}/orchestration/factory/.archon/workflows/sdlc-factory/factory"
@@ -34,7 +39,7 @@ unit="${tmp}/config/systemd/user/sdlc-autopilot.service"
 install() {
   rc=0
   rm -f "${tmp}/validated.log"
-  out=$(env PATH="${tmp}/bin:${PATH}" ARCHON_HOME="${home}" ARCHON_BIN="${tmp}/bin/archon" \
+  out=$(env PATH="${tmp}/bin:${tmp}/claude-bin:${tmp}/gh-bin:${PATH}" ARCHON_HOME="${home}" ARCHON_BIN="${tmp}/bin/archon" \
     XDG_CONFIG_HOME="${tmp}/config" INSTALL_SKIP_RUNTIME_TOOLS=1 "$@" bash "${root}/install.sh" 2>&1) || rc=$?
 }
 
@@ -62,6 +67,11 @@ done
 [ "$(grep -c '@[A-Z_]*@' "${unit}" || true)" -eq 0 ] || fail "fresh install" "unit keeps a placeholder: $(cat "${unit}")"
 grep -qF "(not enabled;" <<<"${out}" || fail "fresh install" "no 'not enabled' line: ${out}"
 echo "PASS fresh install copies the supervisor and renders its unit, not enabled"
+unit_path=$(sed -n 's/^Environment=PATH=//p' "${unit}")
+[ "${unit_path}" = "${tmp}/bin:${tmp}/claude-bin:${tmp}/gh-bin:/usr/local/bin:/usr/bin:/bin" ] ||
+  fail "unit PATH" "want the bun/archon, claude, gh and standard directories in order, got: ${unit_path}"
+[ -z "$(tr ':' '\n' <<<"${unit_path}" | sort | uniq -d)" ] || fail "unit PATH" "a directory repeats: ${unit_path}"
+echo "PASS the unit's PATH holds the bun, archon, claude and gh directories once each"
 
 echo stale > "${factory_dst}/stale.txt"
 echo stale > "${supervisor_dst}/stale.txt"
@@ -102,3 +112,27 @@ install ARCHON_BIN="${tmp}/bin/no-such-archon"
 [ "${rc}" -eq 1 ] || fail "missing archon" "exit ${rc}, want 1: ${out}"
 [ ! -e "${home}/workflows" ] || fail "missing archon" "something was copied"
 echo "PASS a missing archon installs nothing"
+
+if ! PATH=/usr/bin:/bin command -v claude >/dev/null; then
+  install PATH="${tmp}/bin:/usr/bin:/bin" HOME="${tmp}/fake-home"
+  [ "${rc}" -eq 0 ] || fail "missing claude" "exit ${rc}: ${out}"
+  grep -qF "install: warning: claude not found" <<<"${out}" || fail "missing claude" "no warning: ${out}"
+  grep -qF ":${tmp}/fake-home/.local/bin:" <<<"$(sed -n 's/^Environment=PATH=//p' "${unit}")" ||
+    fail "missing claude" "the unit's PATH lacks ~/.local/bin: $(cat "${unit}")"
+  echo "PASS a claude not found warns and the unit's PATH falls back to ~/.local/bin"
+fi
+
+if PATH=/usr/local/bin:/usr/bin:/bin command -v gh >/dev/null; then
+  install PATH="${tmp}/bin:${tmp}/claude-bin:/usr/local/bin:/usr/bin:/bin"
+  [ "${rc}" -eq 0 ] || fail "gh in a standard directory" "exit ${rc}: ${out}"
+  unit_path=$(sed -n 's/^Environment=PATH=//p' "${unit}")
+  [ "${unit_path}" = "${tmp}/bin:${tmp}/claude-bin:/usr/local/bin:/usr/bin:/bin" ] ||
+    fail "gh in a standard directory" "want each standard directory once, in place, got: ${unit_path}"
+  echo "PASS a tool in a standard directory does not repeat it in the unit's PATH"
+fi
+
+installs=$(grep -F 'bash install.sh' "${root}/scripts/ci/archon-check.sh" || true)
+[ -n "${installs}" ] || fail "archon-check" "no 'bash install.sh' line in archon-check.sh"
+! grep -vF 'XDG_CONFIG_HOME=' <<<"${installs}" ||
+  fail "archon-check" "an install.sh run without a scratch XDG_CONFIG_HOME would overwrite the operator's unit"
+echo "PASS archon-check.sh renders the unit into a scratch XDG_CONFIG_HOME, not the operator's"

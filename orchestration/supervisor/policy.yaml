@@ -1,6 +1,6 @@
 # sdlc-autopilot policy (README.md describes each rule). A pause that no rule answers escalates to the operator;
-# a failed run follows `transient-resume`. Every post-merge gate, 🔒 steps included, always escalates. `limits` bounds
-# every run the supervisor starts.
+# a failed run follows `transient-resume`. A post-merge gate escalates unless `post-merge-allowlist` approves it.
+# `limits` bounds every run the supervisor starts.
 version: 1
 rules:
   # A failed run whose error is one of these transient classes is resumed with `archon workflow resume` after 2, 5
@@ -16,6 +16,23 @@ rules:
     open_question_prefix: Non-blocking
   - id: install-gate
     max_retries: 4
+  # A post-merge gate of type approval or manual in `repo` is approved when its step's command block holds exactly one
+  # release line and otherwise only these (src/allowlist.ts holds the matcher):
+  #   bash scripts/release.sh merge-release-pr v<X.Y.Z>   merges the release PR develop → main with a merge commit
+  #   bash scripts/release.sh tag v<X.Y.Z>                annotated tag on that merge commit, pushed to origin
+  #   bash scripts/release.sh mirror v<X.Y.Z>             publish-mirror.sh from the tag, dry run then real
+  #   bash scripts/release.sh install v<X.Y.Z>            install.sh from the tag, once no factory run is running
+  #   bash scripts/release.sh verify v<X.Y.Z>             read-only proofs of the four above
+  #   cd <the run's own worktree>
+  #   NAME=value                                          a short local name only (P, M, rc, …), never PATH or GIT_*
+  #   read-only: gh pr view|list|checks, gh api (GET only), git fetch|log|rev-parse|show|diff|status, echo, test,
+  #              grep, jq, cat
+  # Commands split on `;`, `&&`, `||`, `|` and newlines. rm, rmdir, reset, delete, destroy, --delete, -f, -rf, --force,
+  # a substitution, a subshell, a glob, a redirection to a file, prose outside the block, a second release line, or a
+  # step already approved once in the run escalate. A checkout or mismatch gate always escalates.
+  - id: post-merge-allowlist
+    repo: OlegShevtsov1/1_mvp_sdlc
+    subcommands: [merge-release-pr, tag, mirror, install, verify]
 # Every run the supervisor starts, post-merge and queued briefs alike, waits for a free slot and an idle enough host;
 # a transient resume waits for the same host threshold.
 limits:

@@ -4,18 +4,24 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { type Decision, respond } from "./act.ts";
 import { housekeep } from "./housekeeping.ts";
+import { ANSWERED_TOAST, pressToast, resolvedLine } from "./humanize.ts";
 import { alreadyActed, appendLedger, readLedger } from "./ledger.ts";
 import { launchPostMerges, parseSince, type PostMergeDeps, postMergeCutoff, realPostMergeDeps } from "./postmerge.ts";
 import { decide, gateRules } from "./policy.ts";
 import { inFlight, nextTasks, type QueueDeps, realQueueDeps, startQueued } from "./queue.ts";
 import { activeRuns, type Host, limits, readHost } from "./resources.ts";
 import { OPEN_STATUSES, type RunView, readRuns } from "./runs.ts";
-import { digest, type OperatorAnswer, realTelegramDeps, type TelegramDeps, telegramStatus } from "./telegram.ts";
+import {
+  digest, type OperatorAnswer, type Press, realTelegramDeps, type TelegramDeps, telegramStatus,
+} from "./telegram.ts";
 import { handleFailure, resumeDetached, transientRule } from "./transient.ts";
 
 export type Policy = { version: 1; rules: unknown[]; postMergeSince?: Date };
 
 const TICK_MS = 30_000;
+// Telegram holds a getUpdates this long when nothing arrives, so a press reaches the supervisor within about a second.
+const POLL_SECONDS = 25;
+const BACKOFF_MS = [5_000, 15_000, 60_000];
 const HISTORY_HOURS = 24;
 // A PR the operator merges days after its run ended, over a weekend for example, still gets its post-merge run.
 const POST_MERGE_HISTORY_HOURS = 14 * 24;
@@ -46,7 +52,7 @@ export async function tick(deps: {
   postMerge?: PostMergeDeps;
   queue?: QueueDeps;
   telegram?: TelegramDeps;
-}): Promise<void> {
+}): Promise<RunView[]> {
   let decided = 0;
   const now = (deps.now ?? (() => new Date()))();
   const runs = readRuns(deps.db, HISTORY_HOURS);
@@ -101,61 +107,94 @@ export async function tick(deps: {
   const open = [...recent.filter((r) => OPEN_STATUSES.includes(r.status)), ...queued.views];
   if (deps.queue) decided += queued.written + startQueued(active, open, deps.queue);
 
-  // Answers run before notifications, so an answer that fails is escalated in the same tick. Telegram being down must
-  // not fail the tick, and updates that cannot be read must not hold back the escalations.
-  const telegram = deps.telegram;
-  if (telegram) {
-    const logged = (e: unknown) => console.error(`sdlc-autopilot: ${e instanceof Error ? e.message : String(e)}`);
+  // Operator answers arrive through `listenLoop`; the tick sends escalations and closes messages answered elsewhere.
+  // Telegram being down must not fail the tick.
+  if (deps.telegram) {
     try {
-      const answers = await telegram.pollUpdates(() => digest(open, nextTasks()));
-      for (const a of answers) decided += await answerOperator(recent, a, deps.respond, telegram);
-    } catch (e) {
-      logged(e);
-    }
-    try {
-      const sent = await telegram.notifyEscalations(recent);
+      const sent = await deps.telegram.notifyEscalations(recent, deps.db);
       if (sent > 0) console.log(`sdlc-autopilot: ${sent} escalation(s) sent to Telegram`);
     } catch (e) {
-      logged(e);
+      console.error(`sdlc-autopilot: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
   if (decided > 0) console.log(`sdlc-autopilot: ${decided} decision(s) written to the ledger`);
+  return open;
 }
 
 // An operator's button press is answered only on the pause it was shown for, once, and only with one of that pause's
-// own decisions; `--occurrence` in the respond makes Archon refuse it if the pause moved on meanwhile.
-async function answerOperator(
+// own decisions; `--occurrence` in the respond makes Archon refuse it if the pause moved on meanwhile. The ledger
+// check is synchronous with the act's ledger line, so of several presses on one pause only the first acts.
+function operatorPress(
   runs: RunView[], a: OperatorAnswer, respond: (run: RunView, d: Decision) => void, telegram: TelegramDeps,
-): Promise<number> {
+): Press {
   const run = runs.find((r) => r.id === a.runId && r.status === "paused" && r.pause?.eventId === a.eventId);
   const pause = run?.pause;
-  if (!run || !pause) {
-    await telegram.closeAnswer(a, "Пауза вже не відкрита.");
-    return 0;
-  }
+  // The next tick's notifyEscalations closes that message as answered outside Telegram.
+  if (!run || !pause) return { toast: ANSWERED_TOAST };
   const answered = readLedger().some((e) =>
     e.run_id === a.runId && e.evidence?.event_id === a.eventId && e.rule === "operator" && e.action !== "escalate");
   const choice = pause.decisions.find((d) => d.id === a.action);
-  if (answered || !choice) return 0;
+  if (answered || !choice) return { toast: ANSWERED_TOAST };
   const text = a.text ?? OPERATOR_TEXT;
   const line = { ts: new Date().toISOString(), run_id: run.id, workflow: run.workflow, kind: pause.kind, rule: "operator" };
-  try {
-    respond(run, { action: a.action, rule: "operator", text });
-  } catch (e) {
-    const reason = e instanceof Error ? e.message : String(e);
-    appendLedger({
-      ...line, action: "escalate", evidence: {
-        event_id: pause.eventId, node: pause.node,
-        message: `Не вдалося виконати відповідь оператора ${a.action}: ${reason} — потрібне рішення оператора.`,
-      },
-    });
-    await telegram.closeAnswer(a, `❌ Не вдалося виконати: ${choice.label}`);
-    return 1;
+  const act = async () => {
+    try {
+      respond(run, { action: a.action, rule: "operator", text });
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      appendLedger({
+        ...line, action: "escalate", evidence: {
+          event_id: pause.eventId, node: pause.node,
+          message: `Не вдалося виконати відповідь оператора ${a.action}: ${reason} — потрібне рішення оператора.`,
+        },
+      });
+      await telegram.closeAnswer(a, "❌ Не вдалося виконати відповідь — надіслано нове повідомлення.");
+      return;
+    }
+    appendLedger({ ...line, action: a.action, evidence: { event_id: pause.eventId, node: pause.node, text } });
+    console.log(`sdlc-autopilot: operator ${a.action} for ${run.id} written to the ledger`);
+    await telegram.closeAnswer(a, resolvedLine(a.action, true));
+  };
+  return { toast: pressToast(a.action), act };
+}
+
+type ListenDeps = {
+  runs: () => RunView[];
+  respond: (run: RunView, d: Decision) => void;
+  telegram: TelegramDeps;
+  status: () => string;
+  pollSeconds?: number;
+};
+
+// One long poll of Telegram updates; false when Telegram is not configured.
+export function listen(deps: ListenDeps): Promise<boolean> {
+  return deps.telegram.pollUpdates({
+    status: deps.status,
+    press: (a) => operatorPress(deps.runs(), a, deps.respond, deps.telegram),
+  }, deps.pollSeconds ?? POLL_SECONDS);
+}
+
+// Runs next to the tick and never throws: a failed poll waits 5 s, 15 s, then 60 s per failure until one succeeds.
+// Disabled Telegram is checked again every tick interval, since its config is re-read on each call.
+export async function listenLoop(deps: ListenDeps & {
+  sleep?: (ms: number) => Promise<void>;
+  stop?: () => boolean;
+}): Promise<void> {
+  const sleep = deps.sleep ?? Bun.sleep;
+  let failures = 0;
+  while (!deps.stop?.()) {
+    try {
+      const enabled = await listen(deps);
+      failures = 0;
+      if (!enabled) await sleep(TICK_MS);
+    } catch (e) {
+      const wait = BACKOFF_MS[Math.min(failures++, BACKOFF_MS.length - 1)];
+      const reason = e instanceof Error ? e.message : String(e);
+      console.error(`sdlc-autopilot: Telegram updates: ${reason}; next try in ${wait / 1000} s`);
+      await sleep(wait);
+    }
   }
-  appendLedger({ ...line, action: a.action, evidence: { event_id: pause.eventId, node: pause.node, text } });
-  await telegram.closeAnswer(a, `✅ Оператор: ${choice.label}`);
-  return 1;
 }
 
 if (import.meta.main) {
@@ -164,6 +203,18 @@ if (import.meta.main) {
   limits();
   console.log(`sdlc-autopilot: ${telegramStatus()}`);
   console.log(`sdlc-autopilot: started, reading ${dbPath} every ${TICK_MS / 1000} s`);
+  console.log("sdlc-autopilot: reading Telegram updates by long polling");
+  // `/status` reports the last tick's view; `inFlight` writes files and ledger lines, so only the tick computes it.
+  let open: RunView[] = [];
+  const recentRuns = () => {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      return readRuns(db, POST_MERGE_HISTORY_HOURS);
+    } finally {
+      db.close();
+    }
+  };
+  void listenLoop({ runs: recentRuns, respond, telegram: realTelegramDeps, status: () => digest(open, nextTasks()) });
   let housekept = 0;
   for (;;) {
     if (Date.now() - housekept >= HOUSEKEEPING_MS) {
@@ -174,7 +225,7 @@ if (import.meta.main) {
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
-        await tick({
+        open = await tick({
           db, policy, respond, postMerge: realPostMergeDeps, queue: realQueueDeps, telegram: realTelegramDeps,
         });
       } finally {

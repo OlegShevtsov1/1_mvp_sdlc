@@ -39,8 +39,10 @@ Delivered by C4 (backend) and C5 (frontend); everything in this section is plann
 
 ## This repository (1_mvp_sdlc)
 
-- There is no deploy target. A release is the pull request `develop` → `main`, merged by the operator with a merge
-  commit (decision 54), followed by an annotated tag `vX.Y.Z` on `main`.
+- There is no deploy target. A release is the pull request `develop` → `main`, followed by an annotated tag `vX.Y.Z`
+  on `main`. The post-merge run of the release-prep pull request merges it with a merge commit (decision 54) through
+  `scripts/release.sh merge-release-pr`, and the sdlc-autopilot supervisor approves that step (operator decision
+  2026-11-01, PILOT-545).
 - The number is the `mvp-sdlc` plugin version in `plugins/mvp-sdlc/.claude-plugin/plugin.json`, bumped in a pull
   request into `develop` after `make eval`.
 - Consumers get the release from `main`: the marketplace `mvp` and `install.sh`.
@@ -50,6 +52,14 @@ Delivered by C4 (backend) and C5 (frontend); everything in this section is plann
 - The changes are kept in `CHANGELOG.md` (Keep a Changelog). The release-prep pull request
   `PILOT-<n>: Release X.Y.Z changelog`, where `<n>` is the release's own card (decision 91), moves `[Unreleased]`
   into `## [X.Y.Z] - YYYY-MM-DD`.
+- Its "After merge (operator)" writes the release steps as `scripts/release.sh` lines
+  ([scripts/release.README.md](../../scripts/release.README.md)): A1 `bash scripts/release.sh merge-release-pr vX.Y.Z`,
+  A2 `bash scripts/release.sh tag vX.Y.Z`, A3 `bash scripts/release.sh mirror vX.Y.Z`, A4
+  `bash scripts/release.sh install vX.Y.Z`, and `bash scripts/release.sh verify vX.Y.Z` as a closing proof. Each
+  step's command block holds `git fetch origin --tags` and exactly one `release.sh` line; no `cd` is needed, because
+  the run's agent already works in the run's worktree. Read-only proof lines may be added. The supervisor approves
+  such a step by itself; any other write command, or prose outside the block and its `Expected:` items, sends the
+  step to the operator.
 - Every release pull request carries its changelog (decision 64):
   - the release pull request `PILOT-<n>: Release vX.Y.Z` has `## Changelog` with that section, and
     `scripts/ci/pr-conventions.sh` fails it otherwise;

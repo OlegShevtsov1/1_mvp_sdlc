@@ -23,6 +23,36 @@ release pull request `PILOT-<n>: Release vX.Y.Z` carries that section under `## 
 
 ### Security
 
+## [0.9.4] - 2026-11-01
+
+### Added
+
+### Changed
+
+- The `sdlc-autopilot` supervisor writes its Telegram escalations in plain Ukrainian (HTML): one header naming the
+  release, card or run, the step in words, what happened, a recommendation where a rule gives one, and the original
+  pause text in a collapsed block, with plain button labels. A message whose pause was answered — by its button,
+  outside Telegram, or because the run moved on — is edited once with the outcome and loses its buttons (PILOT-544).
+- The `sdlc-autopilot` supervisor approves a post-merge step of type approval or manual whose only write command is
+  one `bash scripts/release.sh <subcommand> v<semver>` line (rule `post-merge-allowlist`); the new
+  `scripts/release.sh` runs the release steps `merge-release-pr`, `tag`, `mirror`, `install` and `verify` as
+  reviewed, idempotent code. Every other post-merge step still escalates. This replaces PILOT-509's rule that every
+  post-merge gate escalates (operator decision 2026-11-01, PILOT-545).
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- Telegram button presses under `sdlc-autopilot` escalations get feedback again. The supervisor read updates only
+  inside its 30 s tick, after Telegram's ~15 s window to answer a press had passed. Updates are now read by long
+  polling in their own loop, and each press is answered at once with a toast (`✅ Прийнято, виконую`,
+  `⏭ Пропускаю крок`, `⛔ Зупиняю`, `🔁 Чекаю далі`, or `Це питання вже вирішене`); only the first press on an open
+  pause acts (PILOT-546).
+
+### Security
+
 ## [0.9.3] - 2026-11-01
 
 ### Added

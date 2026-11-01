@@ -4,6 +4,8 @@ Description=sdlc-autopilot: answers routine Archon pauses by policy (1_mvp_sdlc 
 [Service]
 Type=simple
 Environment=ARCHON_HOME=@ARCHON_HOME@
+# PATH: install.sh renders the operator's login PATH plus the rbenv/nvm/pyenv/tfenv directories, so the runs this
+# supervisor starts find ruby, bundle and node (PILOT-559).
 Environment=PATH=@PATH@
 ExecStart=@BUN@ run @SUPERVISOR_DIR@/src/main.ts
 Restart=on-failure

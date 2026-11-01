@@ -52,7 +52,12 @@ That installs the released factory. To test a change before it is released, use
    Deprecation `WARNINGS` for `plan-review` are expected and do not fail the install;
 4. only after validation passes, replaces `~/.archon/supervisor/` with `orchestration/supervisor/` (the
    `sdlc-autopilot` supervisor) and renders its systemd user unit to
-   `${XDG_CONFIG_HOME:-~/.config}/systemd/user/sdlc-autopilot.service`. The unit is not enabled. The supervisor
+   `${XDG_CONFIG_HOME:-~/.config}/systemd/user/sdlc-autopilot.service`. The unit is not enabled. Its `PATH` is the
+   operator's login PATH, read from a clean `$SHELL -lc` (else the installing shell's PATH), plus the
+   `~/.rbenv/shims`, `~/.rbenv/bin`, newest `~/.nvm/versions/node/*/bin`, `~/.pyenv/shims` and `~/.tfenv/bin` that
+   exist, so the be/fe merge gates of the runs the supervisor starts find `bundle` and `node`; the install warns when
+   `ruby`, `bundle` or `node` does not resolve on it. After changing a toolchain, re-run `install.sh`, then
+   `systemctl --user daemon-reload && systemctl --user restart sdlc-autopilot`. The supervisor
    reads Archon's run state read-only and writes one line per decision to `~/.local/state/sdlc-autopilot/ledger.jsonl`.
    By its `policy.yaml` it answers routine plan and install gates and escalates every other pause, post-merge
    gates included, except release steps its `post-merge-allowlist` approves ([rules](../supervisor/README.md)); its rule `transient-resume`

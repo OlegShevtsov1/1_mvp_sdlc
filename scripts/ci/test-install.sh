@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Behaviour test for the root install.sh: what it copies, what it backs up, and when it refuses.
 # A stub archon and a stub bun stand in for the real tools; no network, a throwaway ARCHON_HOME.
-# Also checks the unit's PATH (bun, archon, claude and gh directories, each once) and that archon-check.sh renders
-# the unit into a scratch XDG_CONFIG_HOME rather than the operator's.
+# Also checks the unit's PATH (bun, archon, claude and gh directories, then a stub login shell's PATH, then the
+# rbenv/nvm/pyenv/tfenv directories of a stub HOME; each once) and that archon-check.sh renders the unit into a scratch
+# XDG_CONFIG_HOME rather than the operator's.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 tmp=$(mktemp -d)
@@ -27,7 +28,16 @@ STUB
 mkdir "${tmp}/claude-bin" "${tmp}/gh-bin"
 printf '#!/usr/bin/env bash\n' > "${tmp}/claude-bin/claude"
 printf '#!/usr/bin/env bash\n' > "${tmp}/gh-bin/gh"
-chmod +x "${tmp}/bin/archon" "${tmp}/bin/bun" "${tmp}/claude-bin/claude" "${tmp}/gh-bin/gh"
+# The stub login shell prints profile noise, then the PATH in ${tmp}/login-path (a file: install.sh runs it under env -i).
+cat > "${tmp}/login-shell" <<STUB
+#!/usr/bin/env bash
+echo "noise from a profile"
+login_path=/usr/local/bin:/usr/bin:/bin
+[ -f "${tmp}/login-path" ] && login_path=\$(cat "${tmp}/login-path")
+printf '\nSDLC_LOGIN_PATH=%s\n' "\${login_path}"
+STUB
+mkdir "${tmp}/home"
+chmod +x "${tmp}/bin/archon" "${tmp}/bin/bun" "${tmp}/claude-bin/claude" "${tmp}/gh-bin/gh" "${tmp}/login-shell"
 
 home="${tmp}/archon-home"
 factory_src="${root}/orchestration/factory/.archon/workflows/sdlc-factory/factory"
@@ -40,7 +50,7 @@ install() {
   rc=0
   rm -f "${tmp}/validated.log"
   out=$(env PATH="${tmp}/bin:${tmp}/claude-bin:${tmp}/gh-bin:${PATH}" ARCHON_HOME="${home}" ARCHON_BIN="${tmp}/bin/archon" \
-    XDG_CONFIG_HOME="${tmp}/config" INSTALL_SKIP_RUNTIME_TOOLS=1 "$@" bash "${root}/install.sh" 2>&1) || rc=$?
+    XDG_CONFIG_HOME="${tmp}/config" INSTALL_SKIP_RUNTIME_TOOLS=1 HOME="${tmp}/home" SHELL="${tmp}/login-shell" "$@" bash "${root}/install.sh" 2>&1) || rc=$?
 }
 
 install
@@ -129,6 +139,42 @@ if PATH=/usr/local/bin:/usr/bin:/bin command -v gh >/dev/null; then
   [ "${unit_path}" = "${tmp}/bin:${tmp}/claude-bin:/usr/local/bin:/usr/bin:/bin" ] ||
     fail "gh in a standard directory" "want each standard directory once, in place, got: ${unit_path}"
   echo "PASS a tool in a standard directory does not repeat it in the unit's PATH"
+fi
+
+tc="${tmp}/tc-home"
+mkdir -p "${tc}/.rbenv/shims" "${tc}/.rbenv/bin" "${tc}/.nvm/versions/node/v9.0.0/bin" \
+  "${tc}/.nvm/versions/node/v20.1.0/bin" "${tc}/.pyenv/shims"
+for t in .rbenv/shims/ruby .rbenv/shims/bundle .nvm/versions/node/v20.1.0/bin/node; do
+  printf '#!/usr/bin/env bash\n' > "${tc}/${t}"
+  chmod +x "${tc}/${t}"
+done
+printf '%s' "/opt/login-a:${tc}/.rbenv/shims:/usr/bin:/opt/login-a:relative:/opt/with space" > "${tmp}/login-path"
+install HOME="${tc}"
+rm -f "${tmp}/login-path"
+[ "${rc}" -eq 0 ] || fail "toolchain PATH" "exit ${rc}: ${out}"
+unit_path=$(sed -n 's/^Environment=PATH=//p' "${unit}")
+want="${tmp}/bin:${tmp}/claude-bin:${tmp}/gh-bin:/opt/login-a:${tc}/.rbenv/shims:${tc}/.rbenv/bin"
+want="${want}:${tc}/.nvm/versions/node/v20.1.0/bin:${tc}/.pyenv/shims:/usr/local/bin:/usr/bin:/bin"
+[ "${unit_path}" = "${want}" ] || fail "toolchain PATH" "want ${want}, got: ${unit_path}"
+[ -z "$(tr ':' '\n' <<<"${unit_path}" | sort | uniq -d)" ] || fail "toolchain PATH" "a directory repeats: ${unit_path}"
+grep -qF "install: warning: the unit's PATH skips '/opt/with space'" <<<"${out}" ||
+  fail "toolchain PATH" "no warning for the entry with a space: ${out}"
+! grep -qF "not found on the unit's PATH" <<<"${out}" || fail "toolchain PATH" "a resolvable toolchain warned: ${out}"
+echo "PASS the unit's PATH carries the login PATH and the toolchain directories, each once"
+
+install SHELL=/bin/false
+[ "${rc}" -eq 0 ] || fail "login shell fails" "exit ${rc}: ${out}"
+grep -qF "install: warning: could not read /bin/false's login PATH" <<<"${out}" || fail "login shell fails" "no warning: ${out}"
+unit_path=$(sed -n 's/^Environment=PATH=//p' "${unit}")
+[[ "${unit_path}" == *":${tmp}/gh-bin:"*":/usr/local/bin:/usr/bin:/bin" ]] ||
+  fail "login shell fails" "want this shell's PATH, ending in the standard directories, got: ${unit_path}"
+echo "PASS a login shell that fails falls back to this shell's PATH"
+
+if ! PATH=/usr/local/bin:/usr/bin:/bin command -v bundle >/dev/null; then
+  install
+  [ "${rc}" -eq 0 ] || fail "missing bundle" "exit ${rc}: ${out}"
+  grep -qF "install: warning: bundle not found on the unit's PATH" <<<"${out}" || fail "missing bundle" "no warning: ${out}"
+  echo "PASS a bundle the unit's PATH does not resolve warns"
 fi
 
 installs=$(grep -F 'bash install.sh' "${root}/scripts/ci/archon-check.sh" || true)

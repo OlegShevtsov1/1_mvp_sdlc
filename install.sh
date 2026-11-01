@@ -7,7 +7,10 @@
 # Other packs, such as mvp-ops, are never touched. Every installed workflow is then validated;
 # a validation error exits 1. Only after validation passes, the sdlc-autopilot supervisor
 # (orchestration/supervisor) is copied to <ARCHON_HOME>/supervisor and its systemd user unit rendered into
-# <XDG_CONFIG_HOME>/systemd/user/sdlc-autopilot.service; the unit is not enabled.
+# <XDG_CONFIG_HOME>/systemd/user/sdlc-autopilot.service; the unit is not enabled. The unit's PATH is the bun, archon,
+# claude and gh directories, then the operator's login PATH (HOME's and SHELL's: `env -i "$SHELL" -lc`, else this
+# shell's PATH, with a warning), then the rbenv/nvm/pyenv/tfenv directories under HOME that exist, then the standard
+# directories; each once. A ruby, bundle or node it does not resolve is a warning.
 # Knobs: ARCHON_HOME (default ~/.archon), ARCHON_BIN (default archon), XDG_CONFIG_HOME (default ~/.config),
 # INSTALL_SKIP_RUNTIME_TOOLS=1 skips the gh/claude checks (needed to run workflows, not to install them); a claude
 # not found then leaves the unit's PATH assuming ~/.local/bin, with a warning.
@@ -87,7 +90,8 @@ unit_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 unit="${unit_dir}/sdlc-autopilot.service"
 rm -rf "${supervisor}"
 cp -R "${supervisor_src}" "${supervisor}"
-# A user unit does not inherit the login PATH; bun, archon, claude and gh must resolve under systemd too.
+# A user unit does not inherit the login PATH; bun, archon, claude and gh must resolve under systemd too, and so must
+# the toolchains (ruby, bundle, node) the runs this supervisor starts need for their merge gates.
 bun_bin="$(command -v bun)"
 archon_bin="$(command -v "${ARCHON_BIN}")"
 claude_bin="$(command -v claude || true)"
@@ -98,15 +102,51 @@ else
   echo "install: warning: claude not found; the unit's PATH assumes ${claude_dir}" >&2
 fi
 gh_bin="$(command -v gh || true)"
-# Tool directories in this order, each once; the standard directories stay last, in their usual order.
+# Each directory once, at its first position; the standard directories are appended last, in their usual order.
+# Characters outside this set break systemd's Environment= (space, % specifiers) or the sed render below (|, &, \).
 unit_path=""
+add_dir() {
+  case "$1" in /*) ;; *) return 0 ;; esac
+  case "$1" in *[!A-Za-z0-9._+@,=~/-]*)
+    echo "install: warning: the unit's PATH skips '$1' (systemd or the renderer cannot carry it)" >&2
+    return 0 ;;
+  esac
+  case "$1" in /usr/local/bin | /usr/bin | /bin) return 0 ;; esac
+  case ":${unit_path}:" in *":$1:"*) ;; *) unit_path="${unit_path:+${unit_path}:}$1" ;; esac
+}
 for d in "$(dirname "${bun_bin}")" "$(dirname "${archon_bin}")" "${claude_dir}" ${gh_bin:+"$(dirname "${gh_bin}")"}; do
-  case ":${unit_path}/usr/local/bin:/usr/bin:/bin:" in *":${d}:"*) ;; *) unit_path="${unit_path}${d}:" ;; esac
+  add_dir "${d}"
 done
-unit_path="${unit_path}/usr/local/bin:/usr/bin:/bin"
+# What a fresh login of this operator gets, not whatever environment runs the install (a post-merge run, a test).
+# The marker keeps output from profile files out of the value.
+login_out=""
+timeout_cmd=()
+if command -v timeout >/dev/null; then timeout_cmd=(timeout 10); fi
+if [ -n "${SHELL:-}" ] && [ -x "${SHELL}" ]; then
+  login_out=$(env -i HOME="${HOME}" USER="${USER:-}" LOGNAME="${LOGNAME:-${USER:-}}" SHELL="${SHELL}" \
+    PATH=/usr/local/bin:/usr/bin:/bin "${timeout_cmd[@]}" "${SHELL}" -lc 'printf "\nSDLC_LOGIN_PATH=%s\n" "$PATH"' </dev/null 2>/dev/null) || login_out=""
+fi
+if grep -q '^SDLC_LOGIN_PATH=' <<<"${login_out}"; then
+  base_path=$(sed -n 's/^SDLC_LOGIN_PATH=//p' <<<"${login_out}" | tail -1)
+else
+  echo "install: warning: could not read ${SHELL:-\$SHELL}'s login PATH; the unit's PATH uses this shell's PATH" >&2
+  base_path="${PATH}"
+fi
+IFS=: read -ra base_dirs <<<"${base_path}"
+for d in "${base_dirs[@]}"; do add_dir "${d}"; done
+# Interactive rc files (.zshrc, .bashrc) set these up, and a non-interactive login shell does not read them.
+nvm_bin=$(printf '%s\n' "${HOME}"/.nvm/versions/node/*/bin | sort -V | tail -1)
+for d in "${HOME}/.rbenv/shims" "${HOME}/.rbenv/bin" "${nvm_bin}" "${HOME}/.pyenv/shims" "${HOME}/.tfenv/bin"; do
+  if [ -d "${d}" ]; then add_dir "${d}"; fi
+done
+unit_path="${unit_path:+${unit_path}:}/usr/local/bin:/usr/bin:/bin"
 mkdir -p "${unit_dir}"
 sed -e "s|@BUN@|${bun_bin}|g" -e "s|@SUPERVISOR_DIR@|${supervisor}|g" -e "s|@ARCHON_HOME@|${ARCHON_HOME}|g" \
   -e "s|@PATH@|${unit_path}|g" \
   "${supervisor_src}/systemd/sdlc-autopilot.service" >"${unit}"
 chmod 0644 "${unit}"
+for t in ruby bundle node; do
+  (PATH="${unit_path}"; command -v "${t}" >/dev/null) ||
+    echo "install: warning: ${t} not found on the unit's PATH; be/fe runs the supervisor starts will fail their merge gate" >&2
+done
 echo "installed: supervisor into ${supervisor}, unit ${unit} (not enabled; enable with: systemctl --user daemon-reload && systemctl --user enable --now sdlc-autopilot)"

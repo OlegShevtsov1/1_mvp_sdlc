@@ -23,6 +23,28 @@ release pull request `PILOT-<n>: Release vX.Y.Z` carries that section under `## 
 
 ### Security
 
+## [0.9.5] - 2026-11-01
+
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- Runs that `sdlc-autopilot` starts (respond, resume, queued `archon workflow run`, post-merge `launch.ts`) now get
+  the operator's toolchain PATH: `install.sh` renders the unit's `PATH` from the login shell's PATH (a clean
+  `$SHELL -lc`, else the current PATH) plus the existing `~/.rbenv/shims`, `~/.rbenv/bin`, newest
+  `~/.nvm/versions/node/*/bin`, `~/.pyenv/shims` and `~/.tfenv/bin`, each directory once with the standard
+  directories last, and warns when `ruby`, `bundle` or `node` does not resolve; `runDetached` passes the
+  supervisor's environment explicitly. Before, be/fe merge gates failed with `bundle: command not found`
+  (PILOT-559).
+
+### Security
+
 ## [0.9.4] - 2026-11-01
 
 ### Added

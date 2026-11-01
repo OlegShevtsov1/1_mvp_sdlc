@@ -128,7 +128,7 @@ W=/tmp/sdlc-main-v0.7.0-mirror; git worktree remove --force "$W" 2>/dev/null; gi
 "$W/scripts/publish-mirror.sh" 1_mvp_sdlc; echo "rc=$?"
 gh pr list -R OlegShevtsov1/1_mvp_sdlc --state merged --limit 1 --json title,body,url --jq '.[0].title, .[0].url, (.[0].body | test("(?m)^## Changelog$"))'
 git ls-remote --tags git@github.com:OlegShevtsov1/1_mvp_sdlc.git 'v0.7.0*'
-T=$(mktemp -d) && git clone -q --depth 1 git@github.com:OlegShevtsov1/1_mvp_sdlc.git "$T/m" && git -C "$T/m" fetch -q --depth 1 origin tag v0.7.0 && { grep -rIil -e OlegShevtsov1 -e 'oleh shevtsov' "$T/m" --exclude-dir=.git | wc -l; git -C "$T/m" for-each-ref --format='%(contents)' refs/tags/v0.7.0; }; rm -rf "$T"
+T=$(mktemp -d) && git clone -q --depth 1 git@github.com:OlegShevtsov1/1_mvp_sdlc.git "$T/m" && git -C "$T/m" fetch -q --depth 1 origin tag v0.7.0 && { grep -rIil -e OlegShevtsov1 -e '<owner name>' "$T/m" --exclude-dir=.git | wc -l; git -C "$T/m" for-each-ref --format='%(contents)' refs/tags/v0.7.0; }; rm -rf "$T"
 git worktree remove "$W"
 ```
 

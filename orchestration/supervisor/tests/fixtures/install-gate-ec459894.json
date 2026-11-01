@@ -1,0 +1,43 @@
+{
+  "source": "archon.db run ec459894-e870-46d3-a37a-bed2af487528, events up to event_order 346364; status set to paused; paths, host and links scrubbed",
+  "run": {
+    "id": "ec459894-e870-46d3-a37a-bed2af487528",
+    "workflow_name": "post-merge",
+    "status": "paused",
+    "working_path": "/home/operator/.archon/workspaces/OlegShevtsov1/1_mvp_sdlc/post-merge/20261031T121146Z-2663089/repo",
+    "user_message": "run=C8.Tn pr=https://github.com/OlegShevtsov1/1_mvp_sdlc/pull/82 part=C8.TnP492",
+    "metadata": "{\"execution_owner\":{\"host\":\"operator-host\",\"pid\":3059273,\"uid\":1000},\"approval\":{\"nodeId\":\"install-cycle\",\"message\":\"post-merge C8.Tn — встановлення чекає на завершення прогонів пакета, який встановлюється.\\nБлокують: 7bb98ecd factory /home/operator/.archon/workspaces/OlegShevtsov1/1_mvp_sdlc/worktrees/archon/task-factory-1793448723671\\nРепозиторій: OlegShevtsov1/1_mvp_sdlc @ 7170a05224a0d622b8364ca6b9ac92c7fa68ee64\\nДоказ: $ARTIFACTS_DIR/install.json\\n\\nretry → чекати знову і встановити, коли таких прогонів немає\\nabort → не встановлювати (прогін не доставлено; перезапуск post-merge встановить)\\n\",\"type\":\"approval\",\"bodyGateId\":\"install-gate\",\"iteration\":1,\"captureResponse\":false,\"execution\":{\"runId\":\"ec459894-e870-46d3-a37a-bed2af487528\",\"path\":\"install-cycle.install-gate\",\"node\":{\"id\":\"install-gate\",\"kind\":\"gate\"},\"invocation\":{\"id\":\"40bc56f7-10fa-44d4-b995-9f3b0a4aca2c\",\"startedAt\":\"2026-10-31T12:28:00.997Z\",\"loopPath\":[{\"groupId\":\"install-cycle\",\"iteration\":1}]},\"attempt\":{\"id\":\"a60e4feb-84c2-4c9e-a59e-2e67873478b0\",\"startedAt\":\"2026-10-31T12:28:00.999Z\"},\"binding\":{},\"timing\":{\"startedAt\":\"2026-10-31T12:28:00.999Z\",\"durationMs\":5},\"spend\":{\"tokens\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"costUsd\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"stopReason\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"numTurns\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"}},\"accounting\":\"node\",\"lifecycle\":{\"status\":\"suspended\",\"point\":\"approval\"}},\"decisionsAuthored\":true,\"decisions\":[{\"id\":\"retry\",\"label\":\"Retry — чекати знову\"},{\"id\":\"abort\",\"label\":\"Abort — не встановлювати\"}],\"pauseId\":\"a97da343-d733-48d8-ad18-6f73c2be65b3\",\"resolved\":\"approved\",\"answeredVia\":\"cli\",\"answeredAt\":\"2026-10-31T12:28:23.275Z\"}}",
+    "started_at": "2026-10-31 12:28:26",
+    "last_activity_at": "2026-10-31 12:28:01",
+    "completed_at": null
+  },
+  "events": [
+    {
+      "id": "605b2e52-dac0-43e2-a2ce-278af04d9dce",
+      "workflow_run_id": "ec459894-e870-46d3-a37a-bed2af487528",
+      "event_order": 346362,
+      "event_type": "node_suspended",
+      "step_name": "install-cycle.install-gate",
+      "data": "{\"node\":{\"id\":\"install-gate\",\"kind\":\"gate\"},\"invocation\":{\"id\":\"40bc56f7-10fa-44d4-b995-9f3b0a4aca2c\",\"startedAt\":\"2026-10-31T12:28:00.997Z\",\"loopPath\":[{\"groupId\":\"install-cycle\",\"iteration\":1}]},\"attempt\":{\"id\":\"a60e4feb-84c2-4c9e-a59e-2e67873478b0\",\"startedAt\":\"2026-10-31T12:28:00.999Z\"},\"binding\":{},\"timing\":{\"startedAt\":\"2026-10-31T12:28:00.999Z\",\"durationMs\":5},\"spend\":{\"tokens\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"costUsd\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"stopReason\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"numTurns\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"}},\"accounting\":\"node\",\"type\":\"gate\",\"duration_ms\":5,\"suspend_point\":\"approval\",\"node_output\":\"\",\"iteration\":1}",
+      "created_at": "2026-10-31 12:28:01"
+    },
+    {
+      "id": "d05130e8-1f3c-4ed9-9012-be0160a1df94",
+      "workflow_run_id": "ec459894-e870-46d3-a37a-bed2af487528",
+      "event_order": 346363,
+      "event_type": "approval_requested",
+      "step_name": "install-cycle.install-gate",
+      "data": "{\"message\":\"post-merge C8.Tn — встановлення чекає на завершення прогонів пакета, який встановлюється.\\nБлокують: 7bb98ecd factory /home/operator/.archon/workspaces/OlegShevtsov1/1_mvp_sdlc/worktrees/archon/task-factory-1793448723671\\nРепозиторій: OlegShevtsov1/1_mvp_sdlc @ 7170a05224a0d622b8364ca6b9ac92c7fa68ee64\\nДоказ: $ARTIFACTS_DIR/install.json\\n\\nretry → чекати знову і встановити, коли таких прогонів немає\\nabort → не встановлювати (прогін не доставлено; перезапуск post-merge встановить)\\n\"}",
+      "created_at": "2026-10-31 12:28:01"
+    },
+    {
+      "id": "b9b5f05a-7875-4679-a4d2-8e6a9e385eb3",
+      "workflow_run_id": "ec459894-e870-46d3-a37a-bed2af487528",
+      "event_order": 346364,
+      "event_type": "node_suspended",
+      "step_name": "install-cycle",
+      "data": "{\"node\":{\"id\":\"install-cycle\",\"kind\":\"loop_group\"},\"invocation\":{\"id\":\"ad244bd1-f04b-4b39-848d-09713c1fd101\",\"startedAt\":\"2026-10-31T12:12:06.609Z\",\"loopPath\":[]},\"attempt\":{\"id\":\"471c180d-cb91-4866-b0a8-9d3b296aa860\",\"startedAt\":\"2026-10-31T12:12:06.610Z\"},\"binding\":{},\"timing\":{\"startedAt\":\"2026-10-31T12:12:06.610Z\",\"durationMs\":954407},\"spend\":{\"tokens\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"costUsd\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"stopReason\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"},\"numTurns\":{\"source\":\"unavailable\",\"reason\":\"not_applicable\"}},\"accounting\":\"aggregate\",\"type\":\"loop_group\",\"duration_ms\":954407,\"aggregate\":true,\"suspend_point\":\"approval\",\"node_output\":\"\"}",
+      "created_at": "2026-10-31 12:28:01"
+    }
+  ]
+}

@@ -23,6 +23,112 @@ release pull request `PILOT-<n>: Release vX.Y.Z` carries that section under `## 
 
 ### Security
 
+## [0.9.2] - 2026-11-01
+
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- `publish-mirror` judges each check of the mirror PR by its newest run, so a run cancelled because publish-mirror's own
+  title edit superseded it no longer counts as red and blocks the merge; a cancelled newest run still does (PILOT-528).
+- The `sdlc-autopilot` supervisor launches `post-merge` only for PRs merged at or after `post_merge.since` in its
+  `policy.yaml` (set to 2026-11-01 06:00 UTC), else its first start, kept in `~/.local/state/sdlc-autopilot/state.json`,
+  so enabling it no longer re-runs post-merge for PRs merged before; a `post-merge` run naming the PR by URL,
+  `owner/repo#n` or `#n` in its repo suppresses the launch (PILOT-533).
+
+### Security
+
+## [0.9.1] - 2026-11-01
+
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- The `sdlc-autopilot` supervisor's ledger no longer masks a file path with a mixed-case segment (such as the mirror's
+  `OlegShevtsov1` owner) as a base64 secret: the base64 rule now stops at `/` and masks only contiguous blobs
+  (PILOT-521).
+- The `sdlc-autopilot` systemd unit that `install.sh` renders now puts the Claude CLI's directory (`command -v
+  claude`, else `~/.local/bin` with a warning) and the bun, archon and gh directories on its `PATH`, each once and
+  ahead of `/usr/local/bin:/usr/bin:/bin`; `scripts/ci/archon-check.sh` renders the unit into a scratch
+  `XDG_CONFIG_HOME` instead of overwriting the operator's (PILOT-524).
+
+### Security
+
+## [0.9.0] - 2026-11-01
+
+### Added
+
+- `orchestration/supervisor/`, the skeleton of the `sdlc-autopilot` supervisor: every 30 s it reads Archon's run
+  state read-only, classifies each pause as plan gate, install gate, post-merge gate or other, and writes one line
+  per pause event to `~/.local/state/sdlc-autopilot/ledger.jsonl`, including pauses that predate its start. Its
+  `policy.yaml` starts without rules. `install.sh` copies it to `~/.archon/supervisor` and renders its systemd user
+  unit `sdlc-autopilot.service` without enabling it, and `scripts/ci/check.sh supervisor` runs its tests in CI
+  (PILOT-507).
+- The `sdlc-autopilot` supervisor launches `post-merge` once for every PR of a factory run that finished (completed
+  or cancelled) in the last 14 days and that GitHub reports merged, with `run=PILOT<n>` for a `PILOT-<n>: Release …`
+  PR and `run=C8.Tn pr=<url> part=C8.TnP<n>` otherwise. It skips a PR that already has a post-merge run, failed ones
+  included, waits while load1 > 8, `MemAvailable` < 1500 MB, 5 runs or 3 runs of the repo are running, escalates a
+  PR without a `PILOT-<n>:` title, in a repo outside its reach or whose launch fails, and starts `launch.ts`
+  detached; every launch is a ledger line (PILOT-510).
+- The `sdlc-autopilot` supervisor resumes a failed run whose error is transient (Claude session limit, OAuth, GitHub
+  5xx, network, SIGTERM, no first output within 60 s, `database is locked`) with `archon workflow resume` after 2, 5
+  and 15 minutes, at most 3 times per run and class, then escalates once with the class and a recommendation, kept in
+  the ledger line's `evidence.message`. A resume that leaves no new failure event counts as an attempt and is retried
+  on the same event. It never resumes over a live owner process or while the host has under 1500 MB available or load1
+  above 8, and escalates failures older than 60 minutes, or whose time cannot be read, instead of resuming them
+  (`policy.yaml` rule `transient-resume`). A resume that cannot start (the run has no working directory, it is not a
+  git work tree, or `archon` is not on PATH) is escalated, a run in `1_hrss_pilot` or `pilot-srv-*` is escalated and
+  never resumed, and a malformed rule stops the supervisor at startup. Ledger evidence text and message are stored with token-like strings masked (PILOT-508).
+- sdlc-autopilot gate policy: the supervisor answers a plan gate whose plan is ready and has only Non-blocking open
+  questions, retries an install gate while an active factory run blocks it (up to 4 retries, ≈1 h), escalates every
+  post-merge gate, 🔒 steps included, and escalates everything else; answers go
+  through a detached `archon workflow respond` with the pause's occurrence (PILOT-509).
+- The `sdlc-autopilot` supervisor starts queued factory briefs: a ready brief put in
+  `~/.config/sdlc-autopilot/queue/<repo>/<name>.md` is launched detached as `archon workflow run factory` in that
+  repo's checkout, `1_mvp_sdlc` first and then oldest first, and moved to `queue/started/<repo>/`, renamed
+  `<run-id>--<name>.md` once the Archon run carrying its launch marker (a trailing `sdlc-autopilot-launch: <uuid>`
+  line of the factory message) shows up. A brief does not start while an open factory run of its repo, a paused one
+  included, names an overlapping repo-relative path (`CHANGELOG.md`, or a file under a named directory), and a brief
+  that names no path runs alone in its repo. Queued briefs and post-merge launches share the limits, now in
+  `policy.yaml` (5 runs, 3 per repo, `MemAvailable` ≥ 1500 MB, load1 ≤ 8); transient resumes read the same host
+  threshold, and the `transient-resume` rule no longer has its own `host` key. A brief for an unknown or out-of-reach repo, without a `PILOT-<n>` card,
+  whose launch fails or whose run does not show up within 15 minutes escalates once. Once a day the supervisor
+  removes test leftovers older than 24 h (`~/.cache/orchestration-tests/run-*`, `/tmp/bun-*`) (PILOT-511).
+- The `sdlc-autopilot` supervisor sends every escalation of the last 24 h to the operator as one Telegram message
+  (`@mvp_vpn_alerts_bot`, variables `TELEGRAM_MVP_VPN_ALERTS_{BOT_TOKEN,CHAT_ID,THREAD_ID}` from
+  `~/.config/telegram-bots/.env`) naming the run, the step and the reason, and retries a send that fails on the next
+  tick. A message about an open pause carries that pause's own buttons (approve/skip/abort on a post-merge gate,
+  retry/abort on an install gate); a press from the operator's chat answers that pause once with
+  `archon workflow respond --occurrence` and is written to the ledger with `rule: operator`, and `/status` replies
+  with the running runs, the runs waiting for the operator, the queue and the next brief. Updates from other chats
+  are ignored, and the bot token never reaches the ledger, the state file or the logs (PILOT-512).
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- The after-merge test fixture `plugins/mvp-sdlc/tests/fixtures/after-merge/sdlc-77.md` no longer quotes the owner
+  display name from its mirror owner scan (now `<owner name>`), so the release owner scan of the public mirror prints
+  0 again (PILOT-505).
+
+### Security
+
 ## [0.8.0] - 2026-10-31
 
 ### Added

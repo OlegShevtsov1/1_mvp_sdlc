@@ -32,7 +32,8 @@
 # deliveries and ends not delivered, and every other fixture asserts the retry was skipped.
 # Needs the binaries from `tools.sh archon` and bun on PATH.
 # Every Archon call runs with a throwaway ARCHON_HOME: without one a binary reads and writes the
-# operator's live ~/.archon.
+# operator's live ~/.archon. install.sh also runs with a throwaway XDG_CONFIG_HOME, or it would overwrite the
+# operator's systemd unit.
 set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 cd "${root}"
@@ -793,8 +794,11 @@ for version in "${versions[@]}"; do
   "${archon_bin}" provider add claude >"${work}/provider.out" 2>&1 ||
     fail "${version}" "provider add claude failed: $(cat "${work}/provider.out")"
 
-  ARCHON_BIN="${archon_bin}" INSTALL_SKIP_RUNTIME_TOOLS=1 bash install.sh >"${work}/install.out" 2>&1 ||
+  config="${work}/config-${version}"
+  ARCHON_BIN="${archon_bin}" XDG_CONFIG_HOME="${config}" INSTALL_SKIP_RUNTIME_TOOLS=1 bash install.sh >"${work}/install.out" 2>&1 ||
     fail "${version}" "install.sh failed: $(cat "${work}/install.out")"
+  [ -f "${config}/systemd/user/sdlc-autopilot.service" ] ||
+    fail "${version}" "install.sh did not render the unit into the scratch XDG_CONFIG_HOME"
 
   fixture_count=$(find "${fixtures_dir}" -name '*.stubs.yaml' | wc -l)
   rc=0

@@ -1,0 +1,29 @@
+# sdlc-autopilot policy (README.md describes each rule). A pause that no rule answers escalates to the operator;
+# a failed run follows `transient-resume`. Every post-merge gate, 🔒 steps included, always escalates. `limits` bounds
+# every run the supervisor starts.
+version: 1
+rules:
+  # A failed run whose error is one of these transient classes is resumed with `archon workflow resume` after 2, 5
+  # and 15 minutes, at most 3 times per run and class, then escalated once. A resume waits while the run's owner
+  # process is alive or the host is over the `limits` threshold. A failure older than 60 minutes is escalated, not
+  # resumed, and so is every failed run in 1_hrss_pilot or pilot-srv-*.
+  - id: transient-resume
+    classes: [session-limit, oauth, github-5xx, network, sigterm, first-event-timeout, db-locked]
+    backoff_minutes: [2, 5, 15]
+    max_age_minutes: 60
+  - id: plan-gate
+    approve_text: "Approved by sdlc-autopilot policy plan-gate (ready, non-blocking only)."
+    open_question_prefix: Non-blocking
+  - id: install-gate
+    max_retries: 4
+# Every run the supervisor starts, post-merge and queued briefs alike, waits for a free slot and an idle enough host;
+# a transient resume waits for the same host threshold.
+limits:
+  max_runs: 5
+  max_runs_per_repo: 3
+  min_mem_available_mb: 1500
+  max_load1: 8
+# A merged PR gets its post-merge run only when GitHub merged it at or after `since` (ISO timestamp with a zone);
+# without `since`, at or after the supervisor's first start, kept in ~/.local/state/sdlc-autopilot/state.json.
+post_merge:
+  since: "2026-11-01T06:00:00Z"

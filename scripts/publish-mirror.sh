@@ -374,7 +374,8 @@ print(pr["number"], pr["html_url"])' <<<"${created}")
   log "PR ${pr_url}"
 }
 
-# Green: at least one check run, all completed, none failed. Red or timed out: exit 3 with the PR URL on stdout.
+# Green: at least one check run, and the newest run of each check name completed without failing (an older, superseded
+# run of the same name is ignored). Red or timed out: exit 3 with the PR URL on stdout.
 wait_checks() {
   local timeout=${MIRROR_CHECKS_TIMEOUT:-1800} interval=${MIRROR_CHECKS_INTERVAL:-30} start=${SECONDS} runs state
   while :; do
@@ -383,6 +384,10 @@ wait_checks() {
     state=$(python3 -c '
 import json, sys
 runs = json.load(sys.stdin)["check_runs"]
+newest = {}
+for r in sorted(runs, key=lambda r: (r.get("started_at") or "9", r.get("completed_at") or "9", r["id"])):
+    newest[r["name"]] = r
+runs = list(newest.values())
 failed = [r["name"] for r in runs if r["status"] == "completed" and r["conclusion"] not in ("success", "neutral", "skipped")]
 if failed:
     print("red " + ", ".join(failed))

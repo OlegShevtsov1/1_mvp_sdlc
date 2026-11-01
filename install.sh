@@ -5,9 +5,12 @@
 # pack's scripts/_lib/ (the factory's Claude login check alerts through it). Whatever it replaces is first copied to
 # <ARCHON_HOME>/workflows-backup/<UTC timestamp>/ (outside workflows/, which Archon reads in full).
 # Other packs, such as mvp-ops, are never touched. Every installed workflow is then validated;
-# a validation error exits 1.
-# Knobs: ARCHON_HOME (default ~/.archon), ARCHON_BIN (default archon),
-# INSTALL_SKIP_RUNTIME_TOOLS=1 skips the gh/claude checks (needed to run workflows, not to install them).
+# a validation error exits 1. Only after validation passes, the sdlc-autopilot supervisor
+# (orchestration/supervisor) is copied to <ARCHON_HOME>/supervisor and its systemd user unit rendered into
+# <XDG_CONFIG_HOME>/systemd/user/sdlc-autopilot.service; the unit is not enabled.
+# Knobs: ARCHON_HOME (default ~/.archon), ARCHON_BIN (default archon), XDG_CONFIG_HOME (default ~/.config),
+# INSTALL_SKIP_RUNTIME_TOOLS=1 skips the gh/claude checks (needed to run workflows, not to install them); a claude
+# not found then leaves the unit's PATH assuming ~/.local/bin, with a warning.
 # Install from `main` for production; check out `develop` to test a change before it is released.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,6 +20,7 @@ export ARCHON_HOME
 workflows="${ARCHON_HOME}/workflows"
 factory_src="${HERE}/orchestration/factory/.archon/workflows/sdlc-factory/factory"
 factory_rel="sdlc-factory/factory"
+supervisor_src="${HERE}/orchestration/supervisor"
 
 die() { echo "install: $*" >&2; exit 1; }
 
@@ -77,3 +81,32 @@ if [ "${failed}" -ne 0 ]; then
   fi
   die "validation failed (see above). There was no previous install to restore (backup: nothing to back up)."
 fi
+
+supervisor="${ARCHON_HOME}/supervisor"
+unit_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
+unit="${unit_dir}/sdlc-autopilot.service"
+rm -rf "${supervisor}"
+cp -R "${supervisor_src}" "${supervisor}"
+# A user unit does not inherit the login PATH; bun, archon, claude and gh must resolve under systemd too.
+bun_bin="$(command -v bun)"
+archon_bin="$(command -v "${ARCHON_BIN}")"
+claude_bin="$(command -v claude || true)"
+if [ -n "${claude_bin}" ]; then
+  claude_dir="$(dirname "${claude_bin}")"
+else
+  claude_dir="${HOME}/.local/bin"
+  echo "install: warning: claude not found; the unit's PATH assumes ${claude_dir}" >&2
+fi
+gh_bin="$(command -v gh || true)"
+# Tool directories in this order, each once; the standard directories stay last, in their usual order.
+unit_path=""
+for d in "$(dirname "${bun_bin}")" "$(dirname "${archon_bin}")" "${claude_dir}" ${gh_bin:+"$(dirname "${gh_bin}")"}; do
+  case ":${unit_path}/usr/local/bin:/usr/bin:/bin:" in *":${d}:"*) ;; *) unit_path="${unit_path}${d}:" ;; esac
+done
+unit_path="${unit_path}/usr/local/bin:/usr/bin:/bin"
+mkdir -p "${unit_dir}"
+sed -e "s|@BUN@|${bun_bin}|g" -e "s|@SUPERVISOR_DIR@|${supervisor}|g" -e "s|@ARCHON_HOME@|${ARCHON_HOME}|g" \
+  -e "s|@PATH@|${unit_path}|g" \
+  "${supervisor_src}/systemd/sdlc-autopilot.service" >"${unit}"
+chmod 0644 "${unit}"
+echo "installed: supervisor into ${supervisor}, unit ${unit} (not enabled; enable with: systemctl --user daemon-reload && systemctl --user enable --now sdlc-autopilot)"

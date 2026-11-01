@@ -21,7 +21,7 @@ rules:
 limits:
   max_runs: 5
   max_runs_per_repo: 3
-  min_mem_available_mb: 1500
+  min_mem_available_mb: 800
   max_load1: 8
 # A merged PR gets its post-merge run only when GitHub merged it at or after `since` (ISO timestamp with a zone);
 # without `since`, at or after the supervisor's first start, kept in ~/.local/state/sdlc-autopilot/state.json.

@@ -99,8 +99,10 @@ the message is the brief text followed by a line `sdlc-autopilot-launch: <uuid>`
 
 Every run the supervisor starts, post-merge and queued briefs alike, needs a free slot and an idle enough host, set
 by the top-level `limits` block of `policy.yaml`: `max_runs` (5) pending or running runs in all, `max_runs_per_repo`
-(3) in the repo, `MemAvailable` ≥ `min_mem_available_mb` (1500) and load1 ≤ `max_load1` (8). Paused runs take no
-slot. A transient resume waits for the same host threshold. A missing or non-positive limit stops the supervisor at
+(3) in the repo, `MemAvailable` ≥ `min_mem_available_mb` (800) and load1 ≤ `max_load1` (8). Paused runs take no
+slot. A transient resume waits for the same host threshold. A tick that defers a brief or a post-merge launch only
+for the host prints the limit and the measured value to the journal, e.g. `1 queued brief(s) wait for host
+resources: MemAvailable 700 MB < 800 MB`. A missing or non-positive limit stops the supervisor at
 start. Besides, a brief does not start while a factory run of the same repo is open (pending, running or paused)
 whose message names an overlapping repo-relative path: the same path, or one under a named directory
 (`CHANGELOG.md` included). URLs, absolute, `~` and `$VAR` paths and `owner/repo` names do not count,

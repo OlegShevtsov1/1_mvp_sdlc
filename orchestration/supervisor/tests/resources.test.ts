@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { activeRuns, canStart, loadLimits } from "../src/resources.ts";
+import { activeRuns, canStart, hostShortfall, loadLimits } from "../src/resources.ts";
 import type { RunView } from "../src/runs.ts";
 
 const IDLE = { memAvailableMb: 8000, load1: 1 };
@@ -26,14 +26,23 @@ describe("canStart", () => {
     expect(canStart("OlegShevtsov1/1_mvp_sdlc", activeRuns(archon.slice(0, 3)), IDLE)).toBe(true);
   });
 
-  test("does not start below 1500 MB available or above load 8", () => {
+  test("does not start below 800 MB available or above load 8", () => {
     const at = (memAvailableMb: number, load1: number) => canStart("OlegShevtsov1/1_mvp_sdlc", [], { memAvailableMb, load1 });
-    expect(at(1499, 1)).toBe(false);
-    expect(at(1500, 1)).toBe(true);
+    expect(at(1342, 0.8)).toBe(true);
+    expect(at(700, 1)).toBe(false);
+    expect(at(799, 1)).toBe(false);
+    expect(at(800, 1)).toBe(true);
     expect(at(8000, 8)).toBe(true);
     expect(at(8000, 8.01)).toBe(false);
     expect(at(Number.NaN, 1)).toBe(false);
     expect(at(8000, Number.NaN)).toBe(false);
+  });
+
+  test("hostShortfall names each missed host limit with the measured value", () => {
+    expect(hostShortfall({ memAvailableMb: 1342, load1: 0.8 })).toBeNull();
+    expect(hostShortfall({ memAvailableMb: 799.6, load1: 1 })).toBe("MemAvailable 799 MB < 800 MB");
+    expect(hostShortfall({ memAvailableMb: 8000, load1: 9.5 })).toBe("load1 9.5 > 8");
+    expect(hostShortfall({ memAvailableMb: 700, load1: 9.5 })).toBe("MemAvailable 700 MB < 800 MB, load1 9.5 > 8");
   });
 
   test("loadLimits rejects a missing or non-positive value", () => {
@@ -44,7 +53,7 @@ describe("canStart", () => {
       return path;
     };
     expect(loadLimits(join(import.meta.dir, "..", "policy.yaml"))).toEqual({
-      max_runs: 5, max_runs_per_repo: 3, min_mem_available_mb: 1500, max_load1: 8,
+      max_runs: 5, max_runs_per_repo: 3, min_mem_available_mb: 800, max_load1: 8,
     });
     expect(() => loadLimits(policy(""))).toThrow("limits.max_runs");
     expect(() => loadLimits(policy("limits:\n  max_runs: 5\n  max_runs_per_repo: 3\n  min_mem_available_mb: 1500\n")))

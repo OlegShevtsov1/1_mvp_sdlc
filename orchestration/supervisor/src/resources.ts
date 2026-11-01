@@ -34,9 +34,20 @@ export function readHost(text?: { meminfo: string; loadavg: string }): Host {
   return { memAvailableMb: Number(kb) / 1024, load1 };
 }
 
-export function hostIdle(host: Host): boolean {
+// Names each host limit `host` misses, e.g. "MemAvailable 700 MB < 800 MB"; null when the host is idle enough. A NaN
+// reading misses its limit.
+export function hostShortfall(host: Host): string | null {
   const l = limits();
-  return host.memAvailableMb >= l.min_mem_available_mb && host.load1 <= l.max_load1;
+  const missed: string[] = [];
+  if (!(host.memAvailableMb >= l.min_mem_available_mb)) {
+    missed.push(`MemAvailable ${Math.floor(host.memAvailableMb)} MB < ${l.min_mem_available_mb} MB`);
+  }
+  if (!(host.load1 <= l.max_load1)) missed.push(`load1 ${host.load1} > ${l.max_load1}`);
+  return missed.length > 0 ? missed.join(", ") : null;
+}
+
+export function hostIdle(host: Host): boolean {
+  return hostShortfall(host) === null;
 }
 
 // A paused run holds no CPU, so it does not take a slot.
@@ -45,8 +56,11 @@ export function activeRuns(runs: RunView[]): RunView[] {
 }
 
 // `active` holds only runs that take a slot: `activeRuns` of Archon's runs plus what this tick already launched.
-export function canStart(repo: string, active: RunView[], host: Host): boolean {
+export function slotFree(repo: string, active: RunView[]): boolean {
   const l = limits();
-  return hostIdle(host) && active.length < l.max_runs
-    && active.filter((r) => repoOf(r.cwd) === repo).length < l.max_runs_per_repo;
+  return active.length < l.max_runs && active.filter((r) => repoOf(r.cwd) === repo).length < l.max_runs_per_repo;
+}
+
+export function canStart(repo: string, active: RunView[], host: Host): boolean {
+  return hostIdle(host) && slotFree(repo, active);
 }

@@ -124,9 +124,9 @@ describe("decideFailure", () => {
   });
 
   test("resume waits while the host is over the resource threshold", () => {
-    expect(decide(2, 0, { host: { memAvailableMb: 1499, load1: 1 } })).toBeNull();
+    expect(decide(2, 0, { host: { memAvailableMb: 799, load1: 1 } })).toBeNull();
     expect(decide(2, 0, { host: { memAvailableMb: 4000, load1: 8.5 } })).toBeNull();
-    expect(decide(2, 0, { host: { memAvailableMb: 1500, load1: 8 } })).toMatchObject({ action: "resume" });
+    expect(decide(2, 0, { host: { memAvailableMb: 800, load1: 8 } })).toMatchObject({ action: "resume" });
   });
 
   test("resume waits while the owner is alive", () => {

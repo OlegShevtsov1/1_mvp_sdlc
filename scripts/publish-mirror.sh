@@ -71,19 +71,22 @@ drop_unsynced() { rm -f "${tmp}/export/.github/dependabot.yml"; }
 
 replace_exprs=(-e "s/${src_owner}/${dst_owner}/g" -e "s/${src_owner_cap}/${dst_owner}/g" -e "s/${src_name}/${dst_name}/g")
 replace_owner() {
+  # grep exits 1 when there is nothing to replace (an owner-free tree, such as the mirror's own, which
+  # scripts/ci/owner-scan.sh scans there), 2 on an error.
   (cd "${tmp}/export" &&
-    grep -rlIZ -e "${src_owner}" -e "${src_owner_cap}" -e "${src_name}" . |
+    { grep -rlIZ -e "${src_owner}" -e "${src_owner_cap}" -e "${src_name}" . || [ $? -eq 1 ]; } |
     xargs -0 -r sed -i "${replace_exprs[@]}")
 }
 
-# Fail closed: any case, binaries included, path names included. Only paths are printed, never content.
-# grep exits 1 for no match and 2 for a scan error, which must not pass as clean.
+# Fail closed: the login or the display name, any case, binaries included, path names included. Only paths are
+# printed, never content. grep exits 1 for no match and 2 for a scan error, which must not pass as clean.
 refuse_leftovers() {
   local in_content in_names hits rc=0
-  in_content=$(cd "${tmp}/export" && grep -rli -e "${src_owner}" .) || rc=$?
+  in_content=$(cd "${tmp}/export" && grep -rli -e "${src_owner}" -e "${src_name}" .) || rc=$?
   [ "${rc}" -le 1 ] || die 2 "refusing to publish: the leftover scan failed"
-  in_names=$(cd "${tmp}/export" && find . -iname "*${src_owner}*") || die 2 "refusing to publish: the leftover scan failed"
-  hits=$(printf '%s\n%s\n' "${in_content}" "${in_names}" | sed '/^$/d' | sort -u)
+  in_names=$(cd "${tmp}/export" && find . -iname "*${src_owner}*" -o -iname "*${src_name}*") ||
+    die 2 "refusing to publish: the leftover scan failed"
+  hits=$(printf '%s\n%s\n' "${in_content}" "${in_names}" | sed '/^$/d; s|^\./||' | sort -u)
   [ -z "${hits}" ] || { printf '%s\n' "${hits}" >&2; die 2 "refusing to publish: these files still contain the primary owner"; }
 }
 
@@ -509,4 +512,5 @@ main() {
   git -C "${mirror}" rev-parse origin/main
 }
 
-main "$@"
+# scripts/ci/owner-scan.sh sources this file for the owner strings and the export steps.
+[ "${BASH_SOURCE[0]}" != "$0" ] || main "$@"

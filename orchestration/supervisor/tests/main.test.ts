@@ -143,4 +143,25 @@ describe("runDetached", () => {
     expect(stdin).toBe("/dev/null");
     expect(pwd).toBe(cwd);
   });
+
+  test("runDetached gives the command the supervisor's PATH, the unit's", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "supervisor-cwd-"));
+    const log = join(dir, "logs", "path.log");
+    const saved = process.env.PATH;
+    // The real PATH stays as a suffix: setsid and sh must still resolve.
+    const unitPath = `${join(cwd, ".rbenv", "shims")}:${saved}`;
+    process.env.PATH = unitPath;
+    try {
+      runDetached(["sh", "-c", 'printf "%s\\n" "$PATH"'], cwd, log);
+    } finally {
+      process.env.PATH = saved;
+    }
+
+    let out = "";
+    for (let i = 0; i < 50 && !out.includes("\n"); i++) {
+      await Bun.sleep(100);
+      out = existsSync(log) ? readFileSync(log, "utf8") : "";
+    }
+    expect(out.split("\n")[0]).toBe(unitPath);
+  });
 });

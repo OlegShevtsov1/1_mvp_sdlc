@@ -5,7 +5,9 @@ bun service with no LLM in its decisions: every answer follows a rule in [`polic
 that no rule answers escalates to the operator.
 
 `install.sh` copies this directory to `~/.archon/supervisor` and renders the systemd user unit
-`sdlc-autopilot.service` without enabling it.
+`sdlc-autopilot.service` without enabling it. The unit's `PATH` carries the operator's login PATH and the
+rbenv/nvm/pyenv/tfenv directories that exist, so the runs the supervisor starts find `ruby`, `bundle` and `node`
+([details](../docs/archon-factory.md#2-install-update-and-roll-back)).
 
 ## The tick
 

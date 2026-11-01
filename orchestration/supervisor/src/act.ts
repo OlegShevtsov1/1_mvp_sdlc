@@ -18,12 +18,14 @@ export type Decision = {
 };
 
 // `archon workflow respond|resume|run` runs the resumed workflow in the foreground for hours: the child gets its own
-// session and no stdin, and is never wrapped in `timeout`.
+// session and no stdin, and is never wrapped in `timeout`. It gets the supervisor's environment, whose PATH is the
+// unit's Environment=PATH= (the operator's toolchains); passed explicitly because Bun's default is the environment
+// captured at process start.
 export function runDetached(argv: string[], cwd: string, logFile: string): void {
   mkdirSync(dirname(logFile), { recursive: true });
   const fd = openSync(logFile, "a");
   try {
-    Bun.spawn(["setsid", ...argv], { cwd, stdin: "ignore", stdout: fd, stderr: fd }).unref();
+    Bun.spawn(["setsid", ...argv], { cwd, env: process.env, stdin: "ignore", stdout: fd, stderr: fd }).unref();
   } finally {
     closeSync(fd);
   }

@@ -1,14 +1,15 @@
 # release.sh
 
-Runs one step of a `1_mvp_sdlc` release from reviewed code: the release PR merge, the tag, the mirror sync and the
-install. A release-prep PR writes its post-merge steps A1–A4 as one `release.sh` line each, and the sdlc-autopilot
+Runs one step of a `1_mvp_sdlc` release from reviewed code: the release PR merge, the tag, the mirror sync, the
+install and the `mvp-sdlc` plugin update for be and fe. A release-prep PR writes its post-merge steps A1–A5 as one
+`release.sh` line each, and the sdlc-autopilot
 supervisor approves such a step by itself ([`post-merge-allowlist`](../orchestration/supervisor/README.md#post-merge-allowlist),
 operator decision 2026-11-01, PILOT-545). Any other step text still goes to the operator.
 
 ## Usage
 
 ```bash
-bash scripts/release.sh <merge-release-pr|tag|mirror|install|verify> v<X.Y.Z>
+bash scripts/release.sh <merge-release-pr|tag|mirror|install|verify|plugin> v<X.Y.Z>
 ```
 
 It runs from the repository it is in (its top level), fetches `origin` with its tags (never `--prune`) and reads the
@@ -23,6 +24,7 @@ again and changes nothing, and a rerun after a fix finishes the release. Each pr
 | `mirror` | Needs the tag on `origin`. In a temporary worktree at the tag it runs that tag's `scripts/publish-mirror.sh 1_mvp_sdlc --dry-run`, and only when it passes, the real run. Proves the mirror has `refs/tags/vX.Y.Z`. A rerun is safe: publish-mirror then has nothing to sync, or resumes its open PR. |
 | `install` | Needs the tag on `origin`. While `archon workflow status --all --json` lists a running `factory`, `plan-review` or `plugin-probe` run (or cannot be read), it waits. Then it runs `./install.sh` from a temporary worktree at the tag and proves what it installed (below). |
 | `verify` | Read-only: proves the release merge, that `origin`'s tag is on it, that the mirror has the tag, and the install. It pushes, creates and merges nothing. |
+| `plugin` | Needs the tag on `origin`. Resolves each checkout of `RELEASE_PLUGIN_PROJECTS` to its top level (read-only `git rev-parse`; one that is not a checkout fails before any `claude` call), runs `claude plugin marketplace update mvp`, then `claude plugin update mvp-sdlc@mvp --scope project --json` with the cwd at each top level: the CLI has no project-path option and keeps project-scope state under its config dir, so the checkouts' working trees are not written. Proves that `<CLAUDE_CONFIG_DIR>/plugins/cache/mvp/mvp-sdlc/X.Y.Z/.claude-plugin/plugin.json` is version `X.Y.Z`, and that `claude plugin list --json` has a project-scope `mvp-sdlc@mvp` entry at `X.Y.Z` with that cache as its install path for each top level. It never trusts the update's exit code: from a cwd that matches no project the CLI updates another one and exits 0. Open Claude sessions in be and fe load the new version after a restart. |
 
 The install proofs compare `<ARCHON_HOME>/workflows/sdlc-factory/factory` with the tag's factory pack (`diff -r`,
 `notify-telegram.sh` aside), its `scripts/_lib/notify-telegram.sh` with `scripts/ci/notify-telegram.sh`, each
@@ -50,10 +52,12 @@ PR checks; [publish-mirror.README.md](publish-mirror.README.md)).
 | `MIRROR_CHECKS_TIMEOUT` | `1200` | passed to publish-mirror.sh |
 | `MIRROR_TARGET_URL` | the mirror's SSH URL | the mirror, for publish-mirror.sh and the mirror tag proof |
 | `ARCHON_HOME` | `~/.archon` | where `install.sh` installs and the proofs look |
+| `RELEASE_PLUGIN_PROJECTS` | `~/projects/mvp/1_mvp_pilot_be ~/projects/mvp/1_mvp_pilot_fe` | space-separated checkouts whose project-scope `mvp-sdlc` `plugin` updates |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | the claude CLI's config dir, where `plugin` reads the cache |
 
 ## The post-merge steps
 
-A release-prep PR's "After merge (operator)" writes A1–A4 as one block each, with `git fetch origin --tags` and
+A release-prep PR's "After merge (operator)" writes A1–A5 as one block each, with `git fetch origin --tags` and
 exactly one `release.sh` line; read-only proof lines (`git log`, `gh pr view`, …) may follow:
 
 ```bash
@@ -61,8 +65,10 @@ git fetch origin --tags
 bash scripts/release.sh merge-release-pr vX.Y.Z
 ```
 
-A2 is `… tag vX.Y.Z`, A3 `… mirror vX.Y.Z`, A4 `… install vX.Y.Z`, and `… verify vX.Y.Z` is a closing proof. The
+A2 is `… tag vX.Y.Z`, A3 `… mirror vX.Y.Z`, A4 `… install vX.Y.Z`, A5 `… plugin vX.Y.Z`, and `… verify vX.Y.Z` is a
+closing proof. The
 post-merge agent already works in the run's worktree, so no `cd` is needed. Any other write command, or prose outside
 the block and its `Expected:` items, sends the step to the operator.
 
-`scripts/ci/test-release.sh` tests every subcommand against a local bare `origin`, a fake `gh` and a fake `archon`.
+`scripts/ci/test-release.sh` tests every subcommand against a local bare `origin`, a fake `gh`, a fake `archon` and a
+fake `claude`.

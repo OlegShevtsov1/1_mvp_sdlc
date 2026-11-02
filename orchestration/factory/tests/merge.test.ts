@@ -117,6 +117,31 @@ describe("merge", () => {
     expect(git(remote, "branch --list feature-x")).toBe("");
   });
 
+  test("an approved head goes to gh as --match-head-commit; an empty one keeps today's argv", () => {
+    const { repo, remote, head } = pullRequest();
+    const r = run(repo, remote, { INPUTS_HEAD_SHA: head });
+    expect(r.doc).toEqual(MERGED);
+    expect(merges(r)).toEqual([`pr merge ${PR_URL} --repo example/repo --squash --match-head-commit ${head} --subject PILOT-9: a title (#3)`]);
+    const today = run(pullRequest().repo, remote, { INPUTS_HEAD_SHA: "" });
+    expect(merges(today)).toEqual([`pr merge ${PR_URL} --repo example/repo --squash --subject PILOT-9: a title (#3)`]);
+  });
+
+  test("a refused approved merge is reported and never rebased", () => {
+    const { repo, remote, head, advance } = pullRequest();
+    advance(false);
+    const refused = "GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)";
+    const r = run(repo, remote, {
+      INPUTS_HEAD_SHA: head, FAKE_GH_MERGE_OUT_1: refused, FAKE_GH_MERGE_EXIT_1: "1", FAKE_GH_AFTER_FAIL: afterFail("OPEN", "@REMOTE_HEAD@", "CONFLICTING"),
+    });
+    expect(r.doc).toMatchObject({
+      merged: false,
+      error: `merge: gh pr merge refused the approved head ${head}: ${refused}; the pull request was not merged, start a new run to approve its current head`,
+    });
+    expect(merges(r).length).toBe(1);
+    expect(existsSync(join(r.artifacts, "pr-state.log"))).toBe(false);
+    expect(git(remote, "rev-parse feature-x")).toBe(head);
+  });
+
   test("a merge strategy other than squash passes no subject", () => {
     const { repo, remote } = pullRequest();
     const r = run(repo, remote, { INPUTS_MERGE_STRATEGY: "merge" });
@@ -220,6 +245,7 @@ describe("merge", () => {
     const node = (id: string) => yaml.nodes.find((n) => n.id === id);
     expect(node("merge")?.script).toBe("merge");
     expect(node("merge")?.with?.already_merged).toBe("$merge-gate.output.already_merged");
+    expect(node("merge")?.with?.head_sha).toBe("$pr-approve-round.output.head_sha");
     expect(node("merge")?.with?.body_sync).toBe(node("merge-gate")?.with?.body_sync);
     expect(node("pr-state")?.timeout).toBe(PR_STATE_TIMEOUT_MS);
     expect(node("merge-gate")?.timeout).toBe(MERGE_GATE_TIMEOUT_MS);

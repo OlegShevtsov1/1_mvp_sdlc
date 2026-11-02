@@ -195,8 +195,9 @@ does not declare red CI checks "out of scope": the factory could not merge then 
 for green CI. The same three answers.
 
 After the plan is approved the factory works alone: code → tests → draft PR → review (several lenses) → corrections
-→ re-review → validation → CI → (the visual gate, for a UI task) → the factory's own merge gate → merge → deploy →
-health → monitoring → report.
+→ re-review → validation → CI → (the visual gate, for a UI task) → the factory's own merge gate → (the PR approval,
+with `merge_approval: operator`) → merge → deploy → health → monitoring → (the QA dev evidence, with `qa_dev`) →
+report → (the QA dev pause, with `qa_dev`).
 
 **Visual gate — the screenshots** (UI tasks only, once the delivery is ready and CI is green). The message names the
 round (at most 4), the pull request and the visual reference. It says whether the round is ready to approve and
@@ -210,6 +211,45 @@ that does not embed the folder, is only listed, and you judge it. The same three
   goes through review and CI again, and shoots new screenshots. Then the gate asks again. A `needs-revision` in
   round 4 ends the run.
 - `abort` → the run stops; the pull request stays open.
+
+**PR approval — before the merge** (PILOT-572; only with `repo.merge_approval: operator`, default `auto`). GitHub
+cannot approve one's own pull request, so after a green merge gate the factory pauses at the wait `pr-approve`
+instead of merging. Its message carries one line each for `PR:`, `Head:` (the 40-character SHA), `Diff: <files> files,
++<add> −<del>`, `Checks: <n> pass`, `Review: ready` (or `Review: not ready — <why>`) and `Summary:` (up to three
+sentences of the PR body); the supervisor turns them into the Telegram card (E3 Task 2). A bookkeeping pull request
+(a tracker `… tracker — T<n> done` or an execution log, touching only `docs/features/*/tasks/{tasks.json,tracker.md}`
+or `docs/superpowers/plans/`) merges without the pause. Two answers:
+
+- `approve` → the factory merges exactly the paused head (`gh pr merge --match-head-commit`), then deploys and
+  checks as usual. When a new commit reached the pull request after the pause, approve does not merge: the new head
+  is fast-forwarded into the run's checkout, goes through the merge gate again and is asked about, round by round.
+  In round 4 there is no next round: approving there after a new commit stops the run, with the PR left open.
+  Approving a round that is not ready stops the run, with the PR left open.
+- `reject "what to change"` → the same run delivers your words on the same pull request as a review finding, through
+  review and CI again, gates the new head and asks again. A reject without text asks again and runs nothing. A reject
+  in round 4 ends the run.
+
+The label `operator-approved` on the pull request approves too: the factory removes it each time it pauses, so only
+a label added while that head is paused counts, and a watcher the run starts answers `approve` within about a minute
+(`pr-approve-watch.log`). `archon workflow abandon <run-id>` still stops the run.
+
+**QA dev — after the deploy** (PILOT-574; only with a `qa_dev` block in the profile, absent by default). After the
+deploy, health and monitoring, `qa-dev-evidence` waits up to 20 minutes for the run of `qa_dev.e2e_workflow` on the
+commit that is on dev now: the newest run whose commit is the merge commit or contains it (GitHub's compare says
+`ahead` or `identical`). A run's commit is the `sha-<40-hex>` in its title when there is one, else its `headSha`: a
+run that `workflow_run` starts reports the default branch's head, so such an e2e workflow needs
+`run-name: <name> sha-<commit>` (as Dev Deploy has). Then it shoots, with the checkout's Playwright
+(`node_modules/.bin/playwright screenshot`), each `qa_dev.pages` URL whose `glob` matches a file the pull request
+changed, at 1440×900 and 360×800, and writes `qa-dev.json` = `{sha, url, e2e: {conclusion, run_url}, shots: [{page,
+width, path}]}` (shots under `qa-dev/`, named by the SHA). When dev moves to a newer commit while it shoots, it
+collects once more for that commit; a second move escalates. After the report and the card's move to Test, the run
+pauses at the wait `qa-dev`. Its message carries one line each for `URL:`, `SHA:`, `PR:`, `E2E: <conclusion|none>
+<run_url|->`, `Shots:` and `Evidence:`; the supervisor turns them into the «На dev готово» card with the screenshots (PILOT-575; its `README.md`). Two
+answers, saved to `qa-dev.decision` and `qa-dev.text`, and either ends the run: `ok` (the work on dev is accepted)
+and `reject "what is wrong"` (the supervisor queues a fix task). A red deploy, health, rollback or e2e, no e2e run
+within 20 minutes, a failed screenshot (a missing Playwright names `npm ci`) or any answer it cannot read gives no
+pause: one alert to `MVP_VPN_ALERTS` names the cause and the run's link, no `qa-dev.json` is written, and the report
+ends not delivered. Pages are shot signed out; no dev login is read. Steps go to `qa-dev.log`.
 
 **Follow-up instead of another round** (PILOT-300, decisions 93, 99, 100). A review that keeps re-raising one
 invariant on ever narrower edge cases used to run the delivery into its 4-round cap. Now, when the bundled delivery
@@ -272,6 +312,9 @@ archon workflow abandon <run-id>                  # close a stuck run
 | `cancelled`, summary `merge refused (failure: the pull request is already merged, but this run's head … was not shown to be in the merge …)` | the PR **is** merged, but this run could not show that the merge brought in its head: it was merged at another head, or the check in `pr-state.log` could not fetch the base or find the merge commit. Nothing was deployed | read `pr-state.log` and check what the merge brought into the base; if it is this run's work, deploy the merge commit the way the profile's deploy command does. Do not start a new run on the same PR |
 | `cancelled`, summary `… is merged, but its merge commit could not be read …` | the PR **is** merged; GitHub had not published the merge commit yet, so nothing was deployed | deploy the merge commit the way the profile's deploy command does, or start a new run once `gh pr view <url> --json mergeCommit` shows it |
 | `cancelled`, summary `stopped at the visual gate (…)` | you answered `abort` at the visual gate, approved a round that was not ready, or answered `needs-revision` in its last round; the PR is open and was **not** merged | start a new run on the same task to continue, or close the PR |
+| `cancelled`, summary `stopped at the PR approval (…)` | with `merge_approval: operator`, you approved a round that was not ready, approved its last round after a new commit, or answered `reject` in its last round; the PR is open and was **not** merged | start a new run on the same task to continue, or close the PR |
+| `cancelled`, summary `Not delivered: deployed and healthy, but QA dev has no proof: …` | with `qa_dev`, the deploy is live but its QA dev evidence escalated: the e2e of the commit on dev is red or did not finish in 20 minutes, dev moved twice while it was collected, a screenshot failed, or GitHub could not be read; the reason names the run's link, and `MVP_VPN_ALERTS` got one alert. When the evidence node itself failed or timed out, the reason is `qa-dev-evidence did not report` and no alert was sent The PR is merged and deployed | open the linked run, fix the cause with a new task, or start a new run |
+| `cancelled`, summary `merge refused (merge: gh pr merge refused the approved head …)` | GitHub refused the head you approved, most often because a commit reached the PR after the approval; the PR is open and was **not** merged | start a new run to approve its current head |
 | `cancelled`, reason `Stopped before the plan: … names no visual reference` | a UI task without a `Visual reference:` line | add the `dod` item, run `task-brief` again and start a new run |
 | `cancelled`, summary `the delivery ended not ready (<reason>)` | the bundled delivery stopped (`review_open`, `round_cap`, `replan`, `needs_human`, `ci_*`, `failed`) and nothing was merged; the rest of the summary is the delivery's own. After a `replan` from round 3 on or a `round_cap`, `Not followed up: <why>` at its end says why the follow-up rule (§6) did not apply. With `failed` and `Retried the delivery once: …`, both the delivery and its one retry failed | read `review/report.md` in the run's artifacts, then fix the cause or start a new run |
 | `cancelled`, any other "Not delivered: …" | delivery stopped before a mergeable PR, or the deploy, health or monitoring was red (rolled back when needed) | fix the cause and start a new run |
@@ -404,6 +447,19 @@ While a gate waits for you (gate 1, gate 2 or the visual gate) the card is in `B
   parse on the first round. `visual-shots` saves the round's readiness to `visual-shots.json`, which `visual-round`
   reads after the loop. A revision is a second include of the bundled `archon-deliver-block`, given the pull
   request's number, so it continues the same PR; the block is composed, never forked.
+- **The PR approval loop (v0.12.1, PILOT-572).** The wait `pr-approve` must be the sole sink of the `pr-approve-cycle`
+  body, and it runs in every round, ready or not: a wait skipped by `when:` fails the loop's `until_bash`, which
+  cannot resolve its output. That `until_bash` runs `pr-approve.ts until` with the bun and script path
+  `pr-approve-turn` reports (it saves the answer to `pr-approve.decision`, `.text` and `.decisions`, ends the loop on
+  an approve of the live head and asks again on a reject or a moved head). Node outputs reach it shell-quoted, so
+  each is assigned to a variable first. The label fallback cannot be a second wait: an attention wait has no timeout
+  and cannot sit beside a timed one. `pr-approve-ask` therefore starts a detached watcher, which runs `archon workflow
+  respond <run> approve --occurrence <pauseId>` when the label is on the paused head; the resumed run then continues
+  inside that watcher's process, as it does in the supervisor's own respond.
+- **The QA dev loop (v0.12.1, PILOT-574).** The wait `qa-dev` is the sole sink of the one-answer `qa-dev-cycle` body,
+  as in the PR approval loop: its `until_bash` runs `qa-dev.ts until` with the bun and script path `qa-dev-turn`
+  reports, saves the answer to files and always ends the loop. The loop sits after `trello-done`, so the answer's
+  card move belongs to the supervisor alone.
 - **Stale pull-request description (v0.12.1, PILOT-219).** The bundled delivery publishes the PR description only
   when it opens the pull request, so corrections later rounds write to the run's body files never reached the live
   PR, and the squash commit carries the live description. `pr-body-sync`, after `deliver` and before `pr-state`,
@@ -443,7 +499,7 @@ bash scripts/ci/check.sh archon    # install + validate + fixtures + trace asser
 `check.sh archon` downloads the pinned Archon v0.12.1 release binary into `.tools/bin/` (gitignored, sha256-checked,
 pinned in `scripts/ci/tools.sh`) and never installs it. Every Archon call in the check uses a throwaway
 `ARCHON_HOME`, so it never reads or writes your live `~/.archon`; the check first runs `archon provider add claude`
-in that home. It then runs `install.sh`, `archon workflow test factory` (twenty-four fixtures; each stubs the inner nodes of
+in that home. It then runs `install.sh`, `archon workflow test factory` (twenty-nine fixtures; each stubs the inner nodes of
 `archon-plan-block` and `archon-deliver-block`), and asserts on each fixture's dry-run trace: `merge-gate` executes in
 every fixture and `pr-state`, `pr-body-sync`, `review-state` and `followup-judge` are stubbed or skipped, because `workflow test factory` also runs on an operator's host
 with a real `gh`; `sync-base` is stubbed in every fixture, because it fetches and resets the checkout; `rag-context`
@@ -473,7 +529,18 @@ skipped there. The three visual fixtures stub `visual-scope` visual, with its fo
 committed beside the fixtures. In the approved fixture `visual-shots` lists them as links at the head and the run
 merges. In the revised fixture a revision delivers on the same pull request before the gate, then approve merges.
 A dry run executes one loop iteration only, so that fixture stubs `visual-turn` as round 2 after a
-`needs-revision` answer. In the aborted fixture the run stops before the merge path with the operator's words. It
+`needs-revision` answer. In the aborted fixture the run stops before the merge path with the operator's words.
+`pr-approve-scope` executes in every fixture whose merge gate passed in `auto` mode, which skips the approval loop
+and merges with no approved head, and `pr-approve-facts` (GitHub) is stubbed or skipped in every fixture. The three
+operator-approval fixtures set `merge_approval: operator`: in the approved fixture the run pauses at `pr-approve`
+and merges the paused head; in the revised fixture (`pr-approve-turn` stubbed as round 2 after a reject) a revision
+delivers the operator's words on the same pull request before the pause, then approve merges; in the bookkeeping
+fixture the loop is skipped and the run merges. `qa-dev-evidence` executes in every fixture without `qa_dev` that
+reaches it, returns `off` and the QA dev loop does not run. The two QA dev fixtures set `qa_dev` and stub
+`qa-dev-evidence` (it reads GitHub and runs Playwright): in the qa-dev-accepted fixture it is ready, the report is
+delivered, `trello-done` moves the card to Test and only then the run pauses at `qa-dev` and ends on `ok`; in the
+qa-dev-red-e2e fixture it escalates on a red e2e, there is no pause, and the report ends not delivered with
+`QA dev has no proof` and the run's link. It
 runs the green fixture again with `pr-body-sync`, `pr-state`, `merge-gate` and `merge`
 executing for real against the engine's own deliver output (a fake `gh` answers for the PR, a local bare repository
 is `origin`) — once with a readable merge commit, where `pr-body-sync` replaces a stale description before `pr-state`

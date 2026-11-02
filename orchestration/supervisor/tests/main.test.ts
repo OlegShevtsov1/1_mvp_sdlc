@@ -102,7 +102,7 @@ describe("loadPolicy", () => {
   test("loadPolicy reads the shipped policy and rejects a file without version", () => {
     expect(loadPolicy(POLICY).rules).toContainEqual(expect.objectContaining({ id: "transient-resume" }));
     expect(Object.keys(gateRules(loadPolicy(POLICY).rules)).sort())
-      .toEqual(["install-gate", "plan-gate", "post-merge-allowlist"]);
+      .toEqual(["install-gate", "plan-gate", "post-merge-allowlist", "pr-approve", "qa-dev"]);
     const bad = join(dir, "bad.yaml");
     writeFileSync(bad, "rules: []\n");
     expect(() => loadPolicy(bad)).toThrow();
@@ -114,8 +114,11 @@ describe("respondArgv", () => {
     const run = readRuns(fixtureDb(...FIXTURES), 24).find((r) => r.id === PLAN_RUN);
     if (!run) throw new Error("no plan fixture run");
     expect(respondArgv(run, { action: "approve", rule: "plan-gate", text: "ok" })).toEqual([
-      "archon", "workflow", "respond", PLAN_RUN, "approve", "ok",
-      "--occurrence", "9b4fd859-c1f4-49c7-a3f4-fe5c4bf1dbc7",
+      "archon", "workflow", "respond", PLAN_RUN, "approve",
+      "--occurrence", "9b4fd859-c1f4-49c7-a3f4-fe5c4bf1dbc7", "--", "ok",
+    ]);
+    expect(respondArgv(run, { action: "reject", rule: "operator", text: "- прибери кнопку" }).slice(4)).toEqual([
+      "reject", "--occurrence", "9b4fd859-c1f4-49c7-a3f4-fe5c4bf1dbc7", "--", "- прибери кнопку",
     ]);
     for (const action of ["retry", "skip", "abort"] as const) {
       expect(respondArgv(run, { action, rule: "operator", text: "again" })[4]).toBe(action);

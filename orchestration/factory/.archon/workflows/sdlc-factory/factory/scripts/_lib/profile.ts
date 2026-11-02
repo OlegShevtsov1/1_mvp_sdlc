@@ -3,6 +3,10 @@ export const MONITORING_MCP_PATH = ".archon/mcp/monitoring.json";
 export const PROFILE_COMMIT_MESSAGE = "chore: add factory profile";
 
 export const MERGE_STRATEGIES = ["squash", "merge", "rebase"] as const;
+// PILOT-572: operator = after a green merge gate the factory pauses at pr-approve and merges only
+// the head the operator approved; auto = it merges at once.
+export const MERGE_APPROVALS = ["auto", "operator"] as const;
+export type MergeApproval = (typeof MERGE_APPROVALS)[number];
 export const MONITORING_PROVIDERS = ["sentry", "datadog", "grafana", "none"] as const;
 // Decision 27: pull requests into these bases are merged by the operator, never the factory.
 export const DEFAULT_MANUAL_MERGE_BASES: readonly string[] = ["main"];
@@ -35,6 +39,22 @@ const COMMAND_NAME = /^[A-Za-z0-9._+-]+$/;
 const SERVICE_NAME = /^[A-Za-z0-9._-]+$/;
 const TCP_ADDRESS = /^(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+):([0-9]{1,5})$/;
 
+// qa_dev (PILOT-574): after the deploy, the factory waits for the e2e workflow of the commit on dev,
+// shoots the dev pages whose glob matches a changed file, and pauses at qa-dev. Absent = no pause.
+// Bounds the shots of one pass: two viewports per page.
+export const MAX_QA_PAGES = 10;
+
+export interface QaDevPage {
+  glob: string;
+  url: string;
+}
+
+export interface QaDevConfig {
+  // A workflow name or file; "" means the project has no e2e workflow.
+  e2e_workflow: string;
+  pages: QaDevPage[];
+}
+
 function isValidTcp(tcp: string): boolean {
   const m = TCP_ADDRESS.exec(tcp);
   const port = m ? Number(m[2]) : 0;
@@ -58,9 +78,11 @@ export interface Profile {
   repo: {
     remote: string; base_branch: string; merge_strategy: (typeof MERGE_STRATEGIES)[number];
     manual_merge_bases: string[];
+    merge_approval: MergeApproval;
   };
   deploy: { command: string; health_url: string; wait_seconds: number; rollback_command: string };
   monitoring: { provider: (typeof MONITORING_PROVIDERS)[number]; mcp_config: string; window_minutes: number };
+  qa_dev?: QaDevConfig;
   secrets: string[];
 }
 
@@ -75,6 +97,8 @@ export interface FlatProfile {
   monitoring_provider: string; window_minutes: number;
   secret_names: string[];
   manual_merge_bases: string[];
+  merge_approval: MergeApproval;
+  qa_dev?: QaDevConfig;
 }
 
 const SECRET_NAME = /^[A-Z_][A-Z0-9_]*$/;
@@ -156,6 +180,38 @@ export function validatePreflight(raw: unknown, errors: string[]): PreflightConf
   return cfg;
 }
 
+export function validateQaDev(raw: unknown, errors: string[]): QaDevConfig | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    errors.push("qa_dev must be a mapping");
+    return undefined;
+  }
+  const section = raw as Record<string, unknown>;
+  const cfg: QaDevConfig = { e2e_workflow: str(section, "e2e_workflow", "qa_dev", errors, false), pages: [] };
+  const pages = section.pages;
+  if (pages !== undefined && pages !== null) {
+    if (!Array.isArray(pages)) {
+      errors.push("qa_dev.pages must be a list of {glob, url} mappings");
+    } else if (pages.length > MAX_QA_PAGES) {
+      errors.push(`qa_dev.pages must list at most ${MAX_QA_PAGES} pages`);
+    } else {
+      pages.forEach((raw, i) => {
+        const path = `qa_dev.pages[${i}]`;
+        if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+          errors.push(`${path} must be a mapping`);
+          return;
+        }
+        const page = raw as Record<string, unknown>;
+        const glob = str(page, "glob", path, errors, true);
+        const url = str(page, "url", path, errors, true);
+        if (url !== "" && !/^https?:\/\//.test(url)) errors.push(`${path}.url must start with http:// or https://`);
+        cfg.pages.push({ glob, url });
+      });
+    }
+  }
+  return cfg;
+}
+
 export function validateProfile(doc: unknown): Validation {
   const errors: string[] = [];
   const root = obj(doc);
@@ -180,6 +236,7 @@ export function validateProfile(doc: unknown): Validation {
       base_branch: str(repo, "base_branch", "repo", errors, true),
       merge_strategy: str(repo, "merge_strategy", "repo", errors, true) as Profile["repo"]["merge_strategy"],
       manual_merge_bases: [],
+      merge_approval: "auto",
     },
     deploy: {
       command: str(deploy, "command", "deploy", errors, true),
@@ -233,6 +290,13 @@ export function validateProfile(doc: unknown): Validation {
       else profile.repo.manual_merge_bases.push(b);
     });
   }
+  const approval = repo.merge_approval;
+  if (approval !== undefined && approval !== null) {
+    if (MERGE_APPROVALS.includes(approval as MergeApproval)) profile.repo.merge_approval = approval as MergeApproval;
+    else errors.push(`repo.merge_approval must be one of ${MERGE_APPROVALS.join(", ")}`);
+  }
+  const qaDev = validateQaDev(root.qa_dev, errors);
+  if (qaDev !== undefined) profile.qa_dev = qaDev;
   if (!MONITORING_PROVIDERS.includes(profile.monitoring.provider)) {
     errors.push(`monitoring.provider must be one of ${MONITORING_PROVIDERS.join(", ")}`);
   }
@@ -271,6 +335,8 @@ export function flattenProfile(p: Profile): FlatProfile {
     monitoring_provider: p.monitoring.provider, window_minutes: p.monitoring.window_minutes,
     secret_names: [...p.secrets],
     manual_merge_bases: [...p.repo.manual_merge_bases],
+    merge_approval: p.repo.merge_approval,
+    ...(p.qa_dev ? { qa_dev: structuredClone(p.qa_dev) } : {}),
   };
 }
 
@@ -284,6 +350,15 @@ function preflightYaml(cfg: PreflightConfig): string[] {
     `    tools: ${JSON.stringify(cfg.tools)}`,
     `    services: ${JSON.stringify(cfg.services.map((s) => ({ name: s.name, tcp: s.tcp, start: s.start })))}`,
     `    min_disk_free_pct: ${cfg.min_disk_free_pct}`,
+  ];
+}
+
+function qaDevYaml(cfg: QaDevConfig): string[] {
+  return [
+    "# Absent = no QA dev pause. e2e_workflow \"\" = the project has no e2e workflow.",
+    "qa_dev:",
+    `  e2e_workflow: ${q(cfg.e2e_workflow)}`,
+    `  pages: ${JSON.stringify(cfg.pages.map((p) => ({ glob: p.glob, url: p.url })))}`,
   ];
 }
 
@@ -308,6 +383,8 @@ export function profileToYaml(p: Profile): string {
     `  merge_strategy: ${q(p.repo.merge_strategy)}`,
     // A JSON array is a valid YAML flow sequence, quoted for the same reason as q.
     `  manual_merge_bases: ${JSON.stringify(p.repo.manual_merge_bases)}`,
+    "  # auto merges after a green merge gate; operator pauses at pr-approve for the operator's approval.",
+    `  merge_approval: ${q(p.repo.merge_approval)}`,
     "deploy:",
     `  command: ${q(p.deploy.command)}`,
     `  health_url: ${q(p.deploy.health_url)}`,
@@ -317,6 +394,7 @@ export function profileToYaml(p: Profile): string {
     `  provider: ${q(p.monitoring.provider)}`,
     `  mcp_config: ${q(p.monitoring.mcp_config)}`,
     `  window_minutes: ${p.monitoring.window_minutes}`,
+    ...(p.qa_dev ? qaDevYaml(p.qa_dev) : []),
     p.secrets.length === 0 ? "secrets: []" : "secrets:",
     // Quoted like every other scalar: a name such as TRUE, NULL or ON is a
     // YAML 1.1 boolean/null keyword unquoted and would not round-trip as a string.

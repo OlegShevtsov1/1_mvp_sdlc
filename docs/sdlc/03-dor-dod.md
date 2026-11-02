@@ -50,8 +50,8 @@ Checked before a factory run starts.
 ## Definition of Done of a feature
 
 - Every task is `done`; `review-feature` gives `PASS`.
-- `CHANGELOG.md` `[Unreleased]` became a version and a person published the draft Release (planned, C4 and C5;
-  until then the release note is the PR body from `ship-feature`).
+- The `changelog.d/` fragments became a version section of `CHANGELOG.md` and a person published the draft Release
+  (planned, C4 and C5; until then the release note is the PR body from `ship-feature`).
 - The release has its own card, titled in its pull requests as [A release's card](#board-flow) says, and that card
   is in `Done`.
 - prod runs the release (from a tag, planned, C4; today the Dev-Deploy-built commit through `kamal-deploy.yml`);

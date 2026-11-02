@@ -3,7 +3,10 @@ description: |
   Interview once, plan, deliver a reviewed PR, merge, deploy, verify health and
   monitoring, roll back on red, report honestly. Two human gates: the project
   profile (first run only) and the plan, plus a visual gate after CI for a UI
-  task.
+  task, and, with repo.merge_approval operator, the PR approval before the
+  merge. With qa_dev in the profile, after the deploy it collects the QA dev
+  evidence (e2e of the commit on dev, screenshots) and pauses at qa-dev for the
+  operator's verdict on dev.
 
   Use when: "build X and put it live", "factory: <task>", a task that should end
   deployed on the operator's own infrastructure.
@@ -221,6 +224,7 @@ nodes:
         manual_merge_bases:
           type: array
           items: { type: string }
+        merge_approval: { type: string }
         # Only with a stack.preflight block, so not required: without one the
         # bindings below get "" and the preflight is skipped.
         preflight:
@@ -240,7 +244,22 @@ nodes:
                 required: [name, tcp, start]
             min_disk_free_pct: { type: number }
           required: [tools, services, min_disk_free_pct]
-      required: [language, test_command, test_timeout_seconds, flaky_patterns, remote, base_branch, merge_strategy, deploy_command, health_url, wait_seconds, rollback_command, monitoring_provider, window_minutes, secret_names, manual_merge_bases]
+        # Only with a qa_dev block (PILOT-574), so not required: without one
+        # qa-dev-evidence gets "" and returns off.
+        qa_dev:
+          type: object
+          properties:
+            e2e_workflow: { type: string }
+            pages:
+              type: array
+              items:
+                type: object
+                properties:
+                  glob: { type: string }
+                  url: { type: string }
+                required: [glob, url]
+          required: [e2e_workflow, pages]
+      required: [language, test_command, test_timeout_seconds, flaky_patterns, remote, base_branch, merge_strategy, deploy_command, health_url, wait_seconds, rollback_command, monitoring_provider, window_minutes, secret_names, manual_merge_bases, merge_approval]
 
   # ── Host preflight ─────────────────────────────────────────────────────────
   # PILOT-495 reached the merge twice with CI green and review ready, then the
@@ -984,10 +1003,187 @@ nodes:
         already_merged: { type: boolean }
       required: [action, pr_url, head, base, reason, already_merged]
 
+  # ── PR approval (merge_approval operator, PILOT-572) ───────────────────────
+  # GitHub cannot approve one's own pull request, so the operator approves in
+  # Telegram (the supervisor reads the wait node pr-approve, E3 Task 2) or with
+  # the label operator-approved. auto (the default) and a bookkeeping pull
+  # request (a tracker or an execution log) skip the loop; auto reads nothing.
+  - id: pr-approve-scope
+    script: pr-approve
+    runtime: bun
+    depends_on: [merge-gate]
+    when: "$merge-gate.output.action == 'merge'"
+    timeout: 120000
+    with:
+      mode: "scope"
+      merge_approval: "$load-profile.output.merge_approval"
+      already_merged: "$merge-gate.output.already_merged"
+      pr_url: "$merge-gate.output.pr_url"
+    output_format:
+      type: object
+      properties:
+        pause: { type: boolean }
+        reason: { type: string }
+        gated_sha: { type: string }
+      required: [pause, reason, gated_sha]
+
+  # One round per answer: reject with text runs one more delivery on the same
+  # pull request (a third include of the bundled block, as the visual gate's
+  # revise); a head that moved since it was gated (a revision, or a push) is
+  # gated again before it is offered; approve ends the loop only while the
+  # paused head is still the live one, else the new head is asked about. The
+  # wait is the body's sole sink and runs in every round, ready or not: a
+  # skipped wait fails until_bash (Archon v0.12.1). until saves each answer to
+  # files (PILOT-217) and ends a reject after 4 answers, one below
+  # max_iterations, so the cap ends typed instead of failing the loop.
+  - id: pr-approve-cycle
+    depends_on: [pr-approve-scope]
+    when: "$pr-approve-scope.output.pause == true"
+    loop_group:
+      until_bash: 'bun=$pr-approve-turn.output.bun; script=$pr-approve-turn.output.script; decision=$pr-approve.output.decision; text=$pr-approve.output.text; "$bun" "$script" until "$ARTIFACTS_DIR" "$decision" "$text"'
+      max_iterations: 5
+      fresh_context: true
+      nodes:
+        - id: pr-approve-turn
+          script: pr-approve
+          runtime: bun
+          with:
+            mode: "turn"
+            pr_url: "$merge-gate.output.pr_url"
+          output_format:
+            type: object
+            properties:
+              round: { type: number }
+              revise: { type: boolean }
+              feedback: { type: string }
+              pr_number: { type: number }
+              script: { type: string }
+              bun: { type: string }
+            required: [round, revise, feedback, pr_number, script, bun]
+        - id: pr-approve-revise
+          include: archon-deliver-block
+          depends_on: [pr-approve-turn]
+          when: "$pr-approve-turn.output.revise == true"
+          with:
+            pull_request: "$pr-approve-turn.output.pr_number"
+            work: >-
+              Approval revision round $pr-approve-turn.output.round of the pull
+              request $merge-gate.output.pr_url, which this delivery continues:
+              the operator reviewed it before the merge and returned it with
+              this finding: $pr-approve-turn.output.feedback
+              Treat it as a review finding of this round and fix it within the
+              plan at $ARTIFACTS_DIR/plan.md (read it first). Add commits after
+              the existing ones; never rewrite or force-push them. The
+              project's own checks: tests `$load-profile.output.test_command`, lint
+              `$load-profile.output.lint_command`, build `$load-profile.output.build_command`
+              (an empty command means the project has none). The pull request will be
+              merged and deployed automatically once the operator approves it, so never
+              leave a known failure behind. Before the merge the factory republishes the pull
+              request's live description from the newest $ARTIFACTS_DIR/pr-body*.md
+              file, so a review judges the description in that file and never raises
+              a live description that lags it as a finding. Never wait for a process
+              with `pgrep -f` on a literal that also appears in the waiting command
+              itself, because it matches its own shell and never ends; wait on the PID
+              (`cmd & pid=$!; wait "$pid"`) or use a bracket pattern such as
+              `pgrep -f '[m]y-server'`. $visual-scope.output.brief Original request:
+              $INPUTS.task $ARGUMENTS
+        # Every GitHub read and write of the approval lives here, so fixtures
+        # stub it like pr-state. A re-gate runs pr-body-sync, pr-state and
+        # merge-gate as children under their own budgets, as merge does after
+        # a conflict; the label is removed so only one added while this head is
+        # paused approves it.
+        - id: pr-approve-facts
+          script: pr-approve
+          runtime: bun
+          depends_on: [pr-approve-turn, pr-approve-revise]
+          trigger_rule: none_failed_min_one_success
+          timeout: 17100000
+          with:
+            mode: "facts"
+            pr_url: "$merge-gate.output.pr_url"
+            gated_sha: "$pr-approve-scope.output.gated_sha"
+            revision: { from: "$pr-approve-revise.output", if_skipped: "" }
+            remote: "$load-profile.output.remote"
+            flaky_patterns: "$load-profile.output.flaky_patterns"
+            test_command: "$load-profile.output.test_command"
+            lint_command: "$load-profile.output.lint_command"
+            build_command: "$load-profile.output.build_command"
+            test_timeout_seconds: "$load-profile.output.test_timeout_seconds"
+            secret_names: "$load-profile.output.secret_names"
+            manual_merge_bases: "$load-profile.output.manual_merge_bases"
+            preflight: "$load-profile.output.preflight"
+          output_format:
+            type: object
+            properties:
+              ready: { type: boolean }
+              reason: { type: string }
+              pr_url: { type: string }
+              pr_number: { type: number }
+              head_sha: { type: string }
+              files: { type: number }
+              additions: { type: number }
+              deletions: { type: number }
+              checks_pass: { type: number }
+              summary: { type: string }
+              regated: { type: boolean }
+            required: [ready, reason, pr_url, pr_number, head_sha, files, additions, deletions, checks_pass, summary, regated]
+        # Writes pr-approve.json (the paused head) and, in a real run, starts
+        # the label watcher detached: it answers approve when operator-approved
+        # is on this head, and the resumed run continues in it.
+        - id: pr-approve-ask
+          script: pr-approve
+          runtime: bun
+          depends_on: [pr-approve-turn, pr-approve-facts]
+          with:
+            mode: "ask"
+            facts: "$pr-approve-facts.output"
+            round: "$pr-approve-turn.output.round"
+          output_format:
+            type: object
+            properties:
+              message: { type: string }
+              ready: { type: boolean }
+              head_sha: { type: string }
+            required: [message, ready, head_sha]
+        - id: pr-approve
+          wait:
+            attention: "$pr-approve-ask.output.message"
+            form: select
+            options:
+              - { id: approve, label: Approve }
+              - { id: reject, label: Reject }
+          depends_on: [pr-approve-ask]
+
+  # Every merge-gate pass passes here: auto, a bookkeeping pull request and one
+  # already merged proceed at once with no head_sha. Operator mode proceeds
+  # only on approve of a ready round, with the paused head, which merge hands
+  # gh as --match-head-commit. The saved answer wins over the loop's output
+  # (PILOT-217); no record of the paused head stops the run.
+  - id: pr-approve-round
+    script: pr-approve
+    runtime: bun
+    depends_on: [merge-gate, pr-approve-scope, pr-approve-cycle]
+    trigger_rule: none_failed_min_one_success
+    when: "$merge-gate.output.action == 'merge'"
+    with:
+      mode: "round"
+      scope: "$pr-approve-scope.output"
+      gate: { from: "$pr-approve-cycle.output", if_skipped: "" }
+    output_format:
+      type: object
+      properties:
+        proceed: { type: boolean }
+        decision: { type: string }
+        head_sha: { type: string }
+        approved_by: { type: string }
+        stop_reason: { type: string }
+      required: [proceed, decision, head_sha, approved_by, stop_reason]
+
   # When gh refuses the merge on a conflict that appeared after pr-state, the
   # script runs pr-state.ts (one rebase) and merge-gate.ts again on the new head
   # and merges only what that gate passes; with already_merged it only reads the
-  # merge commit. See scripts/merge.ts.
+  # merge commit. An approved head_sha is merged with --match-head-commit and
+  # never rebased. See scripts/merge.ts.
   - id: merge
     script: merge
     runtime: bun
@@ -1010,8 +1206,9 @@ nodes:
       secret_names: "$load-profile.output.secret_names"
       manual_merge_bases: "$load-profile.output.manual_merge_bases"
       preflight: "$load-profile.output.preflight"
-    depends_on: [merge-gate]
-    when: "$merge-gate.output.action == 'merge'"
+      head_sha: "$pr-approve-round.output.head_sha"
+    depends_on: [merge-gate, pr-approve-round]
+    when: "$pr-approve-round.output.proceed == true"
     output_format:
       type: object
       properties:
@@ -1161,6 +1358,48 @@ nodes:
         log: { type: string }
       required: [rolled_back, exit_code, log]
 
+  # ── QA dev (PILOT-574) ─────────────────────────────────────────────────────
+  # With qa_dev in the profile: waits up to 20 min for the e2e workflow of the
+  # commit on dev (the newest run of the merge commit or of one that contains
+  # it), shoots the dev pages whose glob matches a changed file at 1440x900 and
+  # 360x800, and writes qa-dev.json. A red deploy, health, rollback or e2e, or
+  # any state it cannot read, escalates: one Telegram alert, no qa-dev.json, and
+  # the report ends not delivered. all_done like decide-rollback: it decides
+  # itself, and without qa_dev or a merge it returns off and calls nothing.
+  - id: qa-dev-evidence
+    script: qa-dev
+    runtime: bun
+    depends_on: [merge, deploy, health, decide-rollback, rollback]
+    trigger_rule: all_done
+    # The e2e wait (20 min) plus two passes of at most 20 shots of 60 s each.
+    timeout: 4500000
+    with:
+      mode: "evidence"
+      qa_dev: "$load-profile.output.qa_dev"
+      pr_url: { from: "$merge-gate.output.pr_url", if_skipped: "" }
+      merge_sha: { from: "$merge.output.merge_sha", if_skipped: "" }
+      deployed: { from: "$deploy.output.deployed", if_skipped: "skipped" }
+      deploy_log: { from: "$deploy.output.log", if_skipped: "" }
+      healthy: { from: "$health.output.healthy", if_skipped: "skipped" }
+      last_status: { from: "$health.output.last_status", if_skipped: "" }
+      health_url: "$load-profile.output.health_url"
+      rollback: { from: "$decide-rollback.output.rollback", if_skipped: "" }
+      secret_names: "$load-profile.output.secret_names"
+    output_format:
+      type: object
+      properties:
+        status: { type: string, enum: [off, ready, escalated] }
+        reason: { type: string }
+        sha: { type: string }
+        url: { type: string }
+        e2e_conclusion: { type: string }
+        e2e_run_url: { type: string }
+        shots: { type: number }
+        evidence: { type: string }
+        message: { type: string }
+        alert: { type: string, enum: [none, dry-run, sent, skipped, failed, already] }
+      required: [status, reason, sha, url, e2e_conclusion, e2e_run_url, shots, evidence, message, alert]
+
   # ── Report ─────────────────────────────────────────────────────────────────
   # Any AI node can still fail on an expired login after the pre-flight. The
   # engine writes `provider reported auth:` into that node's node_error line of
@@ -1170,7 +1409,7 @@ nodes:
   - id: claude-auth-scan
     script: claude-auth
     runtime: bun
-    depends_on: [last-delivery, review-followup, visual-round, merge, notify-operator, deploy, health, monitor, decide-rollback, rollback]
+    depends_on: [last-delivery, review-followup, visual-round, pr-approve-round, merge, notify-operator, deploy, health, monitor, decide-rollback, rollback, qa-dev-evidence]
     trigger_rule: all_done
     timeout: 120000
     with:
@@ -1181,7 +1420,7 @@ nodes:
   - id: report
     script: report
     runtime: bun
-    depends_on: [last-delivery, review-followup, visual-round, merge, notify-operator, deploy, health, monitor, decide-rollback, rollback, claude-auth-scan]
+    depends_on: [last-delivery, review-followup, visual-round, pr-approve-round, merge, notify-operator, deploy, health, monitor, decide-rollback, rollback, qa-dev-evidence, claude-auth-scan]
     # all_done: a failed or not-ready delivery skips the merge path, and the
     # run must still end with a report.
     trigger_rule: all_done
@@ -1221,8 +1460,13 @@ nodes:
       visual_proceed: { from: "$visual-round.output.proceed", if_skipped: "skipped" }
       visual_stop: { from: "$visual-round.output.stop_reason", if_skipped: "" }
       visual_pr_url: { from: "$visual-round.output.pr_url", if_skipped: "" }
+      approval_proceed: { from: "$pr-approve-round.output.proceed", if_skipped: "skipped" }
+      approval_stop: { from: "$pr-approve-round.output.stop_reason", if_skipped: "" }
       claude_auth: { from: "$claude-auth-scan.output.status", if_skipped: "skipped" }
       claude_auth_node: { from: "$claude-auth-scan.output.node", if_skipped: "" }
+      qa_status: { from: "$qa-dev-evidence.output.status", if_skipped: "skipped" }
+      qa_reason: { from: "$qa-dev-evidence.output.reason", if_skipped: "" }
+      qa_alert: { from: "$qa-dev-evidence.output.alert", if_skipped: "" }
     output_format:
       type: object
       properties:
@@ -1261,3 +1505,36 @@ nodes:
     depends_on: [report, trello-done]
     trigger_rule: all_done
     when: "$report.output.status == 'not-delivered'"
+
+  # The QA dev pause sits after the report and trello-done: the card is in Test
+  # (QA on dev) while it is open, and the answer's card move is the
+  # supervisor's alone (E3 Task 4: ok → Ready to Release, reject → a fix task),
+  # which a later trello-done would overwrite. The wait is the body's sole sink;
+  # until saves the answer to files (PILOT-217) and one answer ends the loop.
+  - id: qa-dev-cycle
+    depends_on: [qa-dev-evidence, trello-done]
+    when: "$qa-dev-evidence.output.status == 'ready' && $report.output.status == 'delivered'"
+    loop_group:
+      until_bash: 'bun=$qa-dev-turn.output.bun; script=$qa-dev-turn.output.script; decision=$qa-dev.output.decision; text=$qa-dev.output.text; "$bun" "$script" until "$ARTIFACTS_DIR" "$decision" "$text"'
+      max_iterations: 2
+      fresh_context: true
+      nodes:
+        - id: qa-dev-turn
+          script: qa-dev
+          runtime: bun
+          with:
+            mode: "turn"
+          output_format:
+            type: object
+            properties:
+              script: { type: string }
+              bun: { type: string }
+            required: [script, bun]
+        - id: qa-dev
+          wait:
+            attention: "$qa-dev-evidence.output.message"
+            form: select
+            options:
+              - { id: ok, label: OK }
+              - { id: reject, label: Reject }
+          depends_on: [qa-dev-turn]

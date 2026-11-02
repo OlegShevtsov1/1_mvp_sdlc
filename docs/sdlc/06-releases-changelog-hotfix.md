@@ -26,7 +26,8 @@ Delivered by C4 (backend) and C5 (frontend); everything in this section is plann
   MINOR, `fix` → PATCH, a `BREAKING CHANGE:` footer → MAJOR, the other types no bump); the agent explains, a person tags
   (M9.7: the script decides, the agent explains, the human confirms).
 - **`CHANGELOG.md`** in the repository root, Keep a Changelog with its six categories (Added, Changed, Deprecated,
-  Removed, Fixed, Security) and an `[Unreleased]` section (R-C8.16) that task PRs update; `/sdlc:ship-feature`
+  Removed, Fixed, Security) and an `[Unreleased]` section (R-C8.16) that stays empty: task PRs add fragments in
+  `changelog.d/` and release-prep assembles them into the version section; `/sdlc:ship-feature`
   already writes the feature's own `docs/features/<slug>/CHANGELOG.md` and PR body today.
 - **Deterministic pipeline** (R-C8.15): the person pushes an annotated tag on `main`; `release.yml` (planned, C4)
   creates a **draft** GitHub Release from that version's changelog section, with no LLM in CI and no write to `main`;
@@ -49,13 +50,20 @@ Delivered by C4 (backend) and C5 (frontend); everything in this section is plann
 - A hotfix is a branch `hotfix/PILOT-<n>-<slug>` from `main` → a pull request into `main` (merged by the operator) and
   the back-merge pull request into `develop`.
 - The public mirror is synced from the released `main` (decision 55).
-- The changes are kept in `CHANGELOG.md` (Keep a Changelog). The release-prep pull request
-  `PILOT-<n>: Release X.Y.Z changelog`, where `<n>` is the release's own card (decision 91), moves `[Unreleased]`
-  into `## [X.Y.Z] - YYYY-MM-DD`.
+- The changes are kept in `CHANGELOG.md` (Keep a Changelog), but a task pull request never edits it: it adds one
+  fragment `PILOT-<n>.md` in `changelog.d/` for its own card (front matter `category:`, body the entry;
+  [changelog.d/README.md](../../changelog.d/README.md)), so tasks in flight never conflict in `[Unreleased]`.
+  `bash scripts/ci/check.sh changelog` fails a malformed fragment and any entry under `[Unreleased]`. The release-prep
+  pull request `PILOT-<n>: Release X.Y.Z changelog`, where `<n>` is the release's own card (decision 91), runs
+  `bash scripts/changelog.sh release X.Y.Z`, which writes `## [X.Y.Z] - YYYY-MM-DD` from the fragments in category
+  order, deletes them and leaves `[Unreleased]` empty, and commits that together with the `plugin.json` bump.
 - Its "After merge (operator)" writes the release steps as `scripts/release.sh` lines
   ([scripts/release.README.md](../../scripts/release.README.md)): A1 `bash scripts/release.sh merge-release-pr vX.Y.Z`,
   A2 `bash scripts/release.sh tag vX.Y.Z`, A3 `bash scripts/release.sh mirror vX.Y.Z`, A4
-  `bash scripts/release.sh install vX.Y.Z`, and `bash scripts/release.sh verify vX.Y.Z` as a closing proof. Each
+  `bash scripts/release.sh install vX.Y.Z`, A5 `bash scripts/release.sh plugin vX.Y.Z`, and
+  `bash scripts/release.sh verify vX.Y.Z` as a closing proof. A5 updates `mvp-sdlc` at project scope for be and fe
+  from their checkouts' top level without changing their working trees, in place of the operator's hand-run plugin
+  update (PILOT-570). Each
   step's command block holds `git fetch origin --tags` and exactly one `release.sh` line; no `cd` is needed, because
   the run's agent already works in the run's worktree. Read-only proof lines may be added. The supervisor approves
   such a step by itself; any other write command, or prose outside the block and its `Expected:` items, sends the

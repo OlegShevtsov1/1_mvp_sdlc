@@ -24,6 +24,12 @@ export function parseSecretNames(raw: string): string[] {
   }
 }
 
+// The secret names this run's output is redacted for: the profile's (INPUTS_SECRET_NAMES) plus the
+// GitHub tokens gh reads.
+export function secretNamesFor(env: Record<string, string | undefined> = process.env): string[] {
+  return [...parseSecretNames(env.INPUTS_SECRET_NAMES ?? "[]"), "GH_TOKEN", "GITHUB_TOKEN"];
+}
+
 export interface RunOptions {
   logPath: string;
   secretNames: string[];

@@ -2,11 +2,13 @@
 # Runs one step of a 1_mvp_sdlc release from reviewed code, so that a post-merge step is one line the sdlc-autopilot
 # supervisor can approve (scripts/release.README.md). Every subcommand is idempotent: a rerun after a success, or
 # after a fix, finishes the same release.
-# Usage: release.sh <merge-release-pr|tag|mirror|install|verify> v<X.Y.Z>
+# Usage: release.sh <merge-release-pr|tag|mirror|install|verify|plugin> v<X.Y.Z>
 # Env: RELEASE_CHECKS_TIMEOUT (seconds to wait for the release PR checks, default 1200);
 #      RELEASE_INSTALL_WAIT, RELEASE_INSTALL_INTERVAL (seconds to wait for running factory, plan-review and
 #      plugin-probe runs before install, default 1800 and 30); MIRROR_CHECKS_TIMEOUT (default 1200) and
-#      MIRROR_TARGET_URL, passed to publish-mirror.sh; ARCHON_HOME (default ~/.archon), as install.sh reads it.
+#      MIRROR_TARGET_URL, passed to publish-mirror.sh; ARCHON_HOME (default ~/.archon), as install.sh reads it;
+#      RELEASE_PLUGIN_PROJECTS (space-separated checkouts whose project-scope mvp-sdlc plugin updates, default the
+#      be and fe checkouts under ~/projects/mvp); CLAUDE_CONFIG_DIR (default ~/.claude), as the claude CLI reads it.
 # Each proof prints `ok <what>` or `DIFF <what>` on stdout; progress goes to stderr.
 # Exit 0: done, or already done. Exit 1: a precondition or a proof failed. Exit 3: the release PR checks failed or
 # timed out, and nothing was merged. Exit 64: usage. Exit 75: install only, runs that install would replace are still
@@ -14,7 +16,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: release.sh <merge-release-pr|tag|mirror|install|verify> v<X.Y.Z>" >&2
+  echo "usage: release.sh <merge-release-pr|tag|mirror|install|verify|plugin> v<X.Y.Z>" >&2
   exit 64
 }
 log() { echo "release: $*" >&2; }
@@ -22,7 +24,7 @@ die() { local rc=$1; shift; log "$*"; exit "${rc}"; }
 
 [ $# -eq 2 ] || usage
 cmd=$1 tag=$2
-case "${cmd}" in merge-release-pr | tag | mirror | install | verify) ;; *) usage ;; esac
+case "${cmd}" in merge-release-pr | tag | mirror | install | verify | plugin) ;; *) usage ;; esac
 [[ ${tag} =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || usage
 version=${tag#v}
 version_re=${version//./\\.}
@@ -238,10 +240,42 @@ verify_release() {
   proven "release ${tag} did not verify"
 }
 
+# plugin_release: the CLI selects a project only by its cwd and, from a cwd matching no project, updates another one
+# and still exits 0, so each project is proven from `claude plugin list --json`, never from the update's exit code.
+# The update writes only under the config dir, never in the checkout.
+plugin_release() {
+  on_origin || die 1 "${tag} is not on origin; run release.sh tag ${tag} first"
+  local cfg=${CLAUDE_CONFIG_DIR:-${HOME}/.claude} p root roots=() list
+  local cache="${cfg}/plugins/cache/mvp/mvp-sdlc/${version}"
+  for p in ${RELEASE_PLUGIN_PROJECTS:-${HOME}/projects/mvp/1_mvp_pilot_be ${HOME}/projects/mvp/1_mvp_pilot_fe}; do
+    root=$(git -C "${p}" rev-parse --show-toplevel 2>/dev/null) || die 1 "${p} is not a git checkout"
+    roots+=("${root}")
+  done
+  claude plugin marketplace update mvp >&2 || die 1 "claude plugin marketplace update mvp failed"
+  for root in "${roots[@]}"; do
+    (cd "${root}" && claude plugin update mvp-sdlc@mvp --scope project --json) >&2 ||
+      die 1 "claude plugin update mvp-sdlc@mvp failed in ${root}"
+  done
+  list=$(claude plugin list --json) || die 1 "claude plugin list --json failed"
+  proof "the cache has mvp-sdlc ${version}" python3 -c '
+import json, sys
+sys.exit(json.load(open(sys.argv[1]))["version"] != sys.argv[2])' "${cache}/.claude-plugin/plugin.json" "${version}"
+  for root in "${roots[@]}"; do
+    proof "${root} resolves mvp-sdlc@mvp ${version}" python3 -c '
+import json, sys
+root, version, cache = sys.argv[1:]
+want = {"id": "mvp-sdlc@mvp", "scope": "project", "projectPath": root, "version": version, "installPath": cache}
+sys.exit(not any(all(e.get(k) == v for k, v in want.items()) for e in json.loads(sys.stdin.read())))' \
+      "${root}" "${version}" "${cache}" <<<"${list}"
+  done
+  proven "the mvp-sdlc ${version} update did not verify"
+}
+
 case "${cmd}" in
   merge-release-pr) merge_release_pr ;;
   tag) tag_release ;;
   mirror) mirror_release ;;
   install) install_release ;;
   verify) verify_release ;;
+  plugin) plugin_release ;;
 esac

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Behaviour test for release.sh: a bare repo stands in for origin and another for the mirror, a fake gh on PATH for
-# the primary's GitHub API (PRs, checks, merge) and a fake archon for the run list. The fixture repo's install.sh and
-# publish-mirror.sh are stubs that log their argv. No network.
+# the primary's GitHub API (PRs, checks, merge), a fake archon for the run list and a fake claude for the plugin
+# commands. The fixture repo's install.sh and publish-mirror.sh are stubs that log their argv. No network.
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 tmp=$(mktemp -d)
@@ -82,10 +82,47 @@ import json, os
 lines = [l.split() for l in os.environ.get("FAKE_ARCHON_RUNNING", "").split("\n") if l]
 print(json.dumps({"runs": [{"id": i, "workflow_name": w, "status": "running"} for i, w in lines]}))'
 SH
-chmod +x "${tmp}/bin/gh" "${tmp}/bin/archon"
+cat > "${tmp}/bin/claude" <<'PY'
+#!/usr/bin/env python3
+# The fake claude: plugin marketplace update | update | list, each logged to claude.log as `<argv> | <cwd>`, state in
+# CLAUDE_CONFIG_DIR. Like the real CLI, an update from a cwd matching no project updates the first one and exits 0.
+# FAKE_CLAUDE_SERVES: the marketplace's version. FAKE_CLAUDE_STALE: basenames of projects an update leaves as they
+# are. FAKE_CLAUDE_UPDATE_RC: the update's exit code.
+import json, os, subprocess, sys
+cfg = os.environ["CLAUDE_CONFIG_DIR"]
+args = sys.argv[1:]
+with open(os.path.join(os.path.dirname(cfg), "claude.log"), "a") as f:
+    f.write(" ".join(args) + " | " + os.getcwd() + "\n")
+state_file = os.path.join(cfg, "state.json")
+state = json.load(open(state_file)) if os.path.exists(state_file) else {"served": None, "projects": {}}
+def cache(v):
+    return os.path.join(cfg, "plugins", "cache", "mvp", "mvp-sdlc", v)
+if args == ["plugin", "marketplace", "update", "mvp"]:
+    state["served"] = os.environ.get("FAKE_CLAUDE_SERVES", "0.9.9")
+elif args == ["plugin", "update", "mvp-sdlc@mvp", "--scope", "project", "--json"]:
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip()
+    project = top if top in state["projects"] else next(iter(state["projects"]))
+    old, new = state["projects"][project], state["served"]
+    if os.path.basename(project) not in os.environ.get("FAKE_CLAUDE_STALE", "").split():
+        os.makedirs(os.path.join(cache(new), ".claude-plugin"), exist_ok=True)
+        json.dump({"name": "mvp-sdlc", "version": new}, open(os.path.join(cache(new), ".claude-plugin", "plugin.json"), "w"))
+        state["projects"][project] = new
+    print(json.dumps({"outcome": "ok", "updateOutcome": "up_to_date" if old == new else "updated",
+                      "oldVersion": old, "newVersion": new}))
+    json.dump(state, open(state_file, "w"))
+    sys.exit(int(os.environ.get("FAKE_CLAUDE_UPDATE_RC", "0")))
+elif args == ["plugin", "list", "--json"]:
+    print(json.dumps([{"id": "mvp-sdlc@mvp", "version": v, "scope": "project", "enabled": True,
+                       "installPath": cache(v), "projectPath": p} for p, v in state["projects"].items()], indent=2))
+else:
+    sys.exit(97)
+json.dump(state, open(state_file, "w"))
+PY
+chmod +x "${tmp}/bin/gh" "${tmp}/bin/archon" "${tmp}/bin/claude"
 export PATH="${tmp}/bin:${PATH}"
 export FAKE_GH_STATE="${tmp}/gh" FAKE_GH_ORIGIN="${tmp}/origin.git" MIRROR_TARGET_URL="${tmp}/mirror.git"
 export ARCHON_HOME="${tmp}/archon" STUB_LOG="${tmp}/stub.log"
+export CLAUDE_CONFIG_DIR="${tmp}/claude/config" RELEASE_PLUGIN_PROJECTS="${tmp}/projects/be ${tmp}/projects/fe"
 
 # new_fixture: origin with main (v0.9.8) and develop (the 0.9.9 release prep), a clone of it to release from, an
 # empty mirror and empty fake GitHub state.
@@ -139,6 +176,27 @@ SH
   g -C "${r}" checkout -q main
 }
 
+# new_plugin_projects: the be and fe checkouts, each with a committed .claude/settings.json, both at mvp-sdlc 0.9.8 in
+# the fake claude's state, and an empty claude.log.
+new_plugin_projects() {
+  rm -rf "${tmp}/projects" "${tmp}/claude"
+  mkdir -p "${CLAUDE_CONFIG_DIR}"
+  : > "${tmp}/claude/claude.log"
+  local p
+  for p in be fe; do
+    git init -q -b main "${tmp}/projects/${p}"
+    mkdir "${tmp}/projects/${p}/.claude"
+    echo '{"enabledPlugins": {"mvp-sdlc@mvp": true}}' > "${tmp}/projects/${p}/.claude/settings.json"
+    g -C "${tmp}/projects/${p}" add -A
+    g -C "${tmp}/projects/${p}" commit -q -m init
+  done
+  python3 -c '
+import json, sys
+json.dump({"served": None, "projects": {p: "0.9.8" for p in sys.argv[2:]}}, open(sys.argv[1], "w"))' \
+    "${CLAUDE_CONFIG_DIR}/state.json" "$(git -C "${tmp}/projects/be" rev-parse --show-toplevel)" \
+    "$(git -C "${tmp}/projects/fe" rev-parse --show-toplevel)"
+}
+
 rc=0 out="" err=""
 release() {
   rc=0
@@ -157,6 +215,13 @@ for a in "tag 0.9.9" "tag v0.9.9-rc1" "publish v0.9.9" "tag" ""; do
   expect_rc "usage '${a}'" 64
 done
 [ -z "$(calls)" ] || fail usage "gh was called"
+
+# plugin refuses a tag that is not on origin before any claude call.
+new_plugin_projects
+release plugin v0.9.9
+expect_rc "plugin untagged" 1
+grep -q "v0.9.9 is not on origin" <<<"${err}" || fail "plugin untagged" "${err}"
+[ ! -s "${tmp}/claude/claude.log" ] || fail "plugin untagged" "claude was called: $(cat "${tmp}/claude/claude.log")"
 
 # merge-release-pr creates the PR with the changelog body and merges it with a merge commit at its head.
 release merge-release-pr v0.9.9
@@ -221,6 +286,42 @@ expect_rc "verify" 0
 ! grep -q "^DIFF" <<<"${out}" || fail "verify" "${out}"
 grep -q "^ok origin v0.9.9 is the merge of #120" <<<"${out}" || fail "verify" "${out}"
 ! grep -qE "^pr (create|merge)" <<<"$(calls)" || fail "verify" "$(calls)"
+
+# plugin refreshes the marketplace, updates be and fe from their top level, proves the cache and each project's entry,
+# and leaves both checkouts untouched; a rerun proves the same.
+be=$(git -C "${tmp}/projects/be" rev-parse --show-toplevel) fe=$(git -C "${tmp}/projects/fe" rev-parse --show-toplevel)
+heads="$(git -C "${be}" rev-parse HEAD) $(git -C "${fe}" rev-parse HEAD)"
+for run in "plugin" "plugin rerun"; do
+  : > "${tmp}/claude/claude.log"
+  release plugin v0.9.9
+  expect_rc "${run}" 0
+  [ "$(cat "${tmp}/claude/claude.log")" = "plugin marketplace update mvp | ${tmp}/repo
+plugin update mvp-sdlc@mvp --scope project --json | ${be}
+plugin update mvp-sdlc@mvp --scope project --json | ${fe}
+plugin list --json | ${tmp}/repo" ] || fail "${run}" "claude calls: $(cat "${tmp}/claude/claude.log")"
+  for line in "ok the cache has mvp-sdlc 0.9.9" "ok ${be} resolves mvp-sdlc@mvp 0.9.9" "ok ${fe} resolves mvp-sdlc@mvp 0.9.9"; do
+    grep -qx -- "${line}" <<<"${out}" || fail "${run}" "no '${line}': ${out}"
+  done
+  ! grep -q "^DIFF" <<<"${out}" || fail "${run}" "${out}"
+done
+[ -z "$(git -C "${be}" status --porcelain --ignored)$(git -C "${fe}" status --porcelain --ignored)" ] ||
+  fail "plugin" "a checkout changed"
+[ "$(git -C "${be}" rev-parse HEAD) $(git -C "${fe}" rev-parse HEAD)" = "${heads}" ] || fail "plugin" "a HEAD moved"
+
+# plugin fails when a project does not resolve the release, a project is not a checkout, or an update fails.
+new_plugin_projects
+FAKE_CLAUDE_STALE=fe release plugin v0.9.9
+expect_rc "plugin stale fe" 1
+grep -qx "ok ${be} resolves mvp-sdlc@mvp 0.9.9" <<<"${out}" || fail "plugin stale fe" "${out}"
+grep -qx "DIFF ${fe} resolves mvp-sdlc@mvp 0.9.9" <<<"${out}" || fail "plugin stale fe" "${out}"
+new_plugin_projects
+RELEASE_PLUGIN_PROJECTS="${tmp}/projects/be ${tmp}/nowhere" release plugin v0.9.9
+expect_rc "plugin not a checkout" 1
+grep -q "${tmp}/nowhere is not a git checkout" <<<"${err}" || fail "plugin not a checkout" "${err}"
+[ ! -s "${tmp}/claude/claude.log" ] || fail "plugin not a checkout" "claude was called"
+FAKE_CLAUDE_UPDATE_RC=1 release plugin v0.9.9
+expect_rc "plugin update fails" 1
+grep -q "claude plugin update mvp-sdlc@mvp failed in ${be}" <<<"${err}" || fail "plugin update fails" "${err}"
 
 # A tampered install fails install's and verify's proofs.
 echo tampered > "${ARCHON_HOME}/workflows/one.yaml"

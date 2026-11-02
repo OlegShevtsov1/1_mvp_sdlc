@@ -59,6 +59,26 @@ describe("readRuns", () => {
     ]);
   });
 
+  test("the factory's PR approval wait reads as a pr-approve pause", () => {
+    const [run] = readRuns(fixtureDb("pr-approve-7b3c1d2e.json"), 24);
+    expect(run.pause).toMatchObject({
+      kind: "pr-approve", node: "pr-approve-cycle.pr-approve", eventId: "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+      occurrence: "e4d3c2b1-a0f9-4e8d-b7c6-5a4b3c2d1e0f", iteration: 1,
+      decisions: [{ id: "approve", label: "Approve" }, { id: "reject", label: "Reject" }],
+    });
+    expect(run.pause?.text).toStartWith("PR APPROVAL — round 1 of 4.\nPR: https://github.com/OlegShevtsov1/1_mvp_pilot_fe/pull/42\n");
+  });
+
+  test("the factory's QA dev wait reads as a qa-dev pause", () => {
+    const [run] = readRuns(fixtureDb("qa-dev-5e6f7a8b.json"), 24);
+    expect(run.pause).toMatchObject({
+      kind: "qa-dev", node: "qa-dev-cycle.qa-dev", eventId: "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6f",
+      occurrence: "f1e2d3c4-b5a6-4978-8695-a4b3c2d1e0f9", iteration: 1,
+      decisions: [{ id: "ok", label: "OK" }, { id: "reject", label: "Reject" }],
+    });
+    expect(run.pause?.text).toStartWith("QA DEV — the work is on dev.\nURL: https://dev.example.test\n");
+  });
+
   test("plan output is the newest plan node before the pause", () => {
     const db = fixtureDb(...FIXTURES);
     const run = "4a7a0367-d50c-4828-95e1-3d36b9a736bb";

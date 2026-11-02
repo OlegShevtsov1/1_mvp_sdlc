@@ -13,6 +13,10 @@ export type LedgerEntry = {
   evidence: { event_id?: string; node?: string; text?: string; message?: string };
 };
 
+// An operator's button answer to the pause `eventId` of run `runId`; a failed answer is logged as an escalation.
+export const isOperatorAnswer = (e: LedgerEntry, runId: string, eventId: string): boolean =>
+  e.run_id === runId && e.evidence?.event_id === eventId && e.rule === "operator" && e.action !== "escalate";
+
 export function ledgerPath(): string {
   return process.env.SDLC_AUTOPILOT_LEDGER || join(homedir(), ".local", "state", "sdlc-autopilot", "ledger.jsonl");
 }

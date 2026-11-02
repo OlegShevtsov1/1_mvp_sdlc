@@ -21,6 +21,9 @@ repo:
   # operator, who merges release (develop -> main) and hotfix (hotfix/* -> main) PRs by hand.
   # develop exists; the factory engine reads this key.
   manual_merge_bases: ["main"]
+  # auto = the factory merges after a green merge gate; operator = it pauses at pr-approve first and merges
+  # only the head the operator approved (in Telegram, or with the label operator-approved).
+  merge_approval: "auto"
 # deploy.command waits for the automatic Dev Deploy of the merge commit (it never dispatches one).
 deploy:
   command: "bin/wait-dev-deploy"
@@ -32,4 +35,11 @@ monitoring:
   provider: "none"
   mcp_config: ""
   window_minutes: 10
+# QA dev after the deploy: absent = no QA pause. Enabling needs an e2e workflow whose
+# run-name carries sha-<commit> when workflow_run starts it; this template ships none.
+# qa_dev:
+#   e2e_workflow: "Dev Journey"
+#   pages:
+#     - glob: "src/**"
+#       url: "https://app.dev.{{PROJECT_ZONE}}/"
 secrets: []

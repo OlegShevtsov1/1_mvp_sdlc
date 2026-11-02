@@ -3,8 +3,9 @@ import { dirname, join } from "node:path";
 import { ledgerPath } from "./ledger.ts";
 import type { RunView } from "./runs.ts";
 
-// The policy answers only approve and retry; the operator's Telegram buttons also skip or abort.
-export const RESPOND_ACTIONS = ["approve", "retry", "skip", "abort"] as const;
+// The policy answers only approve and retry; the operator's Telegram buttons also skip, abort, reject a PR or QA card,
+// or accept the work on dev (`ok`, the QA dev wait's own option).
+export const RESPOND_ACTIONS = ["approve", "retry", "skip", "abort", "reject", "ok"] as const;
 
 export type RespondAction = (typeof RESPOND_ACTIONS)[number];
 
@@ -32,14 +33,15 @@ export function runDetached(argv: string[], cwd: string, logFile: string): void 
 }
 
 // `--occurrence` pins the answer to the pause the policy judged: if the operator answered it first, Archon refuses.
-// Without it the answer could land on a later pause, so a pause with no occurrence is not answered.
+// Without it the answer could land on a later pause, so a pause with no occurrence is not answered. The text goes after
+// `--`: an operator's reason may start with `-`, which Archon would otherwise refuse as an unknown option.
 export function respondArgv(run: RunView, d: Decision): string[] {
   if (!isRespondAction(d.action)) {
     throw new Error(`respond carries only ${RESPOND_ACTIONS.join(", ")}, not ${d.action}`);
   }
   const occurrence = run.pause?.occurrence;
   if (!occurrence) throw new Error(`run ${run.id} has no pause occurrence to pin the answer to`);
-  return ["archon", "workflow", "respond", run.id, d.action, d.text, "--occurrence", occurrence];
+  return ["archon", "workflow", "respond", run.id, d.action, "--occurrence", occurrence, "--", d.text];
 }
 
 // Archon resolves the run from the repository it is started in, so respond runs in the run's own worktree.

@@ -8,6 +8,8 @@ export type GateRules = {
   "plan-gate"?: { approve_text: string; open_question_prefix: string };
   "install-gate"?: { max_retries: number };
   "post-merge-allowlist"?: { repo: string; subcommands: ReleaseSubcommand[] };
+  "pr-approve"?: { action: "escalate-as-card" };
+  "qa-dev"?: { action: "escalate-as-card" };
 };
 
 const OPERATOR = "потрібне рішення оператора.";
@@ -23,6 +25,8 @@ const SHAPES: { [K in keyof GateRules]-?: (r: Record<string, unknown>) => boolea
     typeof r.repo === "string" && /^[^/\s]+\/[^/\s]+$/.test(r.repo) && Array.isArray(r.subcommands) &&
     r.subcommands.length > 0 && r.subcommands.every(isReleaseSubcommand) &&
     new Set(r.subcommands).size === r.subcommands.length,
+  "pr-approve": (r) => r.action === "escalate-as-card",
+  "qa-dev": (r) => r.action === "escalate-as-card",
 };
 
 const isGate = (id: unknown): id is keyof GateRules => typeof id === "string" && Object.hasOwn(SHAPES, id);
@@ -48,6 +52,12 @@ export function decide(run: RunView, policy: Policy, ctx: { activeFactoryRuns: s
   if (pause.kind === "plan-gate" && gates["plan-gate"]) return planGate(pause, gates["plan-gate"]);
   if (pause.kind === "install-gate" && gates["install-gate"]) return installGate(pause, gates["install-gate"], ctx);
   if (pause.kind === "post-merge-gate") return postMergeGate(run, pause, gates["post-merge-allowlist"]);
+  if (pause.kind === "pr-approve" && gates["pr-approve"]) {
+    return escalate("pr-approve", `PR чекає апруву оператора — ${OPERATOR}`);
+  }
+  if (pause.kind === "qa-dev" && gates["qa-dev"]) {
+    return escalate("qa-dev", `Робота на dev чекає перевірки оператора — ${OPERATOR}`);
+  }
   return {
     action: "escalate",
     rule: "default-escalate",
@@ -99,6 +109,9 @@ const STEP_NUMBER = /^(\S+) — /;
 const field = (text: string, name: string) =>
   text.split("\n").find((l) => l.startsWith(`${name}: `))?.slice(name.length + 2).trim() ?? "";
 
+// The step id of a post-merge gate's `Крок: <n> — <title>` line.
+export const stepNumber = (text: string): string | undefined => field(text, "Крок").match(STEP_NUMBER)?.[1];
+
 // A post-merge step goes to the operator unless it is a release step the allowlist approves (operator decision
 // 2026-11-01, PILOT-545, replacing PILOT-509's every-step escalation); checkout and mismatch steps always do.
 function postMergeGate(run: RunView, pause: Pause, rule: GateRules["post-merge-allowlist"]): Decision {
@@ -107,12 +120,12 @@ function postMergeGate(run: RunView, pause: Pause, rule: GateRules["post-merge-a
   const operator = (reason?: string) => escalate("post-merge-gate",
     `Крок post-merge «${step}» (тип ${type || "невідомий"}) схвалює лише оператор${reason ? ` (${reason})` : ""} — ${OPERATOR}`);
   if (!rule || (type !== "approval" && type !== "manual") || repoOf(run.cwd) !== rule.repo) return operator();
-  const n = field(pause.text, "Крок").match(STEP_NUMBER)?.[1];
+  const n = stepNumber(pause.text);
   const definition = n === undefined ? undefined : readStep(run.id, run.cwd, n);
   if (n === undefined || !definition) return operator("визначення кроку не прочитано");
   // A step that pauses again after its approve (a busy install, say) would otherwise be approved, and run, each time.
   const approvedBefore = readLedger().some((e) => e.run_id === run.id && e.rule === ALLOWLIST &&
-    e.action === "approve" && field(e.evidence?.text ?? "", "Крок").match(STEP_NUMBER)?.[1] === n);
+    e.action === "approve" && stepNumber(e.evidence?.text ?? "") === n);
   if (approvedBefore) return operator("крок уже раз схвалено автоматично");
   const match = matchReleaseStep(definition.text, { cwd: run.cwd, subcommands: rule.subcommands });
   if (!match.ok) return operator(match.reason);

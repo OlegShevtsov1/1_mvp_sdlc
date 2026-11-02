@@ -377,27 +377,34 @@ print(pr["number"], pr["html_url"])' <<<"${created}")
   log "PR ${pr_url}"
 }
 
-# Green: at least one check run, and the newest run of each check name completed without failing (an older, superseded
-# run of the same name is ignored). Red or timed out: exit 3 with the PR URL on stdout.
+# Green: at least one check run, no run of any name still queued or in progress, the newest completed run of each name
+# passing (an older, superseded run of the same name is ignored), and every GitHub Actions check suite on the commit
+# completed (a queued workflow run has its suite before it has check runs). Red or timed out: exit 3 with the PR URL on
+# stdout.
 wait_checks() {
-  local timeout=${MIRROR_CHECKS_TIMEOUT:-1800} interval=${MIRROR_CHECKS_INTERVAL:-30} start=${SECONDS} runs state
+  local timeout=${MIRROR_CHECKS_TIMEOUT:-1800} interval=${MIRROR_CHECKS_INTERVAL:-30} start=${SECONDS} runs suites state
   while :; do
     runs=$(mirror_api GET "commits/${sync_sha}/check-runs" -f per_page=100) || die 1 "reading the checks of ${pr_url} failed"
     "${dry_run}" && return 0
+    suites=$(mirror_api GET "commits/${sync_sha}/check-suites" -f per_page=100) ||
+      die 1 "reading the check suites of ${pr_url} failed"
     state=$(python3 -c '
 import json, sys
 runs = json.load(sys.stdin)["check_runs"]
+suites = json.loads(sys.argv[1])["check_suites"]
+waiting = {r["name"] for r in runs if r["status"] != "completed"}
 newest = {}
-for r in sorted(runs, key=lambda r: (r.get("started_at") or "9", r.get("completed_at") or "9", r["id"])):
+for r in sorted((r for r in runs if r["status"] == "completed"),
+                key=lambda r: (r.get("started_at") or "9", r.get("completed_at") or "9", r["id"])):
     newest[r["name"]] = r
-runs = list(newest.values())
-failed = [r["name"] for r in runs if r["status"] == "completed" and r["conclusion"] not in ("success", "neutral", "skipped")]
+failed = [n for n, r in newest.items() if n not in waiting and r["conclusion"] not in ("success", "neutral", "skipped")]
+actions_done = all(s["status"] == "completed" for s in suites if (s.get("app") or {}).get("slug") == "github-actions")
 if failed:
     print("red " + ", ".join(failed))
-elif runs and all(r["status"] == "completed" for r in runs):
+elif runs and not waiting and actions_done:
     print("green")
 else:
-    print("pending")' <<<"${runs}")
+    print("pending")' "${suites}" <<<"${runs}")
     case "${state}" in
       green) return 0 ;;
       red*) log "checks failed: ${state#red }; not merged"; echo "${pr_url}"; exit 3 ;;

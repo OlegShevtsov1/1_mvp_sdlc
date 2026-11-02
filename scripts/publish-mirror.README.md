@@ -94,9 +94,11 @@ PR, so `main-guard` on the mirror stays green and the mirror `main` can be branc
   a new release whose section is written. On the sdlc mirror the block passes the release rule of its own
   `pr-conventions-check`, which compares it with the mirror's `CHANGELOG.md`.
 - **Checks:** every `MIRROR_CHECKS_INTERVAL` seconds (default 30), for up to `MIRROR_CHECKS_TIMEOUT` seconds (default
-  1800), it reads the check runs of the sync commit. Green means at least one check run, all completed, each
-  `success`, `neutral` or `skipped`. A failed check or the timeout stops with exit 3: the failed check names on stderr,
-  the PR URL on stdout, nothing merged.
+  1800), it reads the check runs and check suites of the sync commit. Green means at least one check run, none still
+  queued or in progress, the newest completed run of each check name `success`, `neutral` or `skipped` (an older,
+  superseded run is ignored), and every GitHub Actions check suite completed (a queued workflow run has a suite before
+  it has check runs). A failed check or the timeout stops with exit 3: the failed check names on stderr, the PR URL on
+  stdout, nothing merged.
 - **Merge:** a merge commit, never a squash (decision 51), with the sync commit sha pinned, so GitHub refuses the merge
   if `develop` moved after the checks.
 - **Resume:** after exit 3, fix the cause and run the script again. The open PR is reused (its title and body are

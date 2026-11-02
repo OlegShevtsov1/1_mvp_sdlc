@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-export type PauseKind = "plan-gate" | "install-gate" | "post-merge-gate" | "other";
+export type PauseKind = "plan-gate" | "install-gate" | "post-merge-gate" | "pr-approve" | "qa-dev" | "other";
 
 export type RunView = {
   id: string;
@@ -91,6 +91,8 @@ const ANSWER_SQL = `SELECT data FROM remote_agent_workflow_events
 
 const KINDS: Record<string, PauseKind> = {
   "factory/plan-gate": "plan-gate",
+  "factory/pr-approve": "pr-approve",
+  "factory/qa-dev": "qa-dev",
   "post-merge/install-gate": "install-gate",
   "post-merge/gate": "post-merge-gate",
 };

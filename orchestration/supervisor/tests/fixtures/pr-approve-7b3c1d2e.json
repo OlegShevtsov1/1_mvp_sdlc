@@ -1,0 +1,43 @@
+{
+  "source": "synthetic, shaped like archon.db v0.12.1 plan-gate-4a7a0367 wait in a loop; text as approvalMessage renders",
+  "run": {
+    "id": "7b3c1d2e-5f6a-4b8c-9d0e-1f2a3b4c5d6e",
+    "workflow_name": "factory",
+    "status": "paused",
+    "working_path": "/home/operator/.archon/workspaces/OlegShevtsov1/1_mvp_pilot_fe/worktrees/archon/task-factory-1793561200455",
+    "user_message": "Build in THIS repository OlegShevtsov1/1_mvp_pilot_fe, base develop, one PR, squash. Trello PILOT-900 <trello card>. PR title «PILOT-900: fe: dark theme toggle on the settings page», trailer «Type: feat». Size S.",
+    "metadata": "{\"execution_owner\":{\"host\":\"operator-host\",\"pid\":3011452,\"uid\":1000},\"wait\":{\"owner\":\"node\",\"nodeId\":\"pr-approve\",\"kind\":\"attention\",\"waitingSince\":\"2026-11-01T09:14:07.512Z\",\"message\":\"PR APPROVAL — round 1 of 4.\\nPR: https://github.com/OlegShevtsov1/1_mvp_pilot_fe/pull/42\\nHead: 3f9c2b7a1d4e5f60718293a4b5c6d7e8f9012345\\nDiff: 7 files, +120 −8\\nChecks: 9 pass\\nReview: ready\\nSummary: The settings page gets a dark theme toggle. The choice is kept in local storage and applied before the first paint.\\n\\napprove → merge exactly this head, then deploy and verify as usual\\nreject  → say what to change (free text); this run delivers it on the same pull request and asks again\\n(The label operator-approved on the pull request approves this head too. A new commit needs a new approval.\\nIf Review is not ready, approving stops the run; answer reject with what to change.)\",\"pauseId\":\"e4d3c2b1-a0f9-4e8d-b7c6-5a4b3c2d1e0f\",\"form\":\"select\",\"options\":[{\"id\":\"approve\",\"label\":\"Approve\"},{\"id\":\"reject\",\"label\":\"Reject\"}]}}",
+    "started_at": "2026-11-01 08:31:40",
+    "last_activity_at": "2026-11-01 09:14:07",
+    "completed_at": null
+  },
+  "events": [
+    {
+      "id": "0c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+      "workflow_run_id": "7b3c1d2e-5f6a-4b8c-9d0e-1f2a3b4c5d6e",
+      "event_order": 512301,
+      "event_type": "wait_started",
+      "step_name": "pr-approve-cycle.pr-approve",
+      "data": "{\"kind\":\"attention\"}",
+      "created_at": "2026-11-01 09:14:07"
+    },
+    {
+      "id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+      "workflow_run_id": "7b3c1d2e-5f6a-4b8c-9d0e-1f2a3b4c5d6e",
+      "event_order": 512302,
+      "event_type": "node_suspended",
+      "step_name": "pr-approve-cycle.pr-approve",
+      "data": "{\"node\":{\"id\":\"pr-approve\",\"kind\":\"wait\"},\"invocation\":{\"id\":\"b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e\",\"startedAt\":\"2026-11-01T09:14:07.511Z\",\"loopPath\":[{\"groupId\":\"pr-approve-cycle\",\"iteration\":1}]},\"type\":\"wait\",\"suspend_point\":\"wait\",\"node_output\":\"\"}",
+      "created_at": "2026-11-01 09:14:07"
+    },
+    {
+      "id": "c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f",
+      "workflow_run_id": "7b3c1d2e-5f6a-4b8c-9d0e-1f2a3b4c5d6e",
+      "event_order": 512303,
+      "event_type": "node_suspended",
+      "step_name": "pr-approve-cycle",
+      "data": "{\"node\":{\"id\":\"pr-approve-cycle\",\"kind\":\"loop_group\"},\"invocation\":{\"id\":\"d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70\",\"startedAt\":\"2026-11-01T09:12:51.204Z\",\"loopPath\":[]},\"type\":\"loop_group\",\"aggregate\":true,\"suspend_point\":\"wait\",\"node_output\":\"\"}",
+      "created_at": "2026-11-01 09:14:07"
+    }
+  ]
+}

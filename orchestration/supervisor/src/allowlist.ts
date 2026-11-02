@@ -4,7 +4,7 @@ import { archonHome } from "./postmerge.ts";
 import { repoOf } from "./runs.ts";
 
 // The subcommands of scripts/release.sh; policy.yaml may narrow the list, never extend it.
-export const RELEASE_SUBCOMMANDS = ["merge-release-pr", "tag", "mirror", "install", "verify"] as const;
+export const RELEASE_SUBCOMMANDS = ["merge-release-pr", "tag", "mirror", "install", "verify", "plugin"] as const;
 export type ReleaseSubcommand = (typeof RELEASE_SUBCOMMANDS)[number];
 
 export const isReleaseSubcommand = (s: unknown): s is ReleaseSubcommand =>

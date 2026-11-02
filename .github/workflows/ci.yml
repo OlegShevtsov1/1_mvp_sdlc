@@ -39,6 +39,9 @@ jobs:
       - name: SDLC docs (links, references that exist, English only)
         run: bash scripts/ci/check.sh docs
 
+      - name: Changelog (fragments in changelog.d/, an empty [Unreleased])
+        run: bash scripts/ci/check.sh changelog
+
       - name: Public-repo check (no internal hosts, IPs, IDs or local paths)
         run: bash scripts/ci/check.sh hygiene
 

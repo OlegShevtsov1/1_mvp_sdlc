@@ -196,6 +196,25 @@ describe("decide", () => {
     expect(decide(release("3", "approval"), POLICY, none)).toMatchObject({ action: "approve" });
   });
 
+  test("pr-approve escalates as a card", () => {
+    const run = readRuns(fixtureDb("pr-approve-7b3c1d2e.json"), 24)[0];
+    expect(decide(run, POLICY, none)).toEqual({
+      action: "escalate", rule: "pr-approve", text: "PR чекає апруву оператора — потрібне рішення оператора.",
+    });
+    const noRule = { ...POLICY, rules: POLICY.rules.filter((r) => (r as { id?: unknown }).id !== "pr-approve") };
+    expect(decide(run, noRule, none)).toMatchObject({ action: "escalate", rule: "default-escalate" });
+  });
+
+  test("qa-dev escalates as a card", () => {
+    const run = readRuns(fixtureDb("qa-dev-5e6f7a8b.json"), 24)[0];
+    expect(decide(run, POLICY, none)).toEqual({
+      action: "escalate", rule: "qa-dev", text: "Робота на dev чекає перевірки оператора — потрібне рішення оператора.",
+    });
+    const noRule = { ...POLICY, rules: POLICY.rules.filter((r) => (r as { id?: unknown }).id !== "qa-dev") };
+    expect(decide(run, noRule, none)).toMatchObject({ action: "escalate", rule: "default-escalate" });
+    expect(() => gateRules([{ id: "qa-dev", action: "ok" }])).toThrow("policy: rule qa-dev is malformed");
+  });
+
   test("unknown pause escalates", () => {
     expect(decide(view("4a7a0367", { kind: "other" }), POLICY, none))
       .toMatchObject({ action: "escalate", rule: "default-escalate" });
@@ -210,6 +229,9 @@ describe("gateRules", () => {
     const plan = { id: "plan-gate", approve_text: "ok", open_question_prefix: "Non-blocking" };
     expect(() => gateRules([plan, plan])).toThrow();
     expect(gateRules([{ id: "transient", anything: 1 }])).toEqual({});
+    expect(() => gateRules([{ id: "pr-approve", action: "approve" }])).toThrow("policy: rule pr-approve is malformed");
+    expect(gateRules([{ id: "pr-approve", action: "escalate-as-card" }]))
+      .toEqual({ "pr-approve": { id: "pr-approve", action: "escalate-as-card" } });
   });
 
   test("gateRules rejects a post-merge-allowlist that names what release.sh lacks or no repo", () => {

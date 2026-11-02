@@ -152,7 +152,11 @@ A full annotated example with every field is in
 - `repo` — `remote`, `base_branch`, `merge_strategy` (`squash` | `merge` |
   `rebase`), `manual_merge_bases` — the bases whose pull requests the operator
   merges by hand. Absent means `["main"]`, so a profile whose `base_branch` is
-  `main` needs `manual_merge_bases: []` for the factory to merge. The run
+  `main` needs `manual_merge_bases: []` for the factory to merge.
+  `merge_approval` — `auto` (absent means `auto`) merges after a green merge
+  gate; `operator` pauses at `pr-approve` first and merges only the head the
+  operator approved (PILOT-572, see the
+  [operator guide §6](../docs/archon-factory.md#6-running-and-the-gates)). The run
   starts from `<remote>/<base_branch>`, whatever the repository's default branch
   (see the [operator guide §9](../docs/archon-factory.md#9-known-archon-issues-the-factory-handles)).
 - `deploy` — `command`, `health_url`, `wait_seconds`, `rollback_command`.
@@ -162,6 +166,15 @@ A full annotated example with every field is in
   what was merged.
 - `monitoring` — `provider` (`sentry` | `datadog` | `grafana` | `none`),
   `mcp_config`, `window_minutes`.
+- `qa_dev` (optional, PILOT-574) — `e2e_workflow` (a workflow name or file;
+  `""` or absent means none) and `pages` (at most 10 `{glob, url}`). After the
+  deploy the factory waits up to 20 minutes for that workflow's run on the
+  commit on dev, shoots each page whose `glob` matches a file the pull request
+  changed at 1440×900 and 360×800, writes `qa-dev.json` and pauses at `qa-dev`
+  (`ok` | `reject`); a red e2e or any state it cannot read alerts
+  `MVP_VPN_ALERTS` and ends the run not delivered instead (see the
+  [operator guide §6](../docs/archon-factory.md#6-running-and-the-gates)).
+  Absent means no QA pause, today's flow.
 - `secrets` — **names of environment variables only**, such as
   `SENTRY_AUTH_TOKEN`. Never values. The values come from the environment of the
   machine that runs Archon. An entry that is not a bare variable name fails
@@ -331,7 +344,7 @@ bash scripts/ci/check.sh factory
 The unit tests include the Trello card reference parser, the move for every
 point of the run, and the Trello calls against a stubbed `fetch`.
 
-Install, validation, the twenty-four dry-run fixtures with trace assertions (each
+Install, validation, the twenty-nine dry-run fixtures with trace assertions (each
 Trello move at its node, in dry-run mode, with no network), a run in
 which `sync-base` moves a run worktree cut from a diverged default branch to
 `develop`, a run in which a UI task without a visual reference stops before

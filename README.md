@@ -111,7 +111,7 @@ on the next run: [docs/project-add.md](docs/project-add.md).
   run of the release-prep PR merges it with a merge commit through `scripts/release.sh`
   ([scripts/release.README.md](scripts/release.README.md)), approved by the supervisor's release allowlist, followed by
   the annotated tag `vX.Y.Z` from `release.sh tag`, equal to the `mvp-sdlc` version in
-  `plugins/mvp-sdlc/.claude-plugin/plugin.json`.
+  `plugins/mvp-sdlc/.claude-plugin/plugin.json`; `release.sh plugin` then updates `mvp-sdlc` in be and fe.
 - Every change goes through a PR, no direct pushes (decision 54). `pr-conventions-check.yml` checks the branch name,
   the `PILOT-<n>: …` title and the single `Type:` line of every PR into `develop` and `main`, and that a release PR
   carries a non-empty changelog section for its version (decision 64).
@@ -128,6 +128,7 @@ bash scripts/ci/check.sh templates  # render tests; render both templates: no pl
 bash scripts/ci/check.sh plugins    # plugin lint, evals layer 0, eval runner tests (python3 >= 3.8, stdlib only)
 bash scripts/ci/check.sh mvp_sdlc   # mvp-sdlc plugin tests: hooks, phase gate, scripts
 bash scripts/ci/check.sh docs       # SDLC docs: links, references that exist, English only
+bash scripts/ci/check.sh changelog  # changelog.d/ fragments are well formed, CHANGELOG.md's [Unreleased] is empty
 bash scripts/ci/check.sh factory    # the factory's bun unit tests (bun >= 1.2.21)
 bash scripts/ci/check.sh archon     # install, validate, fixtures and dry runs on Archon v0.12.1 (bun)
 bash scripts/ci/check.sh owner      # what the public mirror would still name after the owner replacement

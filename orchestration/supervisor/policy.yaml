@@ -16,6 +16,14 @@ rules:
     open_question_prefix: Non-blocking
   - id: install-gate
     max_retries: 4
+  # The factory's PR approval wait (merge_approval: operator) always goes to the operator as a PR card; its «Повернути»
+  # asks for a reason and answers reject with it.
+  - id: pr-approve
+    action: escalate-as-card
+  # The factory's QA dev wait (a profile's qa_dev, after a green deploy) goes to the operator as a «На dev готово» card
+  # with its screenshots; «Прийнято» moves the Trello card to Ready to Release, «Є зауваження» queues a fix task.
+  - id: qa-dev
+    action: escalate-as-card
   # A post-merge gate of type approval or manual in `repo` is approved when its step's command block holds exactly one
   # release line and otherwise only these (src/allowlist.ts holds the matcher):
   #   bash scripts/release.sh merge-release-pr v<X.Y.Z>   merges the release PR develop → main with a merge commit
@@ -23,6 +31,7 @@ rules:
   #   bash scripts/release.sh mirror v<X.Y.Z>             publish-mirror.sh from the tag, dry run then real
   #   bash scripts/release.sh install v<X.Y.Z>            install.sh from the tag, once no factory run is running
   #   bash scripts/release.sh verify v<X.Y.Z>             read-only proofs of the four above
+  #   bash scripts/release.sh plugin v<X.Y.Z>             claude plugin update mvp-sdlc for be and fe, then proofs
   #   cd <the run's own worktree>
   #   NAME=value                                          a short local name only (P, M, rc, …), never PATH or GIT_*
   #   read-only: gh pr view|list|checks, gh api (GET only), git fetch|log|rev-parse|show|diff|status, echo, test,
@@ -32,7 +41,7 @@ rules:
   # step already approved once in the run escalate. A checkout or mismatch gate always escalates.
   - id: post-merge-allowlist
     repo: OlegShevtsov1/1_mvp_sdlc
-    subcommands: [merge-release-pr, tag, mirror, install, verify]
+    subcommands: [merge-release-pr, tag, mirror, install, verify, plugin]
 # Every run the supervisor starts, post-merge and queued briefs alike, waits for a free slot and an idle enough host;
 # a transient resume waits for the same host threshold.
 limits:

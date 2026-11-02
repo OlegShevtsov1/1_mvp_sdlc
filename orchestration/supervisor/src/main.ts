@@ -4,10 +4,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { type Decision, respond } from "./act.ts";
 import { housekeep } from "./housekeeping.ts";
-import { ANSWERED_TOAST, pressToast, resolvedLine } from "./humanize.ts";
-import { alreadyActed, appendLedger, readLedger } from "./ledger.ts";
+import {
+  HINT, type IntakeDeps, realIntakeDeps, refreshChains, respondStage, stageArgv, stageNote, stageViews, taskCommand,
+} from "./intake.ts";
+import { ANSWERED_TOAST, pressToast, REASON_TOAST, resolvedLine } from "./humanize.ts";
+import { alreadyActed, appendLedger, isOperatorAnswer, readLedger } from "./ledger.ts";
 import { launchPostMerges, parseSince, type PostMergeDeps, postMergeCutoff, realPostMergeDeps } from "./postmerge.ts";
 import { decide, gateRules } from "./policy.ts";
+import { afterQaAnswer } from "./qa.ts";
 import { inFlight, nextTasks, type QueueDeps, realQueueDeps, startQueued } from "./queue.ts";
 import { activeRuns, type Host, limits, readHost } from "./resources.ts";
 import { OPEN_STATUSES, type RunView, readRuns } from "./runs.ts";
@@ -27,6 +31,11 @@ const HISTORY_HOURS = 24;
 const POST_MERGE_HISTORY_HOURS = 14 * 24;
 const HOUSEKEEPING_MS = 24 * 60 * 60 * 1000;
 const OPERATOR_TEXT = "Відповідь оператора в Telegram (sdlc-autopilot).";
+const STAGE_WORKFLOW = "sdlc-stage";
+
+// A stage PR view is answered by the supervisor itself; every other pause by `archon workflow respond`.
+const respondAny = (run: RunView, d: Decision) =>
+  run.workflow === STAGE_WORKFLOW ? respondStage(run, d, realIntakeDeps) : respond(run, d);
 
 export function loadPolicy(path: string): Policy {
   const p = Bun.YAML.parse(readFileSync(path, "utf8")) as (Partial<Policy> & { post_merge?: unknown }) | null;
@@ -52,10 +61,14 @@ export async function tick(deps: {
   postMerge?: PostMergeDeps;
   queue?: QueueDeps;
   telegram?: TelegramDeps;
+  intake?: IntakeDeps;
 }): Promise<RunView[]> {
   let decided = 0;
   const now = (deps.now ?? (() => new Date()))();
-  const runs = readRuns(deps.db, HISTORY_HOURS);
+  // A stage PR of the `/task` chain waits for the operator as a pr-approve view with no Archon run behind it.
+  const stages = deps.intake ? refreshChains(deps.intake) : { views: [], written: 0 };
+  decided += stages.written;
+  const runs = [...readRuns(deps.db, HISTORY_HOURS), ...stages.views];
   // Gate policy (PILOT-509): the install gate is retried only while the factory runs blocking it are open.
   const ctx = {
     activeFactoryRuns: runs
@@ -104,14 +117,16 @@ export async function tick(deps: {
   if (deps.postMerge) {
     decided += launchPostMerges(deps.db, recent, deps.postMerge, postMergeCutoff(deps.policy, now), active);
   }
-  const open = [...recent.filter((r) => OPEN_STATUSES.includes(r.status)), ...queued.views];
+  const open = [...recent.filter((r) => OPEN_STATUSES.includes(r.status)), ...queued.views, ...stages.views];
   if (deps.queue) decided += queued.written + startQueued(active, open, deps.queue);
 
   // Operator answers arrive through `listenLoop`; the tick sends escalations and closes messages answered elsewhere.
   // Telegram being down must not fail the tick.
   if (deps.telegram) {
     try {
-      const sent = await deps.telegram.notifyEscalations(recent, deps.db);
+      // Read again: launches and the queue take seconds, and a pause answered meanwhile must not get live buttons.
+      const live = [...readRuns(deps.db, POST_MERGE_HISTORY_HOURS), ...(deps.intake ? stageViews() : [])];
+      const sent = await deps.telegram.notifyEscalations(live, deps.db);
       if (sent > 0) console.log(`sdlc-autopilot: ${sent} escalation(s) sent to Telegram`);
     } catch (e) {
       console.error(`sdlc-autopilot: ${e instanceof Error ? e.message : String(e)}`);
@@ -124,7 +139,8 @@ export async function tick(deps: {
 
 // An operator's button press is answered only on the pause it was shown for, once, and only with one of that pause's
 // own decisions; `--occurrence` in the respond makes Archon refuse it if the pause moved on meanwhile. The ledger
-// check is synchronous with the act's ledger line, so of several presses on one pause only the first acts.
+// check is synchronous with the act's ledger line, so of several presses on one pause only the first acts. A reject
+// carries the operator's reason, and without one nothing is answered: the press asks for it instead.
 function operatorPress(
   runs: RunView[], a: OperatorAnswer, respond: (run: RunView, d: Decision) => void, telegram: TelegramDeps,
 ): Press {
@@ -132,11 +148,12 @@ function operatorPress(
   const pause = run?.pause;
   // The next tick's notifyEscalations closes that message as answered outside Telegram.
   if (!run || !pause) return { toast: ANSWERED_TOAST };
-  const answered = readLedger().some((e) =>
-    e.run_id === a.runId && e.evidence?.event_id === a.eventId && e.rule === "operator" && e.action !== "escalate");
+  const answered = readLedger().some((e) => isOperatorAnswer(e, a.runId, a.eventId));
   const choice = pause.decisions.find((d) => d.id === a.action);
   if (answered || !choice) return { toast: ANSWERED_TOAST };
-  const text = a.text ?? OPERATOR_TEXT;
+  const reason = a.text?.trim() ?? "";
+  if (a.action === "reject" && reason === "") return { toast: REASON_TOAST, askReason: true };
+  const text = reason || OPERATOR_TEXT;
   const line = { ts: new Date().toISOString(), run_id: run.id, workflow: run.workflow, kind: pause.kind, rule: "operator" };
   const act = async () => {
     try {
@@ -154,7 +171,10 @@ function operatorPress(
     }
     appendLedger({ ...line, action: a.action, evidence: { event_id: pause.eventId, node: pause.node, text } });
     console.log(`sdlc-autopilot: operator ${a.action} for ${run.id} written to the ledger`);
-    await telegram.closeAnswer(a, resolvedLine(a.action, true));
+    const followUp = pause.kind === "qa-dev"
+      ? await afterQaAnswer(run, pause, a.action, text)
+      : run.workflow === STAGE_WORKFLOW ? stageNote(run.id) : "";
+    await telegram.closeAnswer(a, [resolvedLine(a.action, true), followUp].filter(Boolean).join("\n"));
   };
   return { toast: pressToast(a.action), act };
 }
@@ -164,6 +184,7 @@ type ListenDeps = {
   respond: (run: RunView, d: Decision) => void;
   telegram: TelegramDeps;
   status: () => string;
+  task?: (text: string) => Promise<string>;
   pollSeconds?: number;
 };
 
@@ -171,6 +192,7 @@ type ListenDeps = {
 export function listen(deps: ListenDeps): Promise<boolean> {
   return deps.telegram.pollUpdates({
     status: deps.status,
+    task: deps.task ?? (async () => HINT),
     press: (a) => operatorPress(deps.runs(), a, deps.respond, deps.telegram),
   }, deps.pollSeconds ?? POLL_SECONDS);
 }
@@ -209,12 +231,15 @@ if (import.meta.main) {
   const recentRuns = () => {
     const db = new Database(dbPath, { readonly: true });
     try {
-      return readRuns(db, POST_MERGE_HISTORY_HOURS);
+      return [...readRuns(db, POST_MERGE_HISTORY_HOURS), ...stageViews()];
     } finally {
       db.close();
     }
   };
-  void listenLoop({ runs: recentRuns, respond, telegram: realTelegramDeps, status: () => digest(open, nextTasks()) });
+  void listenLoop({
+    runs: recentRuns, respond: respondAny, telegram: realTelegramDeps, status: () => digest(open, nextTasks()),
+    task: (text) => taskCommand(text),
+  });
   let housekept = 0;
   for (;;) {
     if (Date.now() - housekept >= HOUSEKEEPING_MS) {
@@ -226,7 +251,8 @@ if (import.meta.main) {
       const db = new Database(dbPath, { readonly: true });
       try {
         open = await tick({
-          db, policy, respond, postMerge: realPostMergeDeps, queue: realQueueDeps, telegram: realTelegramDeps,
+          db, policy, respond: respondAny, postMerge: realPostMergeDeps, queue: { ...realQueueDeps, stage: stageArgv },
+          telegram: realTelegramDeps, intake: realIntakeDeps,
         });
       } finally {
         db.close();

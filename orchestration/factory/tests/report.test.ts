@@ -16,9 +16,11 @@ const base = {
   deliver_ready: "true", deliver_reason: "delivered", deliver_summary: "",
   rag_status: "ok", rag_sources: JSON.stringify([SOURCE]),
   visual_proceed: "skipped", visual_stop: "", visual_pr_url: "",
+  approval_proceed: "skipped", approval_stop: "",
   followups: "[]",
   claude_auth: "ok", claude_auth_node: "",
   retry_note: "",
+  qa_status: "skipped", qa_reason: "", qa_alert: "",
 };
 
 const notReady = {
@@ -33,6 +35,31 @@ const pendingOperator = {
 };
 
 describe("buildReport", () => {
+  test("a live run whose QA dev evidence escalated is not delivered and names why", () => {
+    const reason = 'e2e "Dev Journey" is red (failure) for abc1234: https://github.com/o/r/actions/runs/9';
+    const r = buildReport({ ...base, qa_status: "escalated", qa_reason: reason, qa_alert: "sent" });
+    expect(r.status).toBe("not-delivered");
+    expect(r.delivered).toBe(false);
+    expect(r.summary).toBe(`Not delivered: deployed and healthy, but QA dev has no proof: ${reason}. The operator was alerted in Telegram.`);
+    expect(r.deploy_status).toBe("ok");
+    const unsent = buildReport({ ...base, qa_status: "escalated", qa_reason: reason, qa_alert: "failed" });
+    expect(unsent.summary).toEndWith("The Telegram alert was not sent (failed); tell the operator.");
+  });
+  test("a live run whose evidence node failed or reported nothing is not delivered", () => {
+    for (const qa_status of ["", "unknown"]) {
+      const r = buildReport({ ...base, qa_status, qa_reason: "", qa_alert: "" });
+      expect(r.status).toBe("not-delivered");
+      expect(r.summary).toBe(
+        `Not delivered: deployed and healthy, but QA dev has no proof: qa-dev-evidence did not report (status ${qa_status || "empty"}). The Telegram alert was not sent (unknown); tell the operator.`,
+      );
+    }
+  });
+  test("no qa_dev profile keeps today's flow: off, skipped and ready leave the report unchanged", () => {
+    const today = buildReport(base);
+    for (const qa_status of ["off", "skipped", "ready"]) expect(buildReport({ ...base, qa_status })).toEqual(today);
+    const red = { ...base, healthy: "false", last_status: "502", rollback: "true", rolled_back: "true", rollback_reason: "health red" };
+    expect(buildReport({ ...red, qa_status: "escalated", qa_reason: "health is red" })).toEqual(buildReport(red));
+  });
   test("green path is delivered", () => {
     const r = buildReport(base);
     expect(r.delivered).toBe(true);
@@ -176,6 +203,23 @@ describe("buildReport", () => {
     for (const input of [base, refused, pendingOperator, { ...notReady, delivery_reason: "failed" }]) {
       const skipped = buildReport({ ...input, visual_proceed: "skipped" });
       expect(buildReport({ ...input, visual_proceed: "true" })).toEqual(skipped);
+    }
+  });
+  test("a run stopped at the PR approval names it and the open pull request", () => {
+    const r = buildReport({
+      ...notReady, delivery_ready: "true", pr_url: "https://github.com/o/r/pull/7", merge_action: "merge",
+      approval_proceed: "false", approval_stop: "operator chose reject after the last approval round (4): rename it",
+    });
+    expect(r.status).toBe("not-delivered");
+    expect(r.summary).toBe(
+      "Not delivered: stopped at the PR approval (operator chose reject after the last approval round (4): rename it). " +
+        "PR https://github.com/o/r/pull/7 is open and was not merged.",
+    );
+  });
+  test("a merge with no approval pause, or an approved one, keeps every other summary", () => {
+    const refused = { ...base, merged: "skipped", merge_sha: "", deployed: "skipped", healthy: "skipped", monitor_status: "skipped", merge_refused: "checks red" };
+    for (const input of [base, refused, pendingOperator, { ...notReady, delivery_reason: "failed" }]) {
+      expect(buildReport({ ...input, approval_proceed: "true" })).toEqual(buildReport(input));
     }
   });
   const RETRY_NOTE = "the first delivery ended failed (a node inside the bundled delivery broke; the run's record " +

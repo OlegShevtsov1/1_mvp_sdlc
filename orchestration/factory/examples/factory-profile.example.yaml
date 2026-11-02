@@ -27,6 +27,7 @@ repo:
   manual_merge_bases: []               # the factory never merges a PR into a listed base; it comments
                                        # for the operator instead. Absent means ["main"], so a profile
                                        # whose base_branch is main needs [] to auto-merge.
+  merge_approval: auto                 # auto | operator: operator pauses at pr-approve after a green gate.
 deploy:
   command: "ssh deploy@vps 'cd /srv/app && git pull && docker compose up -d --build'"
   health_url: "https://app.example.com/health"
@@ -36,6 +37,11 @@ monitoring:
   provider: sentry                     # sentry | datadog | grafana | none
   mcp_config: .archon/mcp/monitoring.json   # informational; the workflow uses this fixed path
   window_minutes: 10                   # how long after deploy to look for new errors
+qa_dev:                                # optional; absent = no QA dev pause after the deploy
+  e2e_workflow: "Dev Journey"          # waited for on the commit on dev; "" = none. Its run-name carries sha-<commit>
+  pages:                               # at most 10; a page is shot at 1440x900 and 360x800 when a changed file matches
+    - glob: "src/pages/dashboard/**"
+      url: "https://app.dev.example.com/dashboard"
 trello:                                # optional; these are the defaults; credentials never go here
   lists:
     ready: "Ready"

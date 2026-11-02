@@ -4,9 +4,10 @@ All notable changes to this repository are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version is the `mvp-sdlc` plugin version, tagged
-`vX.Y.Z` on `main` after the release pull request `develop` → `main`. A release moves the entries under
-`[Unreleased]` into a new `## [X.Y.Z] - YYYY-MM-DD` section and keeps the six empty categories as the template; the
-release pull request `PILOT-<n>: Release vX.Y.Z` carries that section under `## Changelog` (decision 64, checked by
+`vX.Y.Z` on `main` after the release pull request `develop` → `main`. A task never edits this file: it adds a
+fragment `changelog.d/PILOT-<n>.md` ([changelog.d/README.md](changelog.d/README.md)), and `[Unreleased]` stays the six
+empty categories. Release-prep runs `scripts/changelog.sh release X.Y.Z`, which assembles the fragments into a new
+`## [X.Y.Z] - YYYY-MM-DD` section; the release pull request `PILOT-<n>: Release vX.Y.Z` carries that section under `## Changelog` (decision 64, checked by
 `scripts/ci/pr-conventions.sh`).
 
 ## [Unreleased]
@@ -20,6 +21,93 @@ release pull request `PILOT-<n>: Release vX.Y.Z` carries that section under `## 
 ### Removed
 
 ### Fixed
+
+### Security
+
+## [0.10.0] - 2026-11-02
+
+### Added
+
+- `scripts/release.sh plugin vX.Y.Z` (PILOT-570): refreshes the marketplace `mvp`, updates `mvp-sdlc@mvp` at project
+  scope for the be and fe checkouts (`RELEASE_PLUGIN_PROJECTS`) without touching their working trees, and proves the
+  plugin cache and each project's entry in `claude plugin list --json`. The supervisor's `post-merge-allowlist`
+  approves it, so a release's plugin step is no longer the operator's.
+- The factory can pause for the operator's approval before it merges (PILOT-572, E3): a new profile key
+  `repo.merge_approval: auto | operator`. With `operator`, after a green merge gate the run pauses at the wait
+  `pr-approve`, whose message carries the lines `PR:`, `Head:`, `Diff:`, `Checks:`, `Review:` and `Summary:` for the
+  supervisor's card. `approve` merges exactly the paused head (`gh pr merge --match-head-commit`); a head that moved
+  since the pause is gated again and asked about, and in the last round stops the run unmerged. `reject <text>` runs one
+  more delivery round on the same pull request with the text as its finding, then asks again (at most 4 rounds). The
+  label `operator-approved`, added while a head is paused, approves it too. A bookkeeping pull request (a tracker or an
+  execution log) merges without the pause. Absent means `auto`, today's behaviour; no profile changes in this release,
+  and the project templates ship `auto`.
+- The supervisor sends the factory's `pr-approve` pause as a Telegram card «PR готовий» (PILOT-573, E3): the PR title,
+  a link to the pull request, `Diff`, `Checks`, the summary, and the buttons `✅ Апрув` and `↩️ Повернути`. A new
+  policy rule `pr-approve` (`action: escalate-as-card`) always escalates the pause. «Повернути» asks «Що змінити?» with
+  a ForceReply and answers `reject` with the operator's reply as the text; a reply without text answers nothing and
+  asks again. Every respond now passes its text after `--`, so a reason that starts with `-` reaches Archon. It acts
+  only once a profile sets `merge_approval: operator`.
+- The factory collects QA dev evidence after the deploy and pauses for the operator's verdict on dev (PILOT-574, E3):
+  a new optional profile key `qa_dev: { e2e_workflow, pages: [{glob, url}] }`. With it, after deploy and health the
+  node `qa-dev-evidence` waits up to 20 minutes for the e2e workflow's run on the commit that is on dev now (the newest
+  run of the merge commit or of a commit that contains it, matched by `sha-<commit>` in the run's title, else its
+  `headSha`), shoots each dev page whose glob matches a changed file at 1440×900 and 360×800 with the checkout's
+  Playwright, and writes `qa-dev.json` (`{sha, url, e2e: {conclusion, run_url}, shots: [{page, width, path}]}`). After
+  the report and the card's move to Test the run pauses at the wait `qa-dev` (`ok` | `reject`), whose message carries
+  the lines `URL:`, `SHA:`, `PR:`, `E2E:`, `Shots:` and `Evidence:` for the supervisor's card. A red deploy, health,
+  rollback or e2e, or any state it cannot read, gives no pause: one Telegram alert to `MVP_VPN_ALERTS` with the run's
+  link, and the report ends `Not delivered: deployed and healthy, but QA dev has no proof: …`. Absent means today's
+  flow. No profile sets `qa_dev` in this release.
+- The supervisor sends the factory's `qa-dev` pause as a Telegram card «На dev готово» (PILOT-575, E3): first the
+  screenshots as one album (`sendMediaGroup`, at most 6, read only from the run's own `qa-dev.json` when its commit is
+  the paused one; past 6 the card says how many were left out), then the card with the title, links to dev, the e2e
+  run and the PR, and the buttons `✅ Прийнято` and `↩️ Є зауваження`. A new policy rule `qa-dev`
+  (`action: escalate-as-card`) always escalates the pause. «Прийнято» answers `ok` and moves the task's Trello card to
+  `Ready to Release` (credentials from `~/.config/trello/.env`); «Є зауваження» asks for the text with a ForceReply,
+  answers `reject` with it and queues the fix brief `queue/<repo>/fix-PILOT-<n>-<run8>.md` (`Fix for PILOT-<n>:
+  <text>`, the card link, the PR and the original task's paths). A failed move or brief is escalated as its own
+  message. It acts only once a profile sets `qa_dev`.
+- The supervisor takes `/task <be|fe|sdlc> <text>` in Telegram (PILOT-576, E3): it creates the Trello card
+  `t<n>: <first line>` in Backlog (of `TRELLO_BOARD_ID_<PROJECT_NAME>` of the be checkout, as `feature-start` reads
+  it, else `TRELLO_BOARD_ID`), and for `be` and `fe` runs the SDLC stages one by one as headless
+  `claude -p` sessions (`/mvp-sdlc:feature-start` → `/sdlc:write-prd` → `/sdlc:architecture-design` → `/sdlc:api-forge`
+  → `/sdlc:break-tasks` → `/mvp-sdlc:task-cards`; `fe` then `/mvp-sdlc:sync-spec` in fe) in a fresh worktree of the
+  be checkout, through the queue's run slots. The session takes the task text as its answers, picks the recommended
+  option at each checkpoint and records its assumptions in the stage document. Each stage's docs PR comes as the «PR
+  готовий» card once its checks pass; `✅ Апрув` merges the head the card showed (a moved head is refused and asked
+  again), and queues the next stage, `↩️ Повернути` reruns the stage on its PR branch with the reason, and the label
+  `operator-approved` or a merge on GitHub advance it too. After the last stage one factory brief per open task of
+  `tasks.json` is queued with `task-brief`; tasks with unfinished dependencies wait. `/task sdlc` only creates the card,
+  and a malformed `/task` gets a format hint. Chains live in `stages.json`; new ledger rules `stage-failed`,
+  `stage-no-pr`, `stage-ci-red`, `stage-pr-closed`, `stage-merge-failed`, `stage-task-brief` and `queue-stage-hung`.
+  Nothing changes until the next sdlc release installs the supervisor.
+- Changelog fragments (PILOT-579): a task pull request adds `changelog.d/PILOT-<n>.md` (front matter `category:`,
+  body the entry; `changelog.d/README.md`) instead of editing `CHANGELOG.md`, so sdlc tasks in flight no longer
+  conflict in `[Unreleased]`. A new check `check.sh changelog` (`scripts/changelog.sh check`, its own CI step) fails a
+  malformed fragment and any entry under `[Unreleased]`, which now always stays the six empty categories.
+  Release-prep runs `scripts/changelog.sh release X.Y.Z` to assemble the fragments into `## [X.Y.Z] - YYYY-MM-DD` in
+  category order, by card number, and delete them. The pending `[Unreleased]` entries moved to fragments.
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- `publish-mirror.sh` no longer merges the mirror PR while its checks are still queued: a check run that is not
+  completed keeps the PR waiting whatever its start time, the newest-run rule only picks among completed runs of a
+  name, and a GitHub Actions check suite that has no check runs yet keeps it waiting too. Before, the v0.9.4 mirror PR
+  was merged three seconds after it opened, on a lone skipped run (PILOT-560).
+- The supervisor's Telegram escalations close reliably and say what to do (PILOT-569). The tick reads the runs again
+  right before sending, so a pause answered outside Telegram during the tick is no longer sent with live buttons (the
+  e9af1deb A9 message was sent 8 s after its CLI answer). A close whose edit failed with no answer, 429 or a server
+  error is retried on the next tick instead of being forgotten, and every close is logged. The post-merge step line uses
+  the step's full heading from `steps.json`, shortened at a word boundary to at most 90 characters with `…`, instead of
+  the heading cut mid-word (`… prove the plugin cache holds 0`). A checkout step's recommendation says what to run:
+  `claude plugin update mvp-sdlc@mvp --scope project` in be and fe for a plugin update, else the step's commands,
+  shown in the details.
 
 ### Security
 

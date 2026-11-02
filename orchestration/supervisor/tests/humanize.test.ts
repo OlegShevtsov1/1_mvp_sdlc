@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { buttonLabel, type Escalation, MAX_TEXT, MAX_VISIBLE, renderEscalation, resolvedLine } from "../src/humanize.ts";
+import {
+  buttonLabel, type Escalation, escapeHtml, MAX_TEXT, MAX_VISIBLE, renderEscalation, resolvedLine,
+} from "../src/humanize.ts";
+import {
+  approvalMessage, type Facts, ROUND_CAP,
+} from "../../factory/.archon/workflows/sdlc-factory/factory/scripts/_lib/approval.ts";
 
 const LEGEND = [
   "",
@@ -26,8 +31,19 @@ const base: Escalation = {
   rule: "post-merge-gate", text: A2,
   reason: "Крок post-merge «2 — A2 — 🔒 Annotated tag v0.9.3 on the merge commit M (shape as v0.9.2; no GitHub Release)» " +
     "(тип mismatch) схвалює лише оператор — потрібне рішення оператора.",
-  prTitle: "PILOT-542: Release 0.9.3 changelog", lastStep: "9",
+  prTitle: "PILOT-542: Release 0.9.3 changelog", lastStep: "9", stepText: "",
 };
+
+const PR_FIXTURE = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "pr-approve-7b3c1d2e.json"), "utf8")) as {
+  run: { id: string; user_message: string; metadata: string };
+};
+const PR_TEXT: string = JSON.parse(PR_FIXTURE.run.metadata).wait.message;
+
+const card = (text = PR_TEXT): Escalation => ({
+  workflow: "factory", runId: PR_FIXTURE.run.id, repo: "OlegShevtsov1/1_mvp_pilot_fe", runMessage: PR_FIXTURE.run.user_message,
+  kind: "pr-approve", rule: "pr-approve", text, reason: "PR чекає апруву оператора — потрібне рішення оператора.",
+  prTitle: "", lastStep: "", stepText: "",
+});
 
 const render = (e: Partial<Escalation>, needsRevision = false) => renderEscalation({ ...base, ...e }, { needsRevision });
 const visible = (html: string) => html.slice(0, html.indexOf("\n<blockquote expandable>"));
@@ -59,12 +75,38 @@ describe("humanize", () => {
     expect(lines.slice(1)).toEqual([
       "Крок 7 з 9: Operator, by hand: update mvp-sdlc",
       "<b>Що сталося:</b> крок зачіпає твої локальні репозиторії, тому його робиш ти.",
-      "<b>Що рекомендую:</b> зроби кроки вручну і натисни «Готово».",
+      "<b>Що рекомендую:</b> виконай команди кроку у своєму терміналі (деталі нижче) і натисни «Готово».",
     ]);
     expect(buttonLabel("approve", e)).toBe("✅ Готово");
     expect(buttonLabel("approve", base)).toBe("✅ Прийняти");
     expect(["skip", "abort", "retry"].map((a) => buttonLabel(a as "skip", base)))
       .toEqual(["⏭ Пропустити крок", "⛔ Зупинити", "🔁 Чекати ще"]);
+  });
+
+  test("the e9af1deb A9 checkout step reads cut at a word boundary, with the plugin instruction", () => {
+    const update = (repo: string) =>
+      `(cd /home/operator/projects/mvp/${repo} && claude plugin update mvp-sdlc@mvp --scope project)`;
+    const a9 = {
+      ...base, lastStep: "10",
+      text: gate("checkout", "9 — A9 — Operator, by hand: update mvp-sdlc in the pilot repositories and prove the " +
+        "plugin cache holds 0", "Крок A9 звертається до checkout оператора."),
+      stepText: [
+        "**A9 — Operator, by hand: update mvp-sdlc in the pilot repositories and prove the plugin cache holds 0.9.5**",
+        "", "```bash", update("1_mvp_pilot_be"), update("1_mvp_pilot_fe"), "```", "",
+        "Expected:", "- both commands exit 0", "- the plugin cache holds 0.9.5",
+      ].join("\n"),
+    };
+    const html = renderEscalation(a9, { needsRevision: false });
+    expect(visible(html).split("\n").slice(1)).toEqual([
+      "Крок 9 з 10: Operator, by hand: update mvp-sdlc in the pilot repositories and prove the…",
+      "<b>Що сталося:</b> крок зачіпає твої локальні репозиторії, тому його робиш ти.",
+      "<b>Що рекомендую:</b> онови плагін mvp-sdlc у be і fe (claude plugin update mvp-sdlc@mvp --scope project) і " +
+      "натисни «Готово».",
+    ]);
+    expect(collapsed(html)).toContain(escapeHtml(update("1_mvp_pilot_be")));
+
+    const step = visible(renderEscalation({ ...a9, stepText: "" }, { needsRevision: false })).split("\n")[1];
+    expect(step).toBe("Крок 9 з 10: Operator, by hand: update mvp-sdlc in the pilot repositories and prove the…");
   });
 
   test("what happened follows the pause type and the observed value", () => {
@@ -136,6 +178,78 @@ describe("humanize", () => {
     expect(`${html}\n\n${resolvedLine("approve", false)}`.length).toBeLessThanOrEqual(4096);
   });
 
+  test("pr-approve renders a card with the PR link, diff, checks and summary", () => {
+    const html = renderEscalation(card(), { needsRevision: false });
+    expect(visible(html).split("\n")).toEqual([
+      "🟡 <b>PR готовий: PILOT-900: fe: dark theme toggle on the settings page</b>",
+      '<a href="https://github.com/OlegShevtsov1/1_mvp_pilot_fe/pull/42">PR #42</a> · Diff: 7 файлів, +120 −8 · Checks: 9 ✅',
+      "<b>Що сталося:</b> CI зелений, ревʼю готове — PR чекає твого апруву (раунд 1 з 4).",
+      "<b>Підсумок:</b> The settings page gets a dark theme toggle. The choice is kept in local storage and applied " +
+      "before the first paint.",
+      "<b>Що рекомендую:</b> переглянь PR: «Апрув» зливає саме цей коміт, «Повернути» — напиши, що змінити.",
+    ]);
+    expect(collapsed(html)).toBe("<blockquote expandable>Прогін: factory 7b3c1d2e · OlegShevtsov1/1_mvp_pilot_fe\n\n" +
+      "PR APPROVAL — round 1 of 4.\nReview: ready</blockquote>");
+    for (const hidden of ["approve →", "reject  →", "operator-approved", "Head:"]) expect(html).not.toContain(hidden);
+    expect(buttonLabel("approve", card())).toBe("✅ Апрув");
+    expect(buttonLabel("reject", card())).toBe("↩️ Повернути");
+    expect(buttonLabel("approve", { ...card(), kind: "plan-gate" })).toBe("✅ Прийняти");
+  });
+
+  test("a PR card says when the review is not ready and when the round is the last", () => {
+    const lines = (text: string) => visible(renderEscalation(card(text), { needsRevision: false })).split("\n");
+    const notReady = lines(PR_TEXT.replace("Review: ready", "Review: not ready — CI check e2e is failure on the head"));
+    expect(notReady[2]).toBe("<b>Що сталося:</b> ревʼю не готове: CI check e2e is failure on the head.");
+    expect(notReady[4]).toBe("<b>Що рекомендую:</b> натисни «Повернути» і напиши, що змінити: апрув зупинить прогін без злиття.");
+    const last = lines(PR_TEXT.replace("round 1 of 4", "round 4 of 4"));
+    expect(last[2]).toEndWith("(раунд 4 з 4).");
+    expect(last[4]).toEndWith(" Це останній раунд: «Повернути» зупинить прогін, PR лишиться відкритим.");
+    expect(lines(PR_TEXT.replace("Diff: 7 files", "Diff: 1 file").replace("9 pass", "3 pass"))[1])
+      .toEndWith("Diff: 1 файл, +120 −8 · Checks: 3 ✅");
+    expect(lines(PR_TEXT.replace("Diff: 7 files", "Diff: 22 files"))[1]).toContain("Diff: 22 файли,");
+    expect(lines(PR_TEXT.replace("Diff: 7 files", "Diff: 12 files"))[1]).toContain("Diff: 12 файлів,");
+  });
+
+  test("a PR card after a failed respond says so; a pause text without a PR link reads as any escalation", () => {
+    const failed = renderEscalation({
+      ...card(), rule: "operator", reason: "Не вдалося виконати відповідь оператора reject: spawn failed — потрібне рішення оператора.",
+    }, { needsRevision: false });
+    expect(visible(failed).split("\n")[2]).toBe("<b>Що сталося:</b> Не вдалося виконати відповідь оператора reject: spawn failed");
+    for (const pr of ["PR: https://evil.example/OlegShevtsov1/1_mvp_pilot_fe/pull/42", "PR: "]) {
+      const html = renderEscalation(card(PR_TEXT.replace(/^PR: .*$/m, pr)), { needsRevision: false });
+      expect(html).toStartWith("🟡 <b>Потрібне твоє рішення: PILOT-900:");
+      expect(html).not.toContain("<a href");
+    }
+  });
+
+  test("the card reads the pause text the factory writes", () => {
+    const facts: Facts = {
+      ready: true, reason: "", pr_url: "https://github.com/OlegShevtsov1/1_mvp_pilot_fe/pull/42", pr_number: 42,
+      head_sha: "3f9c2b7a1d4e5f60718293a4b5c6d7e8f9012345", files: 7, additions: 120, deletions: 8, checks_pass: 9,
+      summary: "The settings page gets a dark theme toggle.", regated: false,
+    };
+    const lines = (f: Facts, round: number) =>
+      visible(renderEscalation(card(approvalMessage(f, round)), { needsRevision: false })).split("\n");
+    const first = lines(facts, 1);
+    expect(first[1]).toBe(
+      '<a href="https://github.com/OlegShevtsov1/1_mvp_pilot_fe/pull/42">PR #42</a> · Diff: 7 файлів, +120 −8 · Checks: 9 ✅',
+    );
+    expect(first[2]).toBe(`<b>Що сталося:</b> CI зелений, ревʼю готове — PR чекає твого апруву (раунд 1 з ${ROUND_CAP}).`);
+    expect(first[3]).toBe("<b>Підсумок:</b> The settings page gets a dark theme toggle.");
+    const last = lines({ ...facts, ready: false, reason: "CI check e2e is failure on the head" }, ROUND_CAP);
+    expect(last[2]).toBe("<b>Що сталося:</b> ревʼю не готове: CI check e2e is failure on the head.");
+    expect(last[4]).toEndWith(" Це останній раунд: «Повернути» зупинить прогін, PR лишиться відкритим.");
+  });
+
+  test("a PR card with long values fits Telegram's limit", () => {
+    const text = PR_TEXT.replace(/^Summary: .*$/m, `Summary: ${"<&> ".repeat(500)}`)
+      .replace("Review: ready", `Review: not ready — ${"x".repeat(2000)}`).replace("9 pass", "9 pass".repeat(50));
+    const html = renderEscalation({ ...card(text), runMessage: `PR title «PILOT-1: ${"&".repeat(500)}»` }, { needsRevision: false });
+    expect(visible(html).length).toBeLessThanOrEqual(MAX_VISIBLE);
+    expect(html.length).toBeLessThanOrEqual(MAX_TEXT);
+    expect(html).not.toMatch(/&[a-z]*…/);
+  });
+
   test("the resolution line says what was decided and where", () => {
     expect(["approved", "skip", "abort", "retry"].map((d) => resolvedLine(d, false))).toEqual([
       "✅ Вирішено: прийнято (поза Telegram)", "✅ Вирішено: пропущено (поза Telegram)",
@@ -144,5 +258,6 @@ describe("humanize", () => {
     expect(resolvedLine(undefined, false, "cancelled")).toBe("✅ Вирішено: зупинено (поза Telegram)");
     expect(resolvedLine(undefined, false, "running")).toBe("✅ Вирішено: продовжено (поза Telegram)");
     expect(resolvedLine("approve", true)).toBe("✅ Вирішено: прийнято (кнопкою)");
+    expect(resolvedLine("reject", true)).toBe("✅ Вирішено: повернуто на доопрацювання (кнопкою)");
   });
 });

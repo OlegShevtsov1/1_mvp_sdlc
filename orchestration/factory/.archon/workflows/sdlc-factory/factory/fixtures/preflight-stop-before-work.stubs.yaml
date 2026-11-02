@@ -23,6 +23,7 @@ load-profile:
   window_minutes: 10
   secret_names: []
   manual_merge_bases: ["main"]
+  merge_approval: auto
   preflight: { tools: ["factory-preflight-missing-tool"], services: [], min_disk_free_pct: 0 }
 exec-code: true
 fixture:

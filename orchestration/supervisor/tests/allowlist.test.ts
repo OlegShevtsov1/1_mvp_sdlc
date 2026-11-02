@@ -37,6 +37,12 @@ describe("matchReleaseStep", () => {
     }
   });
 
+  test("a release.sh plugin step matches", () => {
+    const m = matchReleaseStep(step("git fetch origin --tags", "bash scripts/release.sh plugin v0.9.3"), OPTS);
+    if (!m.ok) throw new Error(m.reason);
+    expect(m.matched).toContainEqual({ command: "bash scripts/release.sh plugin v0.9.3", entry: "release.sh plugin" });
+  });
+
   test("the free-form v0.9.3 steps do not match", () => {
     for (const s of FREE_FORM.steps) expect(matchReleaseStep(s.text, OPTS).ok).toBe(false);
   });

@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stageArgv } from "../src/intake.ts";
 import type { LedgerEntry } from "../src/ledger.ts";
 import { loadPolicy, tick } from "../src/main.ts";
 import type { PostMergeDeps } from "../src/postmerge.ts";
@@ -327,5 +328,73 @@ describe("queue", () => {
 
     expect(launched(f)).toEqual(["PILOT-618", "PILOT-619"]);
     expect(lines().filter((l) => l.rule === "queue-launch-unseen").map((l) => l.run_id)).toEqual(["queue:1_mvp_sdlc/a.md"]);
+  });
+});
+
+describe("stage briefs", () => {
+  const BE = "1_mvp_pilot_be";
+  const stageBrief = "sdlc-stage.PILOT-901.prd.1.md";
+  beforeEach(() => {
+    mkdirSync(join(archonHome, "workspaces", "OlegShevtsov1", BE, "source"), { recursive: true });
+    writeFileSync(join(dir(), "stages.json"), JSON.stringify({
+      chains: { "PILOT-901": { card: "PILOT-901", stage: "prd", attempt: 1, state: "queued" } },
+    }));
+  });
+  const dir = () => join(ledger, "..");
+  const withStages = (f: Fake): QueueDeps => ({ ...f, stage: stageArgv });
+  const startedFiles = () => readdirSync(join(queue, "started", BE)).filter((n) => n.endsWith(".md"));
+
+  test("a registered stage brief launches stage-run, not a factory run", async () => {
+    const db = fixtureDb();
+    brief(BE, stageBrief, "PILOT-901: SDLC stage prd of t901 (attempt 1)\nPaths: docs/features/t901/");
+    const f = fake();
+    await run(db, withStages(f));
+
+    const [started] = startedFiles();
+    expect(started).toMatch(new RegExp(`^stage-${UUID}--sdlc-stage\\.PILOT-901\\.prd\\.1\\.md$`));
+    expect(f.launches).toHaveLength(1);
+    expect(f.launches[0].argv).toEqual(["bun", expect.stringMatching(/src\/stage-run\.ts$/), join(queue, "started", BE, started)]);
+    expect(f.launches[0].cwd).toBe(join(archonHome, "workspaces", "OlegShevtsov1", BE, "source"));
+    expect(lines()).toMatchObject([{ run_id: `queue:${BE}/${stageBrief}`, rule: "queue-launch", action: "launch-task" }]);
+  });
+
+  test("an unregistered sdlc-stage brief still launches the factory", async () => {
+    const db = fixtureDb();
+    brief(BE, "sdlc-stage.PILOT-901.prd.2.md", "PILOT-901: hand-written docs/a.md");
+    const f = fake();
+    await run(db, withStages(f));
+
+    expect(f.launches.map((l) => l.argv.slice(0, 4))).toEqual([["archon", "workflow", "run", "factory"]]);
+    expect(startedFiles()[0]).toMatch(/^launch-/);
+  });
+
+  test("a running stage holds a slot and is not escalated as unseen after 15 min", async () => {
+    const db = fixtureDb();
+    for (let i = 0; i < 2; i++) factoryRun(db, BE, `PILOT-1${i}: edit docs/x${i}.md`);
+    brief(BE, stageBrief, "PILOT-901: SDLC stage prd\nPaths: docs/features/t901/", 30);
+    brief(BE, "PILOT-902.md", "PILOT-902: edit docs/y.md", 20);
+    const f = fake();
+    await run(db, withStages(f));
+    expect(f.launches).toHaveLength(1);
+
+    const [started] = startedFiles();
+    const path = join(queue, "started", BE, started);
+    const t = new Date(Date.now() - 3 * 60 * MINUTE);
+    utimesSync(path, t, t);
+    const open = await run(db, withStages(f));
+    expect(f.launches).toHaveLength(1);
+    expect(open.filter((r) => r.workflow === "sdlc-stage").map((r) => r.status)).toEqual(["pending"]);
+    expect(lines().filter((l) => l.action === "escalate")).toEqual([]);
+
+    writeFileSync(`${path}.result.json`, "{\"exit\":0}\n");
+    await run(db, withStages(f));
+    expect(f.launches).toHaveLength(2);
+
+    rmSync(`${path}.result.json`);
+    const hung = new Date(Date.now() - 5 * 60 * MINUTE);
+    utimesSync(path, hung, hung);
+    await run(db, withStages(f));
+    await run(db, withStages(f));
+    expect(lines().filter((l) => l.rule === "queue-stage-hung").map((l) => l.run_id)).toEqual([`queue:${BE}/${stageBrief}`]);
   });
 });

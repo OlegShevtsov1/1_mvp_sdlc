@@ -19,6 +19,8 @@ open runs and the runs that finished in the last 24 h. Each paused run's open pa
 | `factory` / `plan-gate` | `plan-gate` |
 | `post-merge` / `install-gate` | `install-gate` |
 | `post-merge` / `gate` | `post-merge-gate` |
+| `factory` / `pr-approve` | `pr-approve` |
+| `factory` / `qa-dev` | `qa-dev` |
 | anything else | `other` |
 
 A pause is judged once: when the ledger already has a line for its `(run_id, event_id)`, it is skipped. Pauses that
@@ -36,16 +38,18 @@ decided; `action` of a gate decision is `approve` (`plan-gate`, `post-merge-allo
 `approve` and `retry` it records that the respond was dispatched, not its outcome. `evidence.text` is the pause or error text Archon shows, and
 `evidence.message` the decision's own text for the operator, the reason of an escalation. An answer the operator gave
 through a Telegram button is a line with `rule: operator` and the pause's decision as `action`: `approve`, `retry`,
-`skip` or `abort`.
+`skip`, `abort`, `reject` (its `evidence.text` is the operator's reason) or `ok` (QA dev accepted). A QA dev answer
+whose Trello move or fix task failed adds an escalation under the same pause, rule `qa-dev-trello` or `qa-dev-fix`.
 
 ## Answering a pause
 
-An `approve` or `retry` runs `archon workflow respond <run-id> <approve|retry> <text> --occurrence <pause-id>`
+An `approve` or `retry` runs `archon workflow respond <run-id> <approve|retry> --occurrence <pause-id> -- <text>`
 detached (own session, stdin `/dev/null`, no `timeout`) in the run's own working directory, logging to
 `~/.local/state/sdlc-autopilot/logs/<run-id>.log`. `--occurrence` pins the answer to the pause the policy judged: if
 the operator answered it first, Archon refuses. A pause whose run metadata names no occurrence is not answered, and
 neither is one whose respond cannot be started: the decision is recorded as an escalation instead. A respond that starts but then fails is not detected: its pause stays open with its ledger line
-written, and its log holds the error.
+written, and its log holds the error. The text goes after `--`, because Archon refuses a positional argument that starts
+with `-` as an unknown option, and an operator's reason may well start with one.
 
 ## Telegram
 
@@ -64,37 +68,86 @@ built by fixed rules in `src/humanize.ts`:
 - one header, `🟡 Потрібне твоє рішення: …`, naming the release (`реліз sdlc v0.9.3`, from the PR title post-merge's
   `fetch` read), the card (`PILOT-<n>: …`) or else the workflow and repository;
 - the step in words: `Крок <n> з <last>: <title>` on a post-merge gate (the plan's own step numbers, the last one from
-  the run's `steps.json`), `План задачі готовий до перевірки` on a plan gate, `Встановлення чекає, поки завершиться
+  the run's `steps.json`; the title is the step's full heading from `steps.json`, shortened at a word boundary with `…`
+  so that the line is at most 90 characters), `План задачі готовий до перевірки` on a plan gate, `Встановлення чекає, поки завершиться
   прогін фабрики` on an install gate;
 - `Що сталося:` — one sentence by pause type, with the value a failed check observed when it can be read (`GitHub
   відповів "не знайдено"` for HTTP 404, `команда завершилась з кодом N`);
-- `Що рекомендую:` only where a rule gives one (a checkout step, an install gate out of retries);
+- `Що рекомендую:` only where a rule gives one: on a checkout step, `онови плагін mvp-sdlc у be і fe (claude plugin
+  update mvp-sdlc@mvp --scope project) …` when the step runs `claude plugin update`, else `виконай команди кроку у
+  своєму терміналі (деталі нижче) …`, with the step's text from `steps.json` added to the collapsed block; on an
+  install gate out of retries, to wait;
 - the original pause text in a collapsed block, without the pack's own header, the `$ARTIFACTS_DIR` lines and the
   decision legend; the block is cut with `…` so the message stays under Telegram's 4096 characters.
 
-When the line is about the run's open pause, the message carries one button per decision the pause itself declares:
-`✅ Прийняти` (`✅ Готово` on a checkout step), `⏭ Пропустити крок`, `⛔ Зупинити`, `🔁 Чекати ще`. The plan gate's
-`needs-revision` needs a feedback text and stays an `archon workflow respond` by hand.
+The factory's PR approval wait (`pr-approve`, `merge_approval: operator`) is a card instead: the header `🟡 PR готовий:
+<PR title>`, a line with the link `PR #<n>`, `Diff: <n> файлів, +a −d` and `Checks: <n> ✅`, `Що сталося:` (CI green and
+the review ready, with the round, or the review's reason it is not ready), `Підсумок:` (the factory's summary) and
+`Що рекомендую:` (whether to approve or to return, and that the last round's return stops the run). The collapsed
+block holds the run, the round line and the `Review:` line. A pause text without a `PR:` line of the shape
+`https://github.com/<owner>/<repo>/pull/<n>` is sent as an ordinary escalation, still with the pause's buttons.
 
-A button press runs `archon workflow respond <run-id> <decision> <text> --occurrence <pause-id>` the way a policy
+The factory's QA dev wait (`qa-dev`, a profile's `qa_dev`, after a green deploy) is a card «На dev готово» too. First
+the screenshots go out as one album (`sendMediaGroup`, captioned `<page> · <width>px`): at most the first 6, read only
+from the run's own `~/.archon/workspaces/<repo>/artifacts/runs/<run-id>/qa-dev.json`, only when its `sha` is the open
+pause's `SHA:`, and only PNG files under that run's `qa-dev/`. Then the card, as a reply to the album: the header
+`🟡 На dev готово: <title>`, a line with the links `dev`, `e2e: ✅ прогін` (or `не налаштовано`) and `PR #<n>`,
+`Що сталося:` (deployed to dev, the short commit, the e2e state), a screenshots line (how many were sent and, past 6,
+how many were left out; that there are none; or that they could not be read or sent) and `Що рекомендую:`. The
+collapsed block holds the run and the `URL:`, `SHA:`, `PR:`, `E2E:` and `Shots:` lines. A refused album is logged and
+the card still goes out. The album goes only with the policy's first escalation of the pause; a re-escalation after a
+failed respond repeats the card alone, and so does the retry of a card whose own send failed (it still replies to
+the album already sent). A pause text without a `URL:` line is sent as an ordinary escalation.
+`✅ Прийнято` answers `ok` and moves the task's Trello card to `Ready to Release`: the card is the first card link in the
+run's message, else its first `PILOT-<n>` (the board's card number), on the board `TRELLO_BOARD_ID`, with
+`TRELLO_API_KEY` and `TRELLO_TOKEN` from `~/.config/trello/.env` (override: `SDLC_AUTOPILOT_TRELLO_ENV`; API base
+override: `SDLC_AUTOPILOT_TRELLO_API`), sent in an `Authorization` header only. `↩️ Є зауваження` asks for the text the
+way `↩️ Повернути` does, answers `reject` with it, and writes the fix brief
+`queue/<repo>/fix-PILOT-<n>-<run8>.md`: `Fix for PILOT-<n>: <text>`, then the repository, the card link, the original
+PR, the commit and URL on dev, and the original task's paths, so the queue holds it behind any open run that shares
+them. The card's close note gains a line on the move or the queued file. A move or a brief that fails is escalated as
+its own message, rule `qa-dev-trello` or `qa-dev-fix`, without buttons: the pause is already answered.
+
+When the line is about the run's open pause, the message carries one button per decision the pause itself declares:
+`✅ Прийняти` (`✅ Готово` on a checkout step, `✅ Апрув` on a PR card), `⏭ Пропустити крок`, `⛔ Зупинити`,
+`🔁 Чекати ще`, `✅ Прийнято` (`ok`), and `↩️ Повернути` on a PR card (`↩️ Є зауваження` on a QA card) only (another
+gate's `reject` may cancel its run, so it gets no button). A line about a pause the operator already answered by
+button gets no buttons.
+The plan gate's `needs-revision` needs a feedback text and stays an `archon workflow respond` by hand.
+
+`↩️ Повернути` responds nothing by itself: its toast is `↩️ Напиши відповіддю, що змінити`, and the bot sends
+`↩️ Що змінити? …` as a ForceReply to the card. Only a reply to that prompt counts as the reason, whatever it says;
+the respond is then `reject` with the reply's text, the bot answers the reply with `↩️ Повертаю на доопрацювання`, and
+the card closes with `✅ Вирішено: повернуто на доопрацювання (кнопкою)`. A reply without text (blank, a sticker)
+answers nothing and is asked again with a new prompt; any other message in the chat is not a reason. A reply after
+the pause was answered gets `Це питання вже вирішене`.
+
+A button press runs `archon workflow respond <run-id> <decision> --occurrence <pause-id> -- <text>` the way a policy
 answer does and writes the `rule: operator` ledger line. It is answered only on the pause the message was sent for,
 while that pause is still open, once, and only with a decision of that pause; a respond that cannot start is escalated
 again with the buttons. Once the pause is answered — by a button, outside Telegram (`approval_received` or
 `wait_answered` in Archon's events), or because the run moved on — the message is edited once: it keeps its text, gets
-`✅ Вирішено: прийнято|пропущено|зупинено|продовжено (кнопкою|поза Telegram)` and loses its buttons. `/status` in the chat answers with a digest: the
+`✅ Вирішено: прийнято|пропущено|зупинено|продовжено (кнопкою|поза Telegram)` and loses its buttons. The tick reads
+the runs again right before it sends, so a pause answered during the tick is not sent with live buttons. An edit that
+failed is retried on the next tick, unless Telegram refused it with a client error other than 429. Each close is
+logged as `Telegram message <id> of <run> closed: …`. `/status` in the chat answers with a digest: the
 running runs, the runs waiting for the operator, the queued briefs and the next one to start, as of the last tick.
+`/task <be|fe|sdlc> <text>` starts a task, answered as a reply to it (see
+[`/task` and the SDLC stage chain](#task-and-the-sdlc-stage-chain)).
 
 Updates are read by their own loop next to the tick, by `getUpdates` long polling (25 s), so a press arrives within
 about a second, and only from the operator's chat; updates from any other chat are dropped without a reply. Every
 press is answered at once, within Telegram's ~15 s window for a button, with a toast: `✅ Прийнято, виконую`,
-`⏭ Пропускаю крок`, `⛔ Зупиняю` or `🔁 Чекаю далі`, then the respond runs. Only the first press on an open pause
+`⏭ Пропускаю крок`, `⛔ Зупиняю`, `🔁 Чекаю далі` or `✅ Прийнято`, then the respond runs. Only the first press on an open pause
 acts; a press on a pause that is no longer open or was already answered gets `Це питання вже вирішене`, and a button
 the pause does not declare `Кнопка вже не діє`. A press whose run or ledger could not be read gets
 `⚠️ Не вдалося прочитати стан — натисніть ще раз` and keeps its buttons. A failed poll is retried after 5 s, 15 s, then every 60 s, without
 holding back the tick. Another `getUpdates` reader of the same bot, such as a manual topic lookup with `curl`, makes
 the loop's polls fail (Telegram answers `409 Conflict`) and takes the updates away from the supervisor while it runs.
 
-The update offset, the sent lines and the messages with open buttons (with the HTML each was sent with) are kept in
+The update offset, the sent lines, the messages with open buttons (with the HTML each was sent with) and the open
+`Що змінити?` prompts (`replies`, by the prompt's message id, dropped when their card closes) and the albums whose
+card is not out yet (`albums`, by run and pause, dropped once the card is sent or the pause closes) are kept in
 `~/.local/state/sdlc-autopilot/telegram.json`, next to the ledger. Deleting it re-sends the escalations of the last
 24 h.
 
@@ -129,7 +182,8 @@ resources: MemAvailable 700 MB < 800 MB`. A missing or non-positive limit stops 
 start. Besides, a brief does not start while a factory run of the same repo is open (pending, running or paused)
 whose message names an overlapping repo-relative path: the same path, or one under a named directory
 (`CHANGELOG.md` included). URLs, absolute, `~` and `$VAR` paths and `owner/repo` names do not count,
-and a brief that names no path runs alone in its repo.
+and a brief that names no path runs alone in its repo. A 1_mvp_sdlc task records its change in its own fragment
+`changelog.d/PILOT-<n>.md`, not in `CHANGELOG.md`, so briefs that name their fragments do not overlap.
 
 A started brief is moved to `queue/started/<repo>/launch-<uuid>--<name>.md` before the launch and renamed
 `<run-id>--<name>.md` once the factory run whose message carries its `sdlc-autopilot-launch: <uuid>` line shows up
@@ -147,6 +201,82 @@ the same pseudo run id:
 
 Once a day the supervisor removes test leftovers older than 24 h: `~/.cache/orchestration-tests/run-*` and
 `/tmp/bun-*`, never following symlinks.
+
+## `/task` and the SDLC stage chain
+
+`/task <be|fe|sdlc> <text>` in the operator's chat creates a Trello card in the list `Backlog` of the be checkout's
+board, as `feature-start` resolves it: `TRELLO_BOARD_ID_<PROJECT_NAME of config/project.env>`, else `TRELLO_BOARD_ID`
+(the same `~/.config/trello/.env` as the QA dev OK; `/task sdlc` takes `TRELLO_BOARD_ID`), with the text's first line as its title and the whole text as its
+description, then renames it `t<n>: <title>`, where `<n>` is the card's number: `feature-start` takes only cards named
+`<slug>: <title>`, and `t<n>` is always a valid, unique slug. A card created but not renamed is reported as such and
+queues nothing, so the operator renames it rather than send the task again. `/task` without a kind, with an unknown kind or without
+text gets the reply `Формат: /task <be|fe|sdlc> <текст>, …` and creates nothing; a message from any other chat is
+dropped, as every update is. `sdlc` only gets its card: a Claude session in `1_mvp_sdlc` turns it into a harness task.
+`be` and `fe` start a chain of stages in `1_mvp_pilot_be`, one docs pull request per stage, with the commands of the
+`mvp-sdlc` plugin's stage map:
+
+| Stage | Command | `stage-pr` stage | Repo |
+| --- | --- | --- | --- |
+| `feature-start` | `/mvp-sdlc:feature-start <card id>`, which hands over to `/sdlc:interview` | `brief` | be |
+| `prd` | `/sdlc:write-prd t<n>` | `prd` | be |
+| `architecture` | `/sdlc:architecture-design t<n>` | `sad` | be |
+| `contracts` | `/sdlc:api-forge t<n>` | `contracts` | be |
+| `tasks` | `/sdlc:break-tasks t<n>` | `tasks` | be |
+| `task-cards` | `/mvp-sdlc:task-cards t<n>` | `tasks` (`tasks-2`) | be |
+| `spec` (`fe` only) | `/mvp-sdlc:sync-spec t<n>` from the be checkout at `origin/<be base>` | `spec` | fe |
+
+Each stage is a brief `queue/<repo>/sdlc-stage.PILOT-<n>.<stage>.<attempt>.md` and takes a run slot like any brief.
+The queue launches it, only while its chain waits for exactly that stage and attempt, as `bun src/stage-run.ts
+<started file>` instead of a factory run, and moves it to `queue/started/<repo>/stage-<uuid>--<name>.md`; a brief of
+that name the chain does not wait for is a factory brief. `stage-run.ts` fetches the base branch of the repo's
+factory profile (`repo.base_branch`) into the Archon `source` checkout and adds a worktree
+`~/.local/state/sdlc-autopilot/stages/<started name>` at `origin/<base>`, or on a rerun at the stage's PR branch, so
+the operator's checkout and its current branch are never touched. It copies `.claude/sdlc.local.md` into it and runs
+`claude -p <command> --append-system-prompt <autopilot prompt> --permission-mode bypassPermissions
+--disallowed-tools AskUserQuestion,ExitPlanMode --plugin-dir <sdlc> --plugin-dir <mvp-sdlc> --output-format json`
+(3 h at most), with the plugins' install paths the checkout's own entries in `~/.claude/plugins/installed_plugins.json`
+name (override: `SDLC_AUTOPILOT_CLAUDE_PLUGINS`). The autopilot prompt (operator decision Q1 = a) says nobody is
+present: the task text is the answer to the skill's questions, every checkpoint takes the recommended option, every
+assumption goes under `## Open question / assumption` in the stage document, the operator's approval of the docs PR
+stands for the skill's confirmations, and the session runs this one stage and ends with `stage-pr`, never merging or
+pushing to `develop` or `main`. The worktree is always removed, and `<started file>.result.json` records the exit. The
+output goes to `~/.local/state/sdlc-autopilot/logs/stage.<repo>.<name>.log`. A running stage holds its slot until the
+result exists, for at most 4 h.
+
+On the next tick, a stage that exited 0 is matched to its one open pull request from
+`feature/PILOT-<n>-t<n>-<stage>[-2..-9]`. While its checks are pending nothing is sent; once they pass, the stage is
+a pause `pr-approve` of the pseudo run `stage:PILOT-<n>/<stage>` (workflow `sdlc-stage`) at the PR's head, and the
+`pr-approve` rule sends it as the «PR готовий» card. A card stays open while the PR cannot be read or its checks run
+again. `✅ Апрув` reads the PR's head and checks again: if the head moved since the card or the checks are not green,
+nothing is merged, the press is escalated again, and the next tick sends a card for the new head. Otherwise the
+supervisor runs `gh pr merge --squash --match-head-commit <head>` and queues the next stage. `↩️ Повернути` asks for the
+reason like any PR card and reruns the stage on its PR branch with `Return comment: <text>` in the prompt, so
+`stage-pr` adds a commit to the same pull request. The label `operator-approved` on a green head approves it the same
+way, and a pull request merged on GitHub advances the chain too. The close note of the card names what followed:
+the next stage queued, the stage rerun, or the task briefs.
+
+After the last stage (`task-cards` for `be`, `spec` for `fe`) the supervisor reads
+`docs/features/t<n>/tasks/tasks.json` from the be checkout's `origin/<base>`, and for each task not `done` runs the
+plugin's `task-brief t<n> <id>` in a fresh worktree of the task's repo (`--from <be source>` for an fe task) and queues
+its output as `queue/<repo>/task-PILOT-<n>-<id>.md`. A task that `depends on unfinished` tasks waits and is tried
+again every 15 minutes until every task is queued; the queue's path-overlap hold orders the rest.
+
+The chains are kept in `~/.local/state/sdlc-autopilot/stages.json`, next to the ledger. These escalate once and,
+except `stage-ci-red` and `stage-task-brief`, stop the chain; their pseudo run id is `stage:PILOT-<n>/<stage>`
+(`stage:PILOT-<n>/briefs` for task briefs) and their kind `stage`:
+
+| Rule | Situation |
+| --- | --- |
+| `stage-failed` | The stage session exited non-zero, its brief could not be read, its plugins are not installed for the checkout, or the next stage could not be queued; the message names the log |
+| `stage-no-pr` | The stage finished, but not exactly one open pull request comes from its branch |
+| `stage-ci-red` | The stage PR's checks failed on its head; no card until a green head |
+| `stage-pr-closed` | The stage PR was closed without a merge |
+| `stage-merge-failed` | The PR carries `operator-approved`, but GitHub refused the merge |
+| `stage-task-brief` | `task-brief` refused a task for another reason than its dependencies, or tasks.json could not be read |
+| `queue-stage-hung` | A launched stage wrote no result within 4 h |
+
+A GitHub read that fails is logged and tried again on the next tick. After a revert of this feature, delete any
+`queue/*/sdlc-stage.*.md` left: without the chain they would launch as factory briefs.
 
 ## Rules
 
@@ -180,11 +310,23 @@ approves it, naming the step's `Крок:` label and its `Тип`, and in parent
 `checkout` and `mismatch` gates always escalate. An `approved-by: decision-<N>` marker is not honoured; its Telegram
 message's buttons answer it. The rule has no fields and no `policy.yaml` entry.
 
+### pr-approve
+
+The factory's PR approval wait always goes to the operator: the rule escalates it with the reason `PR чекає апруву
+оператора`, and Telegram sends it as a PR card. Field: `action`, whose only value is `escalate-as-card`. Without the
+rule the pause still escalates, as `default-escalate`.
+
+### qa-dev
+
+The factory's QA dev wait always goes to the operator: the rule escalates it with the reason `Робота на dev чекає
+перевірки оператора`, and Telegram sends it as a QA card with its screenshots. Field: `action`, whose only value is
+`escalate-as-card`. Without the rule the pause still escalates, as `default-escalate`, with its buttons.
+
 ### post-merge-allowlist
 
 Approves a release step whose only write is one line of [`scripts/release.sh`](../../scripts/release.README.md).
 Fields: `repo` (`owner/name`: only runs whose worktree is in this repo's Archon workspace are judged) and
-`subcommands` (a non-empty subset of `merge-release-pr`, `tag`, `mirror`, `install`, `verify`, the subcommands
+`subcommands` (a non-empty subset of `merge-release-pr`, `tag`, `mirror`, `install`, `verify`, `plugin`, the subcommands
 `release.sh` has; `policy.yaml` can narrow the list, never extend it). The step is read from the run's own
 `<ARCHON_HOME>/workspaces/<repo>/artifacts/runs/<run_id>/steps.json`, by the number in the pause's `Крок: <n> — …`:
 the commands the PR author wrote, never the agent's ledger prose.

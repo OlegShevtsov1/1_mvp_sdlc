@@ -30,6 +30,15 @@
 # A delivery that ends failed is delivered once more (PILOT-301): one fixture asserts a failed first
 # delivery the retry delivers and merges, one a review route with no structured output that fails both
 # deliveries and ends not delivered, and every other fixture asserts the retry was skipped.
+# The PR approval (PILOT-572): pr-approve-scope executes in every auto-mode fixture whose merge gate passed,
+# which must skip the approval loop and reach the merge with no approved head; pr-approve-facts (GitHub) is
+# stubbed or skipped in every fixture. Three operator-mode fixtures assert an approve that merges the paused
+# head, a reject round delivered on the same pull request then approved, and a bookkeeping pull request
+# that merges without a pause. The unstubbed merge runs execute pr-approve-scope and pr-approve-round too.
+# The QA dev evidence (PILOT-574): qa-dev-evidence executes in every fixture without qa_dev that reaches it
+# and must return off with the qa-dev-cycle loop skipped. Two fixtures with qa_dev stub it: ready, where the
+# run pauses at qa-dev after the report and trello-done (card in Test) and one ok ends it; and escalated on a
+# red e2e, where there is no pause and the report ends not delivered naming why.
 # Needs the binaries from `tools.sh archon` and bun on PATH.
 # Every Archon call runs with a throwaway ARCHON_HOME: without one a binary reads and writes the
 # operator's live ~/.archon. install.sh also runs with a throwaway XDG_CONFIG_HOME, or it would overwrite the
@@ -77,6 +86,15 @@ followup_new_fixture=review-followup-new-defect
 # The retry fixtures (PILOT-301): a failed delivery the retry delivers, and one that fails twice.
 retry_fixture=delivery-failed-then-delivered
 retry_twice_fixture=delivery-failed-twice
+# The PR approval fixtures (PILOT-572): approve at once, a reject round then approve, and bookkeeping.
+approval_approved_fixture=operator-approval-approved
+approval_revised_fixture=operator-approval-revised
+approval_bookkeeping_fixture=operator-approval-bookkeeping
+# The QA dev fixtures (PILOT-574): evidence ready and answered ok, and a red e2e that escalates.
+qa_accepted_fixture=qa-dev-accepted
+qa_red_fixture=qa-dev-red-e2e
+# The head the approval fixtures stub as paused.
+approval_head=0123456789abcdef0123456789abcdef01234567
 follow_up_lib=orchestration/factory/.archon/workflows/sdlc-factory/factory/scripts/_lib/follow-up.ts
 # The green fixture the unstubbed merge runs start from.
 green_fixture=existing-profile
@@ -141,7 +159,9 @@ check_trello_moves() {
   esac
   case "${name}" in
   existing-profile | fresh-profile | "${env_fixture}" | "${visual_approved_fixture}" | "${visual_revised_fixture}" | \
-    "${followup_fixture}" | "${retry_fixture}" | "${merge_rebased_fixture}" | "${merged_same_fixture}") final=Test ;;
+    "${followup_fixture}" | "${retry_fixture}" | "${merge_rebased_fixture}" | "${merged_same_fixture}" | \
+    "${approval_approved_fixture}" | "${approval_revised_fixture}" | "${approval_bookkeeping_fixture}" | \
+    "${qa_accepted_fixture}") final=Test ;;
   "${manual_fixture}") final=Review ;;
   esac
   expect_move "${version}" "${name}" "${trace}" trello-done "${final}"
@@ -274,6 +294,103 @@ check_visual_trace() {
   fi
 }
 
+check_approval_trace() {
+  local version=$1 name=$2 trace=$3 out lines node at previous=0 want
+  # pr-approve-facts reads and writes GitHub; a fixture must never reach it. A skipped loop prints no line for it.
+  lines=$(grep -E '^[A-Z]+ +pr-approve-facts \(' "${trace}" || true)
+  [ -z "${lines}" ] || ! grep -vE '^(STUBBED|SKIPPED) ' <<<"${lines}" >/dev/null ||
+    fail "${version} ${name}" "pr-approve-facts must be stubbed or skipped in a test: ${lines}"
+  out=$(node_output "${trace}" pr-approve-round)
+  case "${name}" in
+  "${approval_approved_fixture}" | "${approval_revised_fixture}")
+    grep -qE '^STUBBED +pr-approve \(' "${trace}" || fail "${version} ${name}" "the pr-approve wait must be answered by its stub"
+    grep -qF '"proceed":true' <<<"${out}" && grep -qF "\"head_sha\":\"${approval_head}\"" <<<"${out}" ||
+      fail "${version} ${name}" "pr-approve-round must proceed with the paused head: ${out:-none}"
+    for want in 'STUBBED +merge' 'SKIPPED +not-delivered'; do
+      grep -qE "^${want} \\(" "${trace}" || fail "${version} ${name}" "trace lacks ${want}"
+    done
+    for node in merge-gate pr-approve-ask pr-approve pr-approve-round; do
+      at=$(line_of "${trace}" "${node}")
+      [ -n "${at}" ] && [ "${previous}" -lt "${at}" ] || fail "${version} ${name}" "${node} is out of order in the PR approval"
+      previous=${at}
+    done
+    ;;
+  "${approval_bookkeeping_fixture}")
+    expect_skipped "${version}" "${name}" "${trace}" pr-approve-cycle
+    grep -qF '"proceed":true' <<<"${out}" && grep -qF '"head_sha":""' <<<"${out}" ||
+      fail "${version} ${name}" "a bookkeeping pull request must pass pr-approve-round with no paused head: ${out:-none}"
+    grep -qE '^STUBBED +merge \(' "${trace}" || fail "${version} ${name}" "trace lacks STUBBED merge"
+    ;;
+  *)
+    if grep -qF '"action":"merge"' <<<"$(node_output "${trace}" merge-gate)"; then
+      grep -qF '"pause":false' <<<"$(node_output "${trace}" pr-approve-scope)" ||
+        fail "${version} ${name}" "pr-approve-scope must execute and not pause in auto mode: $(grep -E '^[A-Z]+ +pr-approve-scope' "${trace}" || true)"
+      expect_skipped "${version}" "${name}" "${trace}" pr-approve-cycle
+      grep -qF '"proceed":true' <<<"${out}" && grep -qF '"head_sha":""' <<<"${out}" ||
+        fail "${version} ${name}" "pr-approve-round must pass auto mode on with no head_sha: ${out:-none}"
+    else
+      expect_skipped "${version}" "${name}" "${trace}" pr-approve-scope
+      expect_skipped "${version}" "${name}" "${trace}" pr-approve-round
+    fi
+    ;;
+  esac
+  [ "${name}" = "${approval_revised_fixture}" ] || {
+    ! grep -qE '^(COMPLETED|STUBBED|FAILED) +pr-approve-revise__' "${trace}" || fail "${version} ${name}" "an approval round revised without a reject"
+    return 0
+  }
+  out=$(node_output "${trace}" pr-approve-revise__report)
+  grep -qF '"ready":true' <<<"${out}" && grep -qF '"pr_url":"https://github.com/example/repo/pull/3"' <<<"${out}" ||
+    fail "${version} ${name}" "the revision must deliver on the run's pull request: ${out:-none}"
+  [ "$(grep -cE '^[A-Z]+ +implement__implement \(' "${trace}")" -eq 2 ] ||
+    fail "${version} ${name}" "the revision must run its own implement round"
+  previous=0
+  for node in pr-approve-turn pr-approve-revise__report pr-approve-facts pr-approve; do
+    at=$(line_of "${trace}" "${node}")
+    [ -n "${at}" ] && [ "${previous}" -lt "${at}" ] || fail "${version} ${name}" "${node} is out of order in the revision round"
+    previous=${at}
+  done
+  grep -qF 'rename the button' "${trace}" || fail "${version} ${name}" "the revision's work order lacks the operator's words"
+}
+
+check_qa_dev_trace() {
+  local version=$1 name=$2 trace=$3 lines node at previous=0 want
+  case "${name}" in
+  "${qa_accepted_fixture}")
+    grep -qE '^STUBBED +qa-dev-evidence \(' "${trace}" || fail "${version} ${name}" "qa-dev-evidence must be stubbed"
+    grep -qE '^STUBBED +qa-dev \(' "${trace}" || fail "${version} ${name}" "the qa-dev wait must be answered by its stub"
+    # One answer, one turn (a dry run assumes until_bash ended the loop; tests/qa-dev.test.ts runs until).
+    [ "$(grep -cE '^COMPLETED +qa-dev-turn \(' "${trace}")" -eq 1 ] ||
+      fail "${version} ${name}" "qa-dev-turn must run exactly once: $(grep -E '^[A-Z]+ +qa-dev' "${trace}" || true)"
+    grep -qF '"status":"delivered"' <<<"$(node_output "${trace}" report)" ||
+      fail "${version} ${name}" "the report must be delivered: $(node_output "${trace}" report)"
+    expect_skipped "${version}" "${name}" "${trace}" not-delivered
+    for node in report trello-done qa-dev-turn qa-dev; do
+      at=$(line_of "${trace}" "${node}")
+      [ -n "${at}" ] && [ "${previous}" -lt "${at}" ] || fail "${version} ${name}" "${node} is out of order around the QA dev pause"
+      previous=${at}
+    done
+    ;;
+  "${qa_red_fixture}")
+    grep -qE '^STUBBED +qa-dev-evidence \(' "${trace}" || fail "${version} ${name}" "qa-dev-evidence must be stubbed"
+    # not-delivered cancels the run before the loop is reached, so it prints no line.
+    ! grep -qE '^(COMPLETED|STUBBED|FAILED) +qa-dev(-turn)? \(' "${trace}" || fail "${version} ${name}" "a red e2e must not pause at qa-dev"
+    for want in 'STUBBED +merge' 'COMPLETED +not-delivered'; do
+      grep -qE "^${want}( |\$)" "${trace}" || fail "${version} ${name}" "trace lacks ${want}"
+    done
+    grep -qF 'QA dev has no proof: e2e \"Dev Journey\" is red (failure) for abc1234: https://github.com/example/repo/actions/runs/42' <<<"$(node_output "${trace}" report)" ||
+      fail "${version} ${name}" "the report does not name the red e2e and its run: $(node_output "${trace}" report)"
+    ;;
+  *)
+    # A fixture cancelled before it prints no line for it.
+    lines=$(grep -E '^[A-Z]+ +qa-dev-evidence \(' "${trace}" || true)
+    [ -z "${lines}" ] || { grep -qE '^COMPLETED ' <<<"${lines}" && grep -qF '"status":"off"' <<<"$(node_output "${trace}" qa-dev-evidence)"; } ||
+      fail "${version} ${name}" "qa-dev-evidence must execute and return off without qa_dev: ${lines} $(node_output "${trace}" qa-dev-evidence)"
+    ! grep -qE '^(COMPLETED|STUBBED|FAILED) +qa-dev(-turn)? \(' "${trace}" ||
+      fail "${version} ${name}" "the QA dev pause ran without qa_dev"
+    ;;
+  esac
+}
+
 check_retry_trace() {
   local version=$1 name=$2 trace=$3 out node at previous=0 want
   out=$(node_output "${trace}" last-delivery)
@@ -333,6 +450,8 @@ check_fixture_trace() {
   check_trello_moves "${version}" "${name}" "${trace}"
   check_visual_trace "${version}" "${name}" "${trace}"
   check_retry_trace "${version}" "${name}" "${trace}"
+  check_approval_trace "${version}" "${name}" "${trace}"
+  check_qa_dev_trace "${version}" "${name}" "${trace}"
   # rag-context executes in every fixture, as a dry run (no request), before the plan reads its file.
   rag_line=$(grep -nE '^COMPLETED +rag-context \(' "${trace}" | cut -d: -f1 || true)
   [ -n "${rag_line}" ] || fail "${version} ${name}" "rag-context must execute, never be stubbed: $(grep -E '^[A-Z]+ +rag-context' "${trace}" || true)"
@@ -584,6 +703,8 @@ check_unstubbed_merge() {
     fail "${label}" "the edit did not carry the run's pr-body.md"
   expect_trace "${label}" '^COMPLETED +pr-state \('
   expect_trace "${label}" '^COMPLETED +merge-gate \('
+  expect_trace "${label}" '^COMPLETED +pr-approve-scope \('
+  expect_trace "${label}" '^COMPLETED +pr-approve-round \('
   expect_trace "${label}" '^COMPLETED +merge \('
   expect_trace "${label}" '^SKIPPED +notify-operator \('
   expect_trace "${label}" '^STUBBED +deploy \('

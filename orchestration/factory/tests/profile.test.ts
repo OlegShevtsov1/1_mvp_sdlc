@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   DEFAULT_MIN_DISK_FREE_PCT,
+  MAX_QA_PAGES,
   flattenProfile,
   profileToYaml,
   validateProfile,
@@ -72,6 +73,22 @@ describe("validateProfile", () => {
       if (!r.ok) expect(r.errors.join(" ")).toContain("repo.manual_merge_bases[1] must be a branch name");
     }
   });
+  test("merge_approval defaults to auto when absent or null", () => {
+    for (const repo of [good.repo, { ...good.repo, merge_approval: null }]) {
+      const r = validateProfile({ ...good, repo });
+      expect(r.ok && r.profile.repo.merge_approval).toBe("auto");
+    }
+  });
+
+  test("merge_approval accepts operator and rejects anything else", () => {
+    const r = validateProfile({ ...good, repo: { ...good.repo, merge_approval: "operator" } });
+    expect(r.ok && r.profile.repo.merge_approval).toBe("operator");
+    for (const bad of ["manual", "", true]) {
+      const v = validateProfile({ ...good, repo: { ...good.repo, merge_approval: bad } });
+      expect(v.ok ? [] : v.errors).toEqual(["repo.merge_approval must be one of auto, operator"]);
+    }
+  });
+
   test("test_timeout_seconds defaults to 1000 when absent or null", () => {
     for (const stack of [good.stack, { ...good.stack, test_timeout_seconds: null }]) {
       const r = validateProfile({ ...good, stack });
@@ -174,6 +191,55 @@ describe("stack.preflight", () => {
   });
 });
 
+describe("qa_dev", () => {
+  const withQaDev = (qa_dev: unknown) => validateProfile({ ...good, qa_dev });
+  const errors = (qa_dev: unknown): string[] => {
+    const r = withQaDev(qa_dev);
+    return r.ok ? [] : r.errors;
+  };
+  const full = {
+    e2e_workflow: "Dev Journey",
+    pages: [{ glob: "src/pages/dashboard/**", url: "https://app.dev.example.com/dashboard" }],
+  };
+
+  test("no qa_dev profile keeps today's flow: no key in the profile, its flat form or its YAML", () => {
+    for (const r of [validateProfile(good), withQaDev(null)]) {
+      if (!r.ok) throw new Error(r.errors.join(","));
+      expect(r.profile.qa_dev).toBeUndefined();
+      expect("qa_dev" in flattenProfile(r.profile)).toBe(false);
+      expect(profileToYaml(r.profile)).not.toContain("qa_dev");
+    }
+  });
+
+  test("a full block validates, flattens and round-trips", () => {
+    const r = withQaDev(full);
+    if (!r.ok) throw new Error(r.errors.join(","));
+    expect(r.profile.qa_dev).toEqual(full);
+    expect(flattenProfile(r.profile).qa_dev).toEqual(full);
+    const back = validateProfile(Bun.YAML.parse(profileToYaml(r.profile)));
+    expect(back.ok).toBe(true);
+    if (back.ok) expect(back.profile).toEqual(r.profile);
+  });
+
+  test("e2e_workflow and pages default to none", () => {
+    const r = withQaDev({});
+    if (!r.ok) throw new Error(r.errors.join(","));
+    expect(r.profile.qa_dev).toEqual({ e2e_workflow: "", pages: [] });
+  });
+
+  test("rejects each malformed key, naming it", () => {
+    expect(errors("yes")).toEqual(["qa_dev must be a mapping"]);
+    expect(errors({ e2e_workflow: 3 })).toEqual(["qa_dev.e2e_workflow must be a string"]);
+    expect(errors({ e2e_workflow: "a\nb" })).toEqual(["qa_dev.e2e_workflow must be a single line"]);
+    expect(errors({ pages: "x" })).toEqual(["qa_dev.pages must be a list of {glob, url} mappings"]);
+    expect(errors({ pages: ["x"] })).toEqual(["qa_dev.pages[0] must be a mapping"]);
+    expect(errors({ pages: [{ url: "https://a" }] })).toEqual(["qa_dev.pages[0].glob is required"]);
+    expect(errors({ pages: [{ glob: "src/**", url: "app.dev/x" }] })).toEqual(["qa_dev.pages[0].url must start with http:// or https://"]);
+    const many = Array.from({ length: MAX_QA_PAGES + 1 }, () => full.pages[0]);
+    expect(errors({ pages: many })).toEqual([`qa_dev.pages must list at most ${MAX_QA_PAGES} pages`]);
+  });
+});
+
 describe("flattenProfile", () => {
   test("produces top-level keys for every consumer", () => {
     const r = validateProfile(good);
@@ -189,6 +255,7 @@ describe("flattenProfile", () => {
       monitoring_provider: "sentry", window_minutes: 10,
       secret_names: ["DEPLOY_SSH_KEY_PATH", "SENTRY_AUTH_TOKEN"],
       manual_merge_bases: ["main"],
+      merge_approval: "auto",
     });
   });
 });
@@ -211,6 +278,15 @@ describe("profileToYaml", () => {
       const back = validateProfile(Bun.YAML.parse(profileToYaml(r.profile)));
       expect(back.ok).toBe(true);
       if (back.ok) expect(back.profile).toEqual(r.profile);
+    }
+  });
+
+  test("merge_approval round-trips", () => {
+    for (const merge_approval of ["auto", "operator"]) {
+      const r = validateProfile({ ...good, repo: { ...good.repo, merge_approval } });
+      if (!r.ok) throw new Error(r.errors.join(","));
+      const back = validateProfile(Bun.YAML.parse(profileToYaml(r.profile)));
+      expect(back.ok && back.profile.repo.merge_approval).toBe(merge_approval);
     }
   });
 
@@ -297,6 +373,12 @@ describe("this repository's own profile", () => {
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.profile.stack.test_timeout_seconds).toBeGreaterThanOrEqual(1600);
   });
+  // The factory merges its own pull requests here (E3, PILOT-572): no pr-approve pause.
+  test("merges without the operator's approval", () => {
+    const path = join(import.meta.dir, "../../../.archon/factory-profile.yaml");
+    const r = validateProfile(Bun.YAML.parse(readFileSync(path, "utf8")));
+    expect(r.ok && r.profile.repo.merge_approval).toBe("auto");
+  });
 });
 
 // PILOT-499: the profiles the project templates render declare what their test command needs.
@@ -317,6 +399,12 @@ describe("the project templates' profiles", () => {
     expect(preflight?.services[0].tcp).toMatch(/^127\.0\.0\.1:5432$/);
     expect(preflight?.services[1].tcp).toMatch(/^127\.0\.0\.1:6379$/);
     expect(preflight?.services.map((s) => s.start)).toEqual(["", ""]);
+  });
+
+  // E3 Task 6 switches the pilot profiles to operator once the supervisor's PR card ships.
+  test("both merge without the operator's approval until E3 Task 6", () => {
+    expect(rendered("project-be").repo.merge_approval).toBe("auto");
+    expect(rendered("project-fe").repo.merge_approval).toBe("auto");
   });
 
   test("project-fe checks its tools and no service", () => {

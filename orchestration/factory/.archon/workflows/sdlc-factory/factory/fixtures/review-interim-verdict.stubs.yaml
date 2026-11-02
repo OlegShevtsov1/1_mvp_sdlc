@@ -29,6 +29,7 @@ load-profile:
   window_minutes: 10
   secret_names: []
   manual_merge_bases: ["main"]
+  merge_approval: auto
 sync-base: { action: "kept", base: "origin/develop", before: "0000000", after: "0000000", reason: "stub: already at origin/develop" }
 
 plan__plan:

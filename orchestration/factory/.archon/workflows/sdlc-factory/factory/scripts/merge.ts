@@ -1,12 +1,12 @@
 import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { runChild } from "./_lib/child-run.ts";
 import { emit, parseJsonObject } from "./_lib/io.ts";
 import {
   isMergeConflict, MERGE_GATE_TIMEOUT_MS, originRepo, PR_STATE_TIMEOUT_MS, PR_URL,
 } from "./_lib/merge-decision.ts";
 
 // Bindings (see factory.yaml `merge` node): pr_url, head, base and
-// already_merged from merge-gate, merge_strategy; remote, flaky_patterns,
+// already_merged from merge-gate, merge_strategy, head_sha from pr-approve-round; remote, flaky_patterns,
 // body_sync, test_command, lint_command, build_command, test_timeout_seconds,
 // secret_names, manual_merge_bases and preflight reach the child runs of pr-state.ts and
 // merge-gate.ts unchanged through the environment. ARTIFACTS_DIR is
@@ -18,6 +18,11 @@ import {
 // head, and only a gate that answers merge leads to one more `gh pr merge`.
 // Nothing loops: one rebase per merge attempt. A pull request another process
 // already merged at this run's head is reported merged.
+//
+// head_sha is the head the operator approved (merge_approval operator, PILOT-572),
+// empty otherwise. It goes to gh as --match-head-commit, so GitHub refuses a head
+// that moved after the approval, and a refused approved merge is never rebased:
+// a rebased head is not the head the operator approved.
 //
 // A squash merge passes --subject "<PR title> (#<n>)" read from the live pull
 // request (decision 25): GitHub's default subject for a one-commit pull
@@ -32,6 +37,7 @@ const head = process.env.INPUTS_HEAD ?? "";
 const base = process.env.INPUTS_BASE ?? "";
 const alreadyMerged = process.env.INPUTS_ALREADY_MERGED === "true";
 const strategy = process.env.INPUTS_MERGE_STRATEGY ?? "";
+const approvedHead = process.env.INPUTS_HEAD_SHA ?? "";
 const artifactsDir = process.env.ARTIFACTS_DIR ?? ".";
 
 const STRATEGIES = ["squash", "merge", "rebase"];
@@ -64,20 +70,6 @@ function refuse(message: string): Outcome {
   return { merged: false, merge_sha: "", head, error: message.replace(/[\x00-\x1f\x7f]+/g, " ") };
 }
 
-// A child run of a sibling script with the node's own bindings plus env; its
-// last stdout line, or null when it reported nothing readable.
-function child(script: string, env: Record<string, string>, timeoutMs: number): Record<string, unknown> | null {
-  log(`${script}: running after the conflict`);
-  const p = Bun.spawnSync([process.execPath, join(import.meta.dir, script)], {
-    env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe", timeout: timeoutMs,
-  });
-  const stderr = p.stderr.toString().trim();
-  if (stderr !== "") log(`${script} stderr: ${stderr}`);
-  const doc = parseJsonObject(p.stdout.toString().trim().split("\n").at(-1) ?? "");
-  log(`${script}: ${doc === null ? `no report (exit ${p.exitCode})` : JSON.stringify(doc)}`);
-  return doc;
-}
-
 async function deliver(): Promise<Outcome> {
   if (!STRATEGIES.includes(strategy)) return refuse(`merge: unknown merge_strategy '${strategy}'`);
   if (!PR_URL.test(url)) return refuse("merge: merge-gate did not hand on a GitHub pull request URL.");
@@ -91,8 +83,9 @@ async function deliver(): Promise<Outcome> {
   // inference and REQUIRES an explicit selector — the PR URL is one.
   const gh = (...args: string[]) => run(["gh", ...args]);
   let subject: string[] = [];
+  const match = approvedHead === "" ? [] : ["--match-head-commit", approvedHead];
   const merge = () => {
-    const r = gh("pr", "merge", url, "--repo", repo, `--${strategy}`, ...subject);
+    const r = gh("pr", "merge", url, "--repo", repo, `--${strategy}`, ...match, ...subject);
     const out = [r.out, r.err].filter((x) => x !== "").join("\n");
     log(`gh pr merge: ${r.ok ? "ok" : "failed"}${out === "" ? "" : `: ${out}`}`);
     return { ok: r.ok, out };
@@ -134,18 +127,24 @@ async function deliver(): Promise<Outcome> {
   const view = parseJsonObject(gh("pr", "view", url, "--repo", repo, "--json", "state,headRefOid,mergeable").out) ?? {};
   // Another process merged it while this one waited at the gate, which had
   // just verified that the checkout is the head.
-  if (view.state === "MERGED" && view.headRefOid === run(["git", "rev-parse", "HEAD"]).out) {
+  if (view.state === "MERGED" && view.headRefOid === (approvedHead || run(["git", "rev-parse", "HEAD"]).out)) {
     log("the pull request was merged at this run's head by another process");
     return merged();
+  }
+  if (approvedHead !== "") {
+    return refuse(
+      `merge: gh pr merge refused the approved head ${approvedHead}: ${first.out}; the pull request was not merged, ` +
+        "start a new run to approve its current head",
+    );
   }
   if (view.state !== "OPEN" || !isMergeConflict(first.out, typeof view.mergeable === "string" ? view.mergeable : "")) {
     return refuse(failed);
   }
 
   const afterRebase = `${failed}; after one rebase onto ${base}`;
-  const facts = child("pr-state.ts", { INPUTS_DELIVERY: JSON.stringify({ pr_url: url }), INPUTS_MERGE_CONFLICT: "true" }, PR_STATE_TIMEOUT_MS);
+  const facts = runChild("pr-state.ts", { INPUTS_DELIVERY: JSON.stringify({ pr_url: url }), INPUTS_MERGE_CONFLICT: "true" }, PR_STATE_TIMEOUT_MS, log);
   if (facts === null) return refuse(`${afterRebase}: pr-state did not report (see merge.log)`);
-  const gate = child("merge-gate.ts", { INPUTS_PR: JSON.stringify(facts) }, MERGE_GATE_TIMEOUT_MS);
+  const gate = runChild("merge-gate.ts", { INPUTS_PR: JSON.stringify(facts) }, MERGE_GATE_TIMEOUT_MS, log);
   if (gate === null) return refuse(`${afterRebase}: merge-gate did not report (see merge.log)`);
   if (gate.already_merged === true) return merged();
   if (gate.action !== "merge") return refuse(`${afterRebase}: ${String(gate.reason)}`);

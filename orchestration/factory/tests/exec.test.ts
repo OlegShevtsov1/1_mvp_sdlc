@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runChild } from "../.archon/workflows/sdlc-factory/factory/scripts/_lib/child-run.ts";
 import { parseSecretNames, redact, runLogged, runUntilExit } from "../.archon/workflows/sdlc-factory/factory/scripts/_lib/exec.ts";
 
 describe("redact", () => {
@@ -23,6 +24,26 @@ describe("parseSecretNames", () => {
   test("returns [] for anything else", () => {
     expect(parseSecretNames("")).toEqual([]);
     expect(parseSecretNames("nope")).toEqual([]);
+  });
+});
+
+describe("runChild", () => {
+  test("redacts the profile's secrets and the GitHub token from the child's stderr", () => {
+    const script = join(mkdtempSync(join(tmpdir(), "child-run-")), "stub.ts");
+    writeFileSync(script, 'console.error("token ghp_x0123 password hunter2"); console.log(JSON.stringify({ ok: true }));\n');
+    const saved = { names: process.env.INPUTS_SECRET_NAMES, pass: process.env.DEV_PASSWORD, gh: process.env.GH_TOKEN };
+    Object.assign(process.env, { INPUTS_SECRET_NAMES: '["DEV_PASSWORD"]', DEV_PASSWORD: "hunter2", GH_TOKEN: "ghp_x0123" });
+    const lines: string[] = [];
+    try {
+      expect(runChild(script, {}, 10_000, (line) => lines.push(line))).toEqual({ ok: true });
+    } finally {
+      for (const [name, value] of [["INPUTS_SECRET_NAMES", saved.names], ["DEV_PASSWORD", saved.pass], ["GH_TOKEN", saved.gh]] as const) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+    expect(lines.some((l) => l.includes("hunter2") || l.includes("ghp_x0123"))).toBe(false);
+    expect(lines.some((l) => l.includes("token *** password ***"))).toBe(true);
   });
 });
 

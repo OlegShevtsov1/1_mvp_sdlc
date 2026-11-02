@@ -32,10 +32,15 @@ const doc = buildReport({
   visual_proceed: process.env.INPUTS_VISUAL_PROCEED ?? "skipped",
   visual_stop: process.env.INPUTS_VISUAL_STOP ?? "",
   visual_pr_url: process.env.INPUTS_VISUAL_PR_URL ?? "",
+  approval_proceed: process.env.INPUTS_APPROVAL_PROCEED ?? "skipped",
+  approval_stop: process.env.INPUTS_APPROVAL_STOP ?? "",
   followups: process.env.INPUTS_FOLLOWUPS ?? "[]",
   claude_auth: process.env.INPUTS_CLAUDE_AUTH ?? "skipped",
   claude_auth_node: process.env.INPUTS_CLAUDE_AUTH_NODE ?? "",
   retry_note: process.env.INPUTS_RETRY_NOTE ?? "",
+  qa_status: process.env.INPUTS_QA_STATUS ?? "skipped",
+  qa_reason: process.env.INPUTS_QA_REASON ?? "",
+  qa_alert: process.env.INPUTS_QA_ALERT ?? "",
 });
 const artifacts = process.env.ARTIFACTS_DIR;
 if (artifacts) writeFileSync(`${artifacts}/report.json`, JSON.stringify(doc, null, 2) + "\n");

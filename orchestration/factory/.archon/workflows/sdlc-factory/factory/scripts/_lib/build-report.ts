@@ -17,10 +17,15 @@ export interface ReportInput {
   rag_status: string; rag_sources: string;
   // visual-round's verdict: "true", "false", or "skipped" when it did not run.
   visual_proceed: string; visual_stop: string; visual_pr_url: string;
+  // pr-approve-round's verdict (PILOT-572): "true", "false", or "skipped" when it did not run.
+  approval_proceed: string; approval_stop: string;
   // review-followup's cards as a raw JSON string (PILOT-300).
   followups: string;
   // claude-auth-scan's verdict on the run's transcript and the node it names.
   claude_auth: string; claude_auth_node: string;
+  // qa-dev-evidence's verdict (PILOT-574): off, ready, escalated, or "skipped" when it did not run;
+  // its reason, and the Telegram alert it sent on escalated.
+  qa_status: string; qa_reason: string; qa_alert: string;
   // last-delivery's note on the retry of a failed delivery, empty when the delivery was not retried.
   retry_note: string;
 }
@@ -122,12 +127,24 @@ function outcome(i: ReportInput): ReportDoc {
     : "skipped";
   const rollback = !rolledBack ? "not needed" : i.rolled_back === "true" ? "done" : `FAILED (${i.rollback_reason})`;
 
-  const delivered = merged && deployed && healthy && i.monitor_status !== "errors" && !rolledBack;
+  const live = merged && deployed && healthy && i.monitor_status !== "errors" && !rolledBack;
+  // Any QA status but these three, "" from a failed or timed-out evidence node included, is an unknown state: not delivered.
+  const qaUnproved = live && !["off", "ready", "skipped"].includes(i.qa_status);
+  const qaWhy = i.qa_status === "escalated"
+    ? i.qa_reason || "no reason given"
+    : `qa-dev-evidence did not report (status ${i.qa_status || "empty"})`;
+  const delivered = live && !qaUnproved;
+  const alerted = i.qa_alert === "sent" || i.qa_alert === "already"
+    ? "The operator was alerted in Telegram."
+    : `The Telegram alert was not sent (${i.qa_alert || "unknown"}); tell the operator.`;
 
-  const outcome = delivered
+  const outcome = qaUnproved
+    ? `Not delivered: deployed and healthy, but QA dev has no proof: ${qaWhy}. ${alerted}`
+    : delivered
     ? `Delivered: ${i.pr_url} merged as ${i.merge_sha}, deployed, health ${health}, monitoring ${monitoring}.`
     : !merged && i.delivery_ready === "false" ? `Not delivered: the delivery ended not ready (${i.delivery_reason || "no reason given"}). ${i.delivery_summary}`.trim()
     : !merged && i.visual_proceed === "false" ? `Not delivered: stopped at the visual gate (${i.visual_stop}). PR ${pr_url} is open and was not merged.`
+    : !merged && i.approval_proceed === "false" ? `Not delivered: stopped at the PR approval (${i.approval_stop}). PR ${pr_url} is open and was not merged.`
     : !merged && i.merge_refused ? `Not delivered: merge refused (${i.merge_refused}). PR ${i.pr_url} was not merged by this run.`
     : !merged ? `Not delivered: PR ${i.pr_url || "(none)"} was not merged.`
     : !i.merge_sha ? `Not delivered: PR ${i.pr_url} is merged, but its merge commit could not be read, so nothing was deployed. Re-check with: gh pr view ${i.pr_url} --json mergeCommit`

@@ -63,6 +63,7 @@ fake_prs() { cat "${tmp}/gh-state/prs.json" 2>/dev/null || echo '[]'; }
 # four PR endpoints; every invocation is logged to calls.log. Any other auth subcommand (switch) exits 99; an api
 # call without the mirror token or outside the mirror exits 98. FAKE_GH_CHECKS: success | failure | pending.
 # FAKE_GH_CHECK_RUNS=<file>: the check runs, a JSON array, instead.
+# FAKE_GH_CHECK_SUITES=<file>: the check suites, a JSON array (default none).
 # FAKE_GH_MERGE=squash makes the merge a squash commit instead of a merge commit.
 mkdir -p "${tmp}/fakegh"
 cat > "${tmp}/fakegh/gh" <<'PY'
@@ -118,6 +119,12 @@ elif method == "GET" and rest.endswith("/check-runs"):
         runs = [{"id": 1, "name": "CI", "status": "completed", "conclusion": "success"},
                 {"id": 2, "name": "PR conventions", **second}]
     print(json.dumps({"total_count": len(runs), "check_runs": runs}))
+elif method == "GET" and rest.endswith("/check-suites"):
+    suites = []
+    if os.environ.get("FAKE_GH_CHECK_SUITES"):
+        with open(os.environ["FAKE_GH_CHECK_SUITES"]) as f:
+            suites = json.load(f)
+    print(json.dumps({"total_count": len(suites), "check_suites": suites}))
 elif method == "PUT" and rest.endswith("/merge"):
     pr = prs[int(rest.split("/")[1]) - 1]
     if pr["state"] != "open" or fields.get("merge_method") != "merge" or fields.get("sha") != git("-C", mirror, "rev-parse", "develop"):
@@ -383,7 +390,57 @@ runs_file=$(check_runs pending "${older_failure}, $(conventions_run 3 in_progres
 FAKE_GH_CHECK_RUNS=${runs_file} publish 1_mvp_pilot_be
 expect_no_merge "pending newest" "timed out"
 if grep -qF "checks failed" <<<"${err}"; then fail "pending newest" "an older failure counted: ${err}"; fi
+
+new_fixture
+seed=$(mirror_head)
+queued='{"id": 3, "name": "PR conventions", "status": "queued", "conclusion": null, "started_at": null, "completed_at": null}'
+runs_file=$(check_runs queued "${older_success}, ${queued}")
+FAKE_GH_CHECK_RUNS=${runs_file} publish 1_mvp_pilot_be
+expect_no_merge "queued newest" "timed out"
+
+new_fixture
+seed=$(mirror_head)
+runs_file=$(check_runs running-older "$(conventions_run 2 in_progress null 02:43:46 null), $(conventions_run 3 completed success 02:43:51 02:44:20)")
+FAKE_GH_CHECK_RUNS=${runs_file} publish 1_mvp_pilot_be
+expect_no_merge "running older run" "timed out"
+
+new_fixture
+seed=$(mirror_head)
+printf '[%s]\n' "$(conventions_run 2 in_progress null 02:43:51 null)" >"${tmp}/in-progress-only.json"
+FAKE_GH_CHECK_RUNS=${tmp}/in-progress-only.json publish 1_mvp_pilot_be
+expect_no_merge "in_progress only" "timed out"
+
+new_fixture
+seed=$(mirror_head)
+runs_file=$(check_runs all-success "$(conventions_run 2 completed success 02:43:51 02:44:20)")
+FAKE_GH_CHECK_RUNS=${runs_file} publish 1_mvp_pilot_be
+[ "${rc}" -eq 0 ] || fail "all completed success" "exit ${rc}: ${err}"
+calls | grep -qF '"PUT"' || fail "all completed success" "merge was not called"
 echo "PASS each check is judged by its newest run"
+
+# --- a queued workflow run with no check runs yet keeps the PR open
+# suites <name> <conventions suite status> <other suite slug> <other suite status>: writes a check suites fixture.
+suites() {
+  printf '[{"id": 1, "status": "completed", "conclusion": "skipped", "app": {"slug": "github-actions"}},
+    {"id": 2, "status": "%s", "conclusion": null, "app": {"slug": "github-actions"}},
+    {"id": 3, "status": "%s", "conclusion": null, "app": {"slug": "%s"}}]\n' "$2" "$4" "$3" >"${tmp}/$1.json"
+  echo "${tmp}/$1.json"
+}
+runs_file=$(check_runs incident "$(conventions_run 2 completed skipped 02:43:40 02:43:40)")
+
+new_fixture
+seed=$(mirror_head)
+FAKE_GH_CHECK_RUNS=${runs_file} FAKE_GH_CHECK_SUITES=$(suites suites-queued queued github-actions completed) \
+  publish 1_mvp_pilot_be
+expect_no_merge "queued suite" "timed out"
+
+new_fixture
+seed=$(mirror_head)
+FAKE_GH_CHECK_RUNS=${runs_file} FAKE_GH_CHECK_SUITES=$(suites suites-other-app completed other-app queued) \
+  publish 1_mvp_pilot_be
+[ "${rc}" -eq 0 ] || fail "other app suite" "exit ${rc}: ${err}"
+calls | grep -qF '"PUT"' || fail "other app suite" "merge was not called"
+echo "PASS a queued Actions suite without check runs blocks the merge"
 
 # release_tag_fixture: an annotated v0.2.0 on the primary main whose message has the primary login, on the
 # release-prep commit of card PILOT-165, and as negatives a lightweight v0.3.0 on main and an annotated v9.9.9 on

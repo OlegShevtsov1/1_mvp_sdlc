@@ -13,8 +13,8 @@ export type IntakeDeps = { exec: (argv: string[], cwd: string) => ExecResult; no
 
 export const HINT = "Формат: /task <be|fe|sdlc> <текст>, наприклад: /task fe Додати кнопку «Вийти» в меню";
 
-const BE = "1_mvp_pilot_be";
-const FE = "1_mvp_pilot_fe";
+export const BE = "1_mvp_pilot_be";
+export const FE = "1_mvp_pilot_fe";
 const WORKFLOW = "sdlc-stage";
 // A task whose dependencies are unfinished is briefed again at most this often.
 const RETRY_MS = 15 * 60_000;
@@ -108,7 +108,7 @@ function baseBranch(source: string): string {
 }
 
 // The source checkout of `repo` and its base branch, or why there is none.
-function checkout(repo: string): { cwd: string; repo: string; base: string } | string {
+export function checkout(repo: string): { cwd: string; repo: string; base: string } | string {
   const r = resolveRepo(repo);
   if (!r.cwd) return `в Archon немає одного workspaces/*/${repo}/source`;
   const base = baseBranch(r.cwd);

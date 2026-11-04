@@ -32,7 +32,8 @@ scripts and the workflows read it. The app answers on `https://{{PROJECT_ZONE}}`
 - Kamal configs (self-contained, always `-c`, never `-d`):
   `bundle exec kamal config -c config/deploy.dev.yml` (needs `DEV_HOST`, `KAMAL_REGISTRY_SERVER`),
   `bundle exec kamal config -c config/deploy.yml` (needs `PROD_VPN_IP`, `KAMAL_REGISTRY_SERVER`)
-- Release tooling: `scripts/next-version.sh [<ref>]`, `scripts/release-notes.sh vX.Y.Z`, `bin/sdlc-metrics <tag>`
+- Release tooling: `scripts/next-version.sh [<ref>]`, `scripts/release-notes.sh vX.Y.Z`, `bin/sdlc-metrics <tag>`,
+  `bin/release prep|ship|rollback` (see "Automated release")
 
 ## GitHub secrets and variables
 
@@ -72,6 +73,46 @@ Short version; the rules are in `CLAUDE.md` ("Conventions", "Hard Rules").
 - Hotfix: `hotfix/<KEY>-<n>-<slug>` from `main`, PR into `main` merged by hand, tagged with the PATCH version,
   then back-merged into `develop` with a merge commit.
 - Published `v*` tags are never moved or deleted (`.githooks/pre-push`).
+
+### Automated release (`bin/release`)
+
+`bin/release` runs the flow above as one script, so the sdlc supervisor can release once every task of a feature
+passed QA on dev; the manual steps stay valid. Every write goes through it, and `--dry-run` prints them as
+`dry run: <command>` and runs only the read-only checks.
+
+- `RELEASE_CARD=<KEY>-<n> bin/release prep`: the version is `scripts/next-version.sh origin/develop`, never typed.
+  It moves the `[Unreleased]` entries into `## [X.Y.Z] - <today>` on `feature/<KEY>-<n>-release-X-Y-Z` and opens
+  the release-prep PR `<KEY>-<n>: Release X.Y.Z changelog` (`Type: docs`) into `develop`; it does not merge it.
+- `bin/release ship vX.Y.Z`, once that PR is merged: checks that `develop` is the release-prep commit D and that
+  `scripts/next-version.sh` gives `X.Y.Z`, that the `RUNS_ON` variable pins a runner image (not `*latest*`), then
+  `bin/wait-dev-deploy D` → release PR `<KEY>-<n>: Release vX.Y.Z` into `main` (checks green, merge commit) →
+  annotated tag `vX.Y.Z` on D and its green `Release` run → with `RELEASE_MIRROR_REPO`, the mirror publish
+  (`PUBLISH_MIRROR`, dry run first) → `Kamal Deploy` (`-f source_sha=D` on the mirror, `-f target=` the active
+  prod target when the workflow takes one) and its `release-watch` → smoke: `/health` reports `release` D →
+  e2e: `SMOKE_READ_ONLY=1 bin/swagger_smoke` against prod → the draft Release is published. Prints
+  `shipped: vX.Y.Z D`.
+- `bin/release rollback vX.Y.Z`: `Kamal Manage` rollback to that tag's commit, proven by `/health`. Nothing is
+  deleted and no migration runs backwards.
+
+A red (or failed dispatch of the) `Kamal Deploy` run, smoke or e2e prints `red: vX.Y.Z D <release-watch|smoke|e2e> <url>` and rolls back to
+the previous release tag. When the release adds a migration under `db/migrate/` that the previous code cannot run
+on (a contract step of `.claude/rules/migrations.md`: removing, renaming or retyping a column or table, also inside
+`change_table`, raw SQL `DROP`/`RENAME`/`ALTER COLUMN` in a migration that calls `execute`, or
+`IrreversibleMigration`), it prints `no auto-rollback: irreversible migration <files>` and rolls
+nothing back: a person decides.
+
+| Exit | Meaning |
+|---|---|
+| 0 | done (`prep: <KEY>-<n> X.Y.Z #<pr>`, `shipped: vX.Y.Z D`, `rolled back: vX.Y.Z <sha>`) |
+| 1 | a precondition or a step before the prod deploy failed; prod untouched |
+| 3 | red after the deploy; rolled back to the previous tag and `/health` proves it |
+| 4 | red after the deploy and an irreversible migration: nothing rolled back, escalate |
+| 5 | red after the deploy and the rollback did not verify (or no previous tag): escalate |
+| 64 | usage |
+
+Env: `RELEASE_MIRROR_REPO` (owner/name of the public mirror, default none), `PUBLISH_MIRROR` (default
+`~/projects/mvp/1_mvp_sdlc/scripts/publish-mirror.sh`), `PROD_ACTIVE_TARGET` (`aws` or `srv`, default detected
+from public DNS), `RELEASE_CHECKS_TIMEOUT` (1200 s), `RELEASE_POLL_INTERVAL` (30 s).
 
 ## Board flow
 
@@ -129,6 +170,7 @@ Check each item once on a fresh repository rendered from the template.
 - [ ] Workflow `ai-review` (off unless `AI_REVIEW` is `on`)
 - [ ] Release tooling `scripts/next-version.sh`, `scripts/release-notes.sh`, `deploy/release_watch.sh`,
       `deploy/glitchtip_issues.sh`, `bin/sdlc-metrics`
+- [ ] Automated release `bin/release` (`prep`, `ship`, `rollback`; covered by `spec/deploy/release_script_spec.rb`)
 - [ ] `CHANGELOG.md` skeleton with an empty `[Unreleased]`
 - [ ] Pre-push hook `.githooks/pre-push` (published tags never moved or deleted)
 - [ ] `.claude/settings.json` (plugins `sdlc` and `mvp-sdlc` with their hooks, `permissions.deny`)

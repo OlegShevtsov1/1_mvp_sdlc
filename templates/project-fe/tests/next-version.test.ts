@@ -89,7 +89,7 @@ describe('scripts/next-version.sh', () => {
     squash('APP-3: Document login (#4)', 'Type: docs')
     squash('APP-0: CI tweak (#5)', 'Type: ci')
     const result = nextVersion()
-    expect(result.status).toBe(1)
+    expect(result.status).toBe(3)
     expect(result.stderr).toContain('nothing to release since v0.1.0')
   })
 

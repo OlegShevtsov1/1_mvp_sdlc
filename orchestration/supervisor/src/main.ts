@@ -13,6 +13,9 @@ import { launchPostMerges, parseSince, type PostMergeDeps, postMergeCutoff, real
 import { decide, gateRules } from "./policy.ts";
 import { afterQaAnswer } from "./qa.ts";
 import { inFlight, nextTasks, type QueueDeps, realQueueDeps, startQueued } from "./queue.ts";
+import {
+  afterQaProdAnswer, qaProdViews, realQaProdDeps, refreshReleases, RELEASE_WORKFLOW, releaseArgv, releaseRule, respondQaProd,
+} from "./release.ts";
 import { activeRuns, type Host, limits, readHost } from "./resources.ts";
 import { OPEN_STATUSES, type RunView, readRuns } from "./runs.ts";
 import {
@@ -33,9 +36,14 @@ const HOUSEKEEPING_MS = 24 * 60 * 60 * 1000;
 const OPERATOR_TEXT = "Відповідь оператора в Telegram (sdlc-autopilot).";
 const STAGE_WORKFLOW = "sdlc-stage";
 
-// A stage PR view is answered by the supervisor itself; every other pause by `archon workflow respond`.
+// A stage PR view and a QA prod card are answered by the supervisor itself; every other pause by
+// `archon workflow respond`.
 const respondAny = (run: RunView, d: Decision) =>
-  run.workflow === STAGE_WORKFLOW ? respondStage(run, d, realIntakeDeps) : respond(run, d);
+  run.workflow === STAGE_WORKFLOW
+    ? respondStage(run, d, realIntakeDeps)
+    : run.workflow === RELEASE_WORKFLOW
+    ? respondQaProd(run, d, realQaProdDeps)
+    : respond(run, d);
 
 export function loadPolicy(path: string): Policy {
   const p = Bun.YAML.parse(readFileSync(path, "utf8")) as (Partial<Policy> & { post_merge?: unknown }) | null;
@@ -48,8 +56,12 @@ export function loadPolicy(path: string): Policy {
   };
   transientRule(policy);
   gateRules(policy.rules);
+  releaseRule(policy.rules);
   return policy;
 }
+
+// The argv a queued brief launches as: an SDLC stage, a release step, otherwise null for a factory run.
+export const queueStage: NonNullable<QueueDeps["stage"]> = (t, started) => stageArgv(t, started) ?? releaseArgv(t, started);
 
 export async function tick(deps: {
   db: Database;
@@ -62,6 +74,7 @@ export async function tick(deps: {
   queue?: QueueDeps;
   telegram?: TelegramDeps;
   intake?: IntakeDeps;
+  release?: IntakeDeps;
 }): Promise<RunView[]> {
   let decided = 0;
   const now = (deps.now ?? (() => new Date()))();
@@ -118,6 +131,9 @@ export async function tick(deps: {
     decided += launchPostMerges(deps.db, recent, deps.postMerge, postMergeCutoff(deps.policy, now), active);
   }
   const open = [...recent.filter((r) => OPEN_STATUSES.includes(r.status)), ...queued.views, ...stages.views];
+  // Before the queue, so a release brief written or rewritten this tick is the one it launches.
+  const releases = releaseRule(deps.policy.rules);
+  if (deps.release && releases) decided += await refreshReleases(deps.release, releases);
   if (deps.queue) decided += queued.written + startQueued(active, open, deps.queue);
 
   // Operator answers arrive through `listenLoop`; the tick sends escalations and closes messages answered elsewhere.
@@ -125,7 +141,10 @@ export async function tick(deps: {
   if (deps.telegram) {
     try {
       // Read again: launches and the queue take seconds, and a pause answered meanwhile must not get live buttons.
-      const live = [...readRuns(deps.db, POST_MERGE_HISTORY_HOURS), ...(deps.intake ? stageViews() : [])];
+      const live = [
+        ...readRuns(deps.db, POST_MERGE_HISTORY_HOURS), ...(deps.intake ? stageViews() : []),
+        ...(deps.release ? qaProdViews() : []),
+      ];
       const sent = await deps.telegram.notifyEscalations(live, deps.db);
       if (sent > 0) console.log(`sdlc-autopilot: ${sent} escalation(s) sent to Telegram`);
     } catch (e) {
@@ -173,10 +192,12 @@ function operatorPress(
     console.log(`sdlc-autopilot: operator ${a.action} for ${run.id} written to the ledger`);
     const followUp = pause.kind === "qa-dev"
       ? await afterQaAnswer(run, pause, a.action, text)
+      : pause.kind === "qa-prod"
+      ? await afterQaProdAnswer(run, a.action)
       : run.workflow === STAGE_WORKFLOW ? stageNote(run.id) : "";
     await telegram.closeAnswer(a, [resolvedLine(a.action, true), followUp].filter(Boolean).join("\n"));
   };
-  return { toast: pressToast(a.action), act };
+  return { toast: pressToast(a.action, pause.kind), act };
 }
 
 type ListenDeps = {
@@ -231,7 +252,7 @@ if (import.meta.main) {
   const recentRuns = () => {
     const db = new Database(dbPath, { readonly: true });
     try {
-      return [...readRuns(db, POST_MERGE_HISTORY_HOURS), ...stageViews()];
+      return [...readRuns(db, POST_MERGE_HISTORY_HOURS), ...stageViews(), ...qaProdViews()];
     } finally {
       db.close();
     }
@@ -251,8 +272,9 @@ if (import.meta.main) {
       const db = new Database(dbPath, { readonly: true });
       try {
         open = await tick({
-          db, policy, respond: respondAny, postMerge: realPostMergeDeps, queue: { ...realQueueDeps, stage: stageArgv },
-          telegram: realTelegramDeps, intake: realIntakeDeps,
+          db, policy, respond: respondAny, postMerge: realPostMergeDeps,
+          queue: { ...realQueueDeps, stage: queueStage },
+          telegram: realTelegramDeps, intake: realIntakeDeps, release: realIntakeDeps,
         });
       } finally {
         db.close();

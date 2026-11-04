@@ -7,8 +7,8 @@
 #        scripts/next-version.sh --previous-tag [<rev>]  prints the previous release tag, or nothing
 # The previous tag is the highest vX.Y.Z merged into <rev> that does not point at <rev> itself, so
 # the answer is the same before tagging and on the tagged commit.
-# Exit 0: printed. Exit 1: a commit without exactly one valid Type: line, or nothing to release.
-# Exit 2: bad usage.
+# Exit 0: printed. Exit 1: a commit without exactly one valid Type: line. Exit 2: bad usage.
+# Exit 3: nothing to release (only chore, docs, refactor, test and ci since the previous tag).
 set -euo pipefail
 
 mode=next
@@ -66,6 +66,6 @@ case $bump in
   patch) echo "$major.$minor.$((patch + 1))" ;;
   none)
     echo "next-version: nothing to release since $previous (only chore/docs/refactor/test/ci)" >&2
-    exit 1
+    exit 3
     ;;
 esac

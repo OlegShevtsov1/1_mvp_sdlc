@@ -290,10 +290,13 @@ export function buttonLabel(action: RespondAction, e: Escalation): string {
   if (action === "approve" && isCheckout(e)) return "✅ Готово";
   if (action === "approve" && e.kind === "pr-approve") return "✅ Апрув";
   if (action === "reject" && e.kind === "qa-dev") return "↩️ Є зауваження";
+  if (action === "ok" && e.kind === "qa-prod") return "✅ OK";
+  if (action === "reject" && e.kind === "qa-prod") return "↩️ Reject";
   return LABELS[action];
 }
 
-export function pressToast(action: RespondAction): string {
+export function pressToast(action: RespondAction, kind = ""): string {
+  if (action === "reject" && kind === "qa-prod") return "↩️ Відкочую prod і ставлю fix-задачу";
   return TOASTS[action];
 }
 

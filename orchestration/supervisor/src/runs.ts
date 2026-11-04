@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-export type PauseKind = "plan-gate" | "install-gate" | "post-merge-gate" | "pr-approve" | "qa-dev" | "other";
+export type PauseKind = "plan-gate" | "install-gate" | "post-merge-gate" | "pr-approve" | "qa-dev" | "qa-prod" | "other";
 
 export type RunView = {
   id: string;

@@ -24,6 +24,41 @@ empty categories. Release-prep runs `scripts/changelog.sh release X.Y.Z`, which 
 
 ### Security
 
+## [0.11.0] - 2026-11-03
+
+### Added
+
+- Project templates: `bin/release` in be and fe runs a release with no hand-typed step. `prep` opens the
+  release-prep PR with the version from `scripts/next-version.sh`; `ship v<X.Y.Z>` merges the release PR, tags,
+  publishes to the mirror when one is set, deploys prod on the active target, waits for release-watch, checks smoke
+  and e2e against prod and prints `shipped: v<X.Y.Z> <sha>`; a red result rolls back to the previous tag with Kamal
+  Manage (exit 3), except over an irreversible be migration (exit 4, escalate); fe waits for
+  `deploy/min-be-version` on prod first; `rollback v<X.Y.Z>` rolls back by hand (PILOT-612).
+- sdlc supervisor: once every task card of a `/task` feature is in Ready to Release (QA dev OK), the supervisor
+  releases it with no operator step: be first, then fe after be shipped, each with its own release card and
+  `bin/release` prep, a squash merge of the green release-prep PR and `ship`. Features ready at about the same time
+  go into one release; a red release escalates, and a rollback, an irreversible migration, a failed rollback or a
+  release-prep PR merged without its tag holds every automatic release until the operator closes it. Turned on by
+  the `release` rule in `policy.yaml` (PILOT-613).
+- fe template: `scripts/next-version.sh` exits 3, as be's does, when there is nothing to release since the
+  previous tag (it exited 1, like a commit without a valid `Type:` line) (PILOT-613).
+- sdlc supervisor: a shipped release sends the QA prod card «На prod» to Telegram, with each repo's prod link and
+  version and the prod screenshots of its changed `qa_dev` pages. `✅ OK` records the answer in the ledger and moves
+  the release's task, feature and release cards to Done; `↩️ Reject` rolls prod back to the tags before the release
+  (`bin/release rollback`, fe then be) and queues one fix brief linked to the release. A release with an irreversible
+  migration, or without a known previous tag, is never rolled back: the supervisor escalates and says why. No new
+  release starts while one waits for this answer (PILOT-614).
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
 ## [0.10.0] - 2026-11-02
 
 ### Added

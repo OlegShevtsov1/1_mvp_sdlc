@@ -10,6 +10,7 @@ import { nextTasks, type QueueDeps } from "../src/queue.ts";
 import { readRuns, type RunView } from "../src/runs.ts";
 import { digest, realTelegramDeps } from "../src/telegram.ts";
 import { HINT, type IntakeDeps, respondStage, stageViews, taskCommand } from "../src/intake.ts";
+import { qaProdViews, readReleases, refreshReleases, type Release, respondQaProd } from "../src/release.ts";
 import {
   type Evidence, FILES, qaMessage, WAIT_NODE,
 } from "../../factory/.archon/workflows/sdlc-factory/factory/scripts/_lib/qa-evidence.ts";
@@ -40,6 +41,8 @@ type Fake = {
   failMedia?: boolean;
   // Requests to the fake Trello API under /1/.
   trello: TrelloRequest[];
+  // The board's cards, card #900 alone by default.
+  board?: Record<string, unknown>[];
 };
 
 let dir: string;
@@ -139,11 +142,13 @@ async function trello(req: globalThis.Request): Promise<Response> {
   const card = { id: "card-900", idShort: 900, idBoard: "board-id", idList: "list-test" };
   if (url.pathname === "/1/cards/AbCd1234") return Response.json(card);
   if (url.pathname === "/1/boards/board-1") return Response.json({ id: "board-id" });
-  if (url.pathname === "/1/boards/board-1/cards") return Response.json([card]);
+  if (url.pathname === "/1/boards/board-1/cards") return Response.json(fake.board ?? [card]);
   if (url.pathname === "/1/boards/board-1/lists") {
-    return Response.json([{ id: "list-test", name: "Test" }, { id: "list-rtr", name: "Ready to Release" }]);
+    return Response.json([
+      { id: "list-test", name: "Test" }, { id: "list-rtr", name: "Ready to Release" }, { id: "list-done", name: "Done" },
+    ]);
   }
-  if (req.method === "PUT" && url.pathname === "/1/cards/card-900") return Response.json(card);
+  if (req.method === "PUT" && url.pathname.startsWith("/1/cards/")) return Response.json(card);
   return new Response("not found", { status: 404 });
 }
 
@@ -1031,10 +1036,11 @@ describe("telegram", () => {
     await until(() => sent("editMessageText").length > 0);
     expect(calls).toEqual([[POST_MERGE_RUN, "approve"]]);
 
+    // The loop may see `stopped` before it polls again, or hold a poll that only a wake ends.
     stopped = true;
-    await until(() => fake.waiters.length > 0);
-    wake();
-    await loop;
+    let ended = false;
+    void loop.then(() => (ended = true));
+    await until(() => (wake(), ended));
     expect(sent("getUpdates").every((r) => r.body.timeout === 25)).toBe(true);
     // A quiet poll is held 25 s by Telegram, so its HTTP deadline must outlast it.
     expect(Math.max(...deadline.mock.calls.map(([ms]) => ms))).toBeGreaterThan(25_000);
@@ -1182,4 +1188,203 @@ describe("/task", () => {
     expect(String(sent("editMessageText")[0].body.text))
       .toEndWith("✅ Вирішено: прийнято (кнопкою)\n📥 Наступна стадія architecture у черзі 1_mvp_pilot_be.");
   });
+});
+
+describe("qa-prod card", () => {
+  const BE = "1_mvp_pilot_be";
+  const FE = "1_mvp_pilot_fe";
+  const BE_SHA = "1111111111111111111111111111111111111111";
+  const FE_SHA = "2222222222222222222222222222222222222222";
+  const STARTED = "stage-00000000-0000-4000-8000-00000000000a--sdlc-release.1.1.md";
+  const RULE = { mirrorOwner: "OlegShevtsov1" };
+  const release: IntakeDeps = { exec: () => ({ code: 0, stdout: "", stderr: "" }) };
+  let launches: string[][];
+  const state = () => join(dir, "state");
+  const source = (repo: string) => join(dir, "archon", "workspaces", "OlegShevtsov1", repo, "source");
+  const job = () => join(state(), "rollbacks", "release-1.json");
+  const fix = () => join(dir, "queue", FE, "fix-release-1.md");
+  const release1 = () => readReleases().releases[0];
+
+  // Release 1 of PILOT-901 (tasks PILOT-902 on be, PILOT-903 on fe): be shipped v0.5.0 over v0.4.0, and fe's launch
+  // just finished shipping v0.6.0 over v0.5.0 with one prod screenshot. One tick later the card is out.
+  async function shipped(be: Partial<Release["steps"][number]> = {}): Promise<Database> {
+    for (const repo of [BE, FE]) {
+      mkdirSync(join(source(repo), ".archon"), { recursive: true });
+      writeFileSync(join(source(repo), ".archon", "factory-profile.yaml"), "repo:\n  base_branch: develop\n");
+    }
+    mkdirSync(state(), { recursive: true });
+    writeFileSync(join(state(), "releases.json"), JSON.stringify({ releases: [{
+      id: 1, state: "open", features: ["PILOT-901"], tasks: ["PILOT-902", "PILOT-903"], repos: [BE, FE],
+      created: "2026-11-03T00:00:00.000Z", steps: [
+        {
+          repo: BE, card: "PILOT-950", cardId: "card-950", attempt: 1, state: "shipped", version: "0.5.0", sha: BE_SHA,
+          mirror: `OlegShevtsov1/${BE}`, previous: "v0.4.0", irreversible: [], url: "https://pilot.example.test/health",
+          shots: [], shotsTotal: 0, ...be,
+        },
+        { repo: FE, card: "PILOT-951", cardId: "card-951", attempt: 1, state: "queued", mirror: `OlegShevtsov1/${FE}` },
+      ],
+    }] }));
+    const started = join(dir, "queue", "started", FE, STARTED);
+    mkdirSync(`${started}.shots`, { recursive: true });
+    writeFileSync(`${started}.shots/1-app-1440.png`, new Uint8Array([137, 80, 78, 71]));
+    writeFileSync(started, "brief");
+    writeFileSync(`${started}.result.json`, JSON.stringify({
+      exit: 0, finished_at: "2026-11-03T01:00:00Z", error: "", version: "0.6.0", lines: [`shipped: v0.6.0 ${FE_SHA}`],
+      previous: "v0.5.0", irreversible: [], url: "https://app.pilot.example.test/", shotsTotal: 1,
+      shots: [{ page: "https://app.pilot.example.test/", width: 1440, path: `${started}.shots/1-app-1440.png` }],
+    }));
+    launches = [];
+    const db = fixtureDb();
+    await tick({ db, policy: loadPolicy(POLICY), respond, telegram: realTelegramDeps, release });
+    return db;
+  }
+
+  const answer = (db: Database) => listen({
+    runs: () => [...runsOf(db)(), ...qaProdViews()],
+    respond: (run, d) => respondQaProd(run, d, { launch: (argv) => void launches.push(argv) }),
+    telegram: realTelegramDeps, status: () => "", pollSeconds: 0,
+  });
+  const card = () => sent("sendMessage").find((r) => String(r.body.text).startsWith("🟡 <b>На prod"));
+
+  test("ok closes cards", async () => {
+    const db = await shipped();
+    expect(sent("sendMediaGroup")).toHaveLength(1);
+    expect(sent("sendMediaGroup")[0].body).toMatchObject({
+      files: ["shot0"], media: [{ type: "photo", media: "attach://shot0", caption: "https://app.pilot.example.test/ · 1440px" }],
+    });
+    const sentCard = card();
+    expect(sentCard?.body.reply_parameters).toMatchObject({ message_id: 900 });
+    const text = String(sentCard?.body.text);
+    expect(text).toStartWith("🟡 <b>На prod: реліз 1 (PILOT-901)</b>\n");
+    expect(text).toContain(
+      '<a href="https://pilot.example.test/health">be v0.5.0</a> · <a href="https://app.pilot.example.test/">fe v0.6.0</a>');
+    expect(text).toContain("<b>Що сталося:</b> реліз задеплоєно на prod, smoke і e2e зелені (be v0.5.0 1111111, fe v0.6.0 2222222).");
+    expect(text).toContain("Скриншоти (1) — вище.");
+    expect(keyboard(sentCard)).toEqual([
+      { text: "✅ OK", callback_data: "ok" }, { text: "↩️ Reject", callback_data: "reject" },
+    ]);
+    expect(lines().filter((l) => l.action === "escalate")).toMatchObject([{ run_id: "release:1", kind: "qa-prod", rule: "qa-prod" }]);
+
+    fake.board = [901, 902, 903, 950, 951].map((n) => ({ id: `card-${n}`, idShort: n, idList: n === 901 ? "list-done" : "list-rtr" }));
+    const id = messageOf("На prod");
+    press(id, "ok");
+    press(id, "ok");
+    await answer(db);
+    expect(toasts()).toEqual(["✅ Прийнято", "Це питання вже вирішене"]);
+    expect(fake.trello.filter((r) => r.method === "PUT").map((r) => [r.path, r.body])).toEqual(
+      [902, 903, 950, 951].map((n) => [`/1/cards/card-${n}`, { idList: "list-done" }]));
+    expect(operatorLines()).toMatchObject([{ run_id: "release:1", kind: "qa-prod", action: "ok", evidence: { event_id: "release:1@qa-prod" } }]);
+    expect(release1()).toMatchObject({ state: "shipped", qa: "ok" });
+    expect(String(sent("editMessageText")[0].body.text)).toEndWith(
+      "✅ Вирішено: прийнято (кнопкою)\n🗂 Картки PILOT-901, PILOT-902, PILOT-903, PILOT-950, PILOT-951 перенесено в Done.");
+    expect(launches).toEqual([]);
+  });
+
+  test("ok whose card move fails escalates qa-prod-trello", async () => {
+    const db = await shipped();
+    process.env.SDLC_AUTOPILOT_TRELLO_ENV = join(dir, "missing.env");
+    press(messageOf("На prod"), "ok");
+    await answer(db);
+    expect(fake.trello).toEqual([]);
+    expect(lines().at(-1)).toMatchObject({ run_id: "release:1", kind: "qa-prod", rule: "qa-prod-trello", action: "escalate" });
+    expect(lines().at(-1)?.evidence.message).toStartWith("Реліз 1 прийнято на prod, але картки PILOT-901, PILOT-902");
+    expect(String(sent("editMessageText")[0].body.text)).toContain("⚠️ Картки не перенесено в Done — надіслано окреме повідомлення.");
+
+    await tick({ db, policy: loadPolicy(POLICY), respond, telegram: realTelegramDeps, release });
+    const alert = sent("sendMessage").at(-1);
+    expect(String(alert?.body.text)).toContain("<b>Що сталося:</b> Реліз 1 прийнято на prod, але картки");
+    expect(keyboard(alert)).toEqual([]);
+  });
+
+  test("reject rolls back and queues a fix", async () => {
+    const db = await shipped();
+    press(messageOf("На prod"), "reject");
+    await answer(db);
+    expect(toasts()).toEqual(["↩️ Напиши відповіддю, що змінити"]);
+    expect(launches).toEqual([]);
+    reply("кнопка «Вийти» зникла", 101);
+    await answer(db);
+
+    expect(launches).toEqual([["bun", expect.stringMatching(/\/src\/release-run\.ts$/), "rollback", job()]]);
+    expect(JSON.parse(readFileSync(job(), "utf8"))).toEqual({
+      release: 1, steps: [
+        { repo: FE, source: source(FE), base: "develop", card: "PILOT-951", mirror: `OlegShevtsov1/${FE}`, to: "v0.5.0" },
+        { repo: BE, source: source(BE), base: "develop", card: "PILOT-950", mirror: `OlegShevtsov1/${BE}`, to: "v0.4.0" },
+      ],
+    });
+    const brief = readFileSync(fix(), "utf8");
+    expect(brief).toStartWith("Fix for PILOT-901: кнопка «Вийти» зникла\n");
+    expect(brief).toContain("Release: 1\n");
+    expect(brief).toContain(`Shipped: ${BE} v0.5.0 ${BE_SHA} https://pilot.example.test/health (release card PILOT-950)\n`);
+    expect(brief).toContain(`Shipped: ${FE} v0.6.0 ${FE_SHA} https://app.pilot.example.test/ (release card PILOT-951)\n`);
+    expect(brief).toContain("Rollback: fe → v0.5.0, be → v0.4.0\n");
+    expect(brief).toContain(`If the cause is in ${BE}, say so in the plan.`);
+    expect(nextTasks()).toMatchObject([{ card: "PILOT-901", repo: `OlegShevtsov1/${FE}`, briefFile: fix() }]);
+    expect(release1()).toMatchObject({ state: "stopped", qa: "reject", fix: `${FE}/fix-release-1.md`, rollback: { state: "running" } });
+    expect(operatorLines()).toMatchObject([{ run_id: "release:1", kind: "qa-prod", action: "reject" }]);
+    expect(String(sent("editMessageText")[0].body.text)).toEndWith(
+      "✅ Вирішено: повернуто на доопрацювання (кнопкою)\n⏪ Відкат prod запущено: fe → v0.5.0, be → v0.4.0.\n" +
+      `📥 Fix-задачу поставлено в чергу: ${FE}/fix-release-1.md`);
+    expect(qaProdViews()).toEqual([]);
+
+    expect(await refreshReleases(release, RULE)).toBe(0);
+    writeFileSync(`${job()}.result.json`, JSON.stringify({
+      exit: 0, finished_at: "x", error: "", lines: [`rolled back: v0.5.0 ${FE_SHA}`, `rolled back: v0.4.0 ${BE_SHA}`],
+    }));
+    expect(await refreshReleases(release, RULE)).toBe(1);
+    expect(await refreshReleases(release, RULE)).toBe(0);
+    expect(release1().rollback).toEqual({ state: "done" });
+    const done = lines().filter((l) => l.rule === "qa-prod-rolled-back");
+    expect(done).toHaveLength(1);
+    expect(done[0].evidence.message).toContain("rolled back: v0.5.0 [REDACTED]; rolled back: v0.4.0 [REDACTED]");
+
+    const again = readReleases();
+    again.releases[0].rollback = { state: "running" };
+    writeFileSync(join(state(), "releases.json"), JSON.stringify(again));
+    writeFileSync(`${job()}.result.json`, JSON.stringify({ exit: 1, error: `${FE}: bin/release rollback v0.5.0 завершився з кодом 1`, lines: [] }));
+    await refreshReleases(release, RULE);
+    expect(release1().rollback).toEqual({ state: "failed" });
+    const failed = lines().filter((l) => l.rule === "qa-prod-rollback-failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0].evidence.message).toContain("стан prod невідомий");
+    expect(failed[0].evidence.message).toContain("rollback.release-1.log");
+  });
+
+  test("reject on irreversible migration escalates instead of rolling back", async () => {
+    const db = await shipped({ irreversible: ["db/migrate/20261101_drop_x.rb"] });
+    press(messageOf("На prod"), "reject");
+    await answer(db);
+    reply("падає оплата", 101);
+    await answer(db);
+
+    expect(launches).toEqual([]);
+    expect(existsSync(job())).toBe(false);
+    const refused = lines().filter((l) => l.rule === "qa-prod-no-rollback");
+    expect(refused).toMatchObject([{ run_id: "release:1", kind: "qa-prod", action: "escalate" }]);
+    expect(refused[0].evidence.message).toContain("db/migrate/20261101_drop_x.rb");
+    expect(refused[0].evidence.message).toContain("Prod лишився на новому релізі, нічого не відкочено");
+    expect(readFileSync(fix(), "utf8")).toStartWith("Fix for PILOT-901: падає оплата\n");
+    expect(release1()).toMatchObject({ state: "stopped", qa: "reject", rollback: { state: "refused" } });
+    expect(String(sent("editMessageText")[0].body.text)).toContain("⚠️ Автовідкату не буде — надіслано окреме повідомлення.");
+  });
+
+  for (const [name, previous, why] of [
+    ["an unknown previous tag", undefined, "bin/release не назвав попередній тег"],
+    ["a first release", "", "це перший реліз, попереднього тегу немає"],
+  ] as const) {
+    test(`reject on ${name} escalates instead of rolling back`, async () => {
+      const db = await shipped({ previous });
+      press(messageOf("На prod"), "reject");
+      await answer(db);
+      reply("падає оплата", 101);
+      await answer(db);
+
+      expect(launches).toEqual([]);
+      expect(existsSync(job())).toBe(false);
+      const refused = lines().filter((l) => l.rule === "qa-prod-no-rollback");
+      expect(refused).toMatchObject([{ run_id: "release:1", kind: "qa-prod", action: "escalate" }]);
+      expect(refused[0].evidence.message).toContain(why);
+      expect(release1()).toMatchObject({ state: "stopped", qa: "reject", rollback: { state: "refused" } });
+    });
+  }
 });

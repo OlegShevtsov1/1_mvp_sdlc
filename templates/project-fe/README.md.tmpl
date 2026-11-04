@@ -184,6 +184,45 @@ A hotfix branch `hotfix/<KEY>-<n>-<slug>` from `main` goes by PR into `main` wit
 `## [X.Y.Z]` section, is tagged and deployed the same way, then back-merged into `develop` with a
 merge commit. Published tags are never moved or deleted.
 
+### Automated release (`bin/release`)
+
+`bin/release` runs the flow above as one script, so the sdlc supervisor can release once every task of a feature
+passed QA on dev; the manual steps stay valid. Every write goes through it, and `--dry-run` prints them as
+`dry run: <command>` and runs only the read-only checks. The tag goes on D, the release-prep commit that Dev Deploy
+built (`main^2` after the release merge), so prod serves `prod-sha-<D>`.
+
+- `RELEASE_CARD=<KEY>-<n> bin/release prep`: the version is `scripts/next-version.sh origin/develop`, never typed.
+  It moves the `[Unreleased]` entries into `## [X.Y.Z] - <today>` (the `Minimum backend version:` line stays in both
+  sections) on `feature/<KEY>-<n>-release-X-Y-Z` and opens the release-prep PR `<KEY>-<n>: Release X.Y.Z changelog`
+  (`Type: docs`) into `develop`; it does not merge it.
+- `bin/release ship vX.Y.Z`, once that PR is merged: checks that `develop` is D, the release-prep commit, that
+  `scripts/next-version.sh` gives `X.Y.Z`, and that the `RUNS_ON` variable pins a runner image (not `*latest*`);
+  then waits, polling `deploy/be_version_check.sh`, until the backend on prod has the `deploy/min-be-version` of D
+  (release order is backend first; nothing is written while it waits) → `bin/wait-dev-deploy D` → release PR
+  `<KEY>-<n>: Release vX.Y.Z` into `main` (checks green, merge commit) → annotated tag `vX.Y.Z` on D and its green
+  `Release` run → with `RELEASE_MIRROR_REPO`, the mirror publish (`PUBLISH_MIRROR`, dry run first) →
+  `Kamal Deploy` (`-f source_sha=D` on the mirror, `-f target=` the active prod target when the workflow takes one)
+  and its `release-watch` → smoke: `https://app.{{PROJECT_ZONE}}/config.js` has `APP_VERSION: "prod-sha-<D>"` and
+  `ENV_NAME: "prod"` → e2e: `E2E_BASE_URL=https://app.{{PROJECT_ZONE}} E2E_ENV_NAME=prod npm run e2e` → the draft
+  Release is published. Prints `shipped: vX.Y.Z D`.
+- `bin/release rollback vX.Y.Z`: `Kamal Manage` rollback to that tag's commit, proven by `/config.js`.
+
+A red (or failed dispatch of the) `Kamal Deploy` run, smoke or e2e prints `red: vX.Y.Z D <release-watch|smoke|e2e> <url>` and rolls back to
+the previous release tag.
+
+| Exit | Meaning |
+|---|---|
+| 0 | done (`prep: <KEY>-<n> X.Y.Z #<pr>`, `shipped: vX.Y.Z D`, `rolled back: vX.Y.Z <sha>`) |
+| 1 | a precondition or a step before the prod deploy failed; prod untouched |
+| 3 | red after the deploy; rolled back to the previous tag and `/config.js` proves it |
+| 5 | red after the deploy and the rollback did not verify (or no previous tag): escalate |
+| 64 | usage |
+| 75 | `deploy/be_version_check.sh` still refuses the backend on prod for `deploy/min-be-version` after `RELEASE_BE_WAIT` (its last message says why); nothing written, retry |
+
+Env: `RELEASE_MIRROR_REPO` (owner/name of the public mirror, default none), `PUBLISH_MIRROR` (default
+`~/projects/mvp/1_mvp_sdlc/scripts/publish-mirror.sh`), `PROD_ACTIVE_TARGET` (`aws` or `srv`, default detected
+from public DNS), `RELEASE_BE_WAIT` (3600 s), `RELEASE_CHECKS_TIMEOUT` (1200 s), `RELEASE_POLL_INTERVAL` (30 s).
+
 ## Template inventory
 
 Tick each item once it is checked on this repository.
@@ -207,6 +246,7 @@ Tick each item once it is checked on this repository.
 - [ ] Workflow `release`
 - [ ] Workflow `tdd-check`
 - [ ] Release tooling (`scripts/next-version.sh`, `scripts/release-notes.sh`, `scripts/release-check.sh`, `bin/sdlc-metrics`)
+- [ ] Automated release `bin/release` (`prep`, `ship`, `rollback`; covered by `tests/release-script.test.ts`)
 - [ ] `CHANGELOG.md` skeleton
 - [ ] Pre-push hook `scripts/git-hooks/pre-push`
 - [ ] `.claude/settings.json` and `.claude/rules/`

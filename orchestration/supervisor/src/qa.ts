@@ -13,7 +13,7 @@ import { obj, objs, trello } from "./trello.ts";
 // The most screenshots one card sends (E3 Global Constraints); Telegram's media group takes 2 to 10.
 export const MAX_SHOTS = 6;
 // Decision 53's list for work checked on dev that waits for the release; the factory's profile lists do not rename it.
-const READY_TO_RELEASE = "Ready to Release";
+export const READY_TO_RELEASE = "Ready to Release";
 const SHA = /^[0-9a-f]{40}$/;
 const LINKABLE = /^https:\/\/[^\s"<>]+$/;
 const CARD_LINK = /https?:\/\/(?:www\.)?trello\.com\/c\/([A-Za-z0-9]{8})(?![A-Za-z0-9])/;
@@ -33,7 +33,7 @@ const isShot = (s: unknown): s is Shot => {
   return typeof o?.page === "string" && typeof o.width === "number" && typeof o.path === "string";
 };
 
-function inside(path: string, dir: string): boolean {
+export function inside(path: string, dir: string): boolean {
   try {
     return path.endsWith(".png") && realpathSync(path).startsWith(`${realpathSync(dir)}${sep}`);
   } catch {
@@ -60,8 +60,8 @@ export function readEvidence(runId: string, repo: string, pauseText: string): { 
   return { total: doc.shots.length, shots: shots as Shot[] };
 }
 
-function shotsLine(note: ShotsNote): string {
-  if (note === "none") return "Скриншотів немає: PR не змінив сторінок із профілю.";
+function shotsLine(note: ShotsNote, none = "PR не змінив сторінок із профілю"): string {
+  if (note === "none") return `Скриншотів немає: ${none}.`;
   if (note === "unreadable") return "⚠️ Скриншоти не вдалося прочитати.";
   if (note === "failed") return "⚠️ Скриншоти не вдалося надіслати.";
   if (note === "omitted") return "";
@@ -187,4 +187,36 @@ export async function afterQaAnswer(run: RunView, pause: Pause, action: RespondA
   escalate("qa-dev-fix", `Зауваження до ${card ?? "задачі"} передано прогону, але fix-задачу не поставлено в чергу: ` +
     `${failure}. Текст зауваження: ${text} — потрібне рішення оператора.`);
   return "⚠️ Fix-задачу не поставлено в чергу — надіслано окреме повідомлення.";
+}
+
+// One `Shipped: <repo> v<X.Y.Z> <sha> <url> previous <tag>` line of a QA prod pause.
+const SHIPPED_LINE = /^Shipped: (\S+) (v\d+\.\d+\.\d+) (\S+) (\S+) previous (\S+)$/;
+
+// The shipped release's QA prod wait as a card «На prod»; undefined unless its text names a shipped repo, so it reads
+// as any other escalation. A failed respond re-escalates the same pause under rule `operator`, and that is still a
+// card. `text` is the open pause's: the ledger's copy has the shas redacted.
+export function renderQaProdCard(e: Escalation, view: { text: string; shots: ShotsNote }): string | undefined {
+  const shipped = view.text.split("\n").flatMap((l) => {
+    const m = l.match(SHIPPED_LINE);
+    return m ? [{ repo: m[1].replace(/^.*_/, ""), version: m[2], sha: m[3], url: m[4] }] : [];
+  });
+  if (e.kind !== "qa-prod" || (e.rule !== "qa-prod" && e.rule !== "operator") || shipped.length === 0) return undefined;
+  const id = field(view.text, "Release");
+  const label = (s: (typeof shipped)[number]) => `${s.repo} ${s.version}`;
+  const versions = shipped.map((s) => `${label(s)}${SHA.test(s.sha) ? ` ${s.sha.slice(0, 7)}` : ""}`).join(", ");
+  const happened = e.rule === "qa-prod"
+    ? `реліз задеплоєно на prod, smoke і e2e зелені (${versions}).`
+    : firstSentence(e.reason);
+  const advice = "відкрий prod і перевір: «OK» переносить картки в Done, «Reject» — напиши, що не так: я відкочу prod " +
+    "на попередній тег і поставлю fix-задачу в чергу.";
+  const visible = [
+    `🟡 <b>На prod: реліз ${plain(id, 10)} (${plain(field(view.text, "Features"), 100)})</b>`,
+    shipped.map((s) => (LINKABLE.test(s.url) ? link(s.url, label(s)) : plain(label(s), 40))).join(" · "),
+    `<b>Що сталося:</b> ${plain(happened, 200)}`,
+    shotsLine(view.shots, "реліз не змінив сторінок із профілю"),
+    `<b>Що рекомендую:</b> ${plain(advice, 200)}`,
+  ].filter(Boolean).join("\n");
+  const kept = view.text.split("\n").filter((l) => /^(Shipped|Features|Release): /.test(l));
+  const reason = e.rule === "qa-prod" ? "" : e.reason;
+  return withBlock(visible, [`Прогін: release ${id}`, kept.join("\n"), reason].filter(Boolean).join("\n\n"));
 }

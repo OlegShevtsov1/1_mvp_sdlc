@@ -61,6 +61,11 @@ tag_worktree() {
 
 on_origin() { git ls-remote --exit-code origin "refs/tags/${tag}" >/dev/null; }
 
+# blob <rev>:<path>: the file at that revision, read whole, so a reader that stops early (grep -q, awk exit) never
+# kills git show with SIGPIPE, which pipefail would turn into a silent exit 141 (PILOT-619). Empty, with git's error
+# on stderr, when there is no such file.
+blob() { git show "$1" || true; }
+
 # The release PR is titled with the card of the merged release-prep PR `PILOT-<n>: Release X.Y.Z changelog`.
 release_title() {
   local titles
@@ -127,11 +132,12 @@ prove_installed() {
 }
 
 merge_release_pr() {
-  git show origin/develop:CHANGELOG.md | grep -qE "^## \[${version_re}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" ||
+  local changelog title pr n state body head out rc left
+  changelog=$(blob origin/develop:CHANGELOG.md)
+  grep -qE "^## \[${version_re}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" <<<"${changelog}" ||
     die 1 "origin/develop CHANGELOG.md has no '## [${version}] - <date>' section"
-  git show origin/develop:plugins/mvp-sdlc/.claude-plugin/plugin.json | grep -qE "\"version\": \"${version_re}\"" ||
+  grep -qE "\"version\": \"${version_re}\"" <<<"$(blob origin/develop:plugins/mvp-sdlc/.claude-plugin/plugin.json)" ||
     die 1 "origin/develop plugin.json is not version ${version}"
-  local title pr n state body head out rc left
   title=$(release_title)
   pr=$(release_pr "${title}")
   read -r n state <<<"${pr:-0 none}"
@@ -142,7 +148,7 @@ merge_release_pr() {
       echo
       echo "## Changelog"
       echo
-      git show origin/develop:CHANGELOG.md | awk -v h="## [${version}]" 'index($0, h) == 1 { f = 1 } f && /^## \[/ && index($0, h) != 1 { exit } f'
+      awk -v h="## [${version}]" 'index($0, h) == 1 { f = 1 } f && /^## \[/ && index($0, h) != 1 { exit } f' <<<"${changelog}"
       echo "Type: chore"
     } >"${body}"
     REPO="${repo}" BASE_REF=main HEAD_REF=develop PR_TITLE="${title}" PR_BODY="$(cat "${body}")" \
@@ -178,7 +184,7 @@ merge_release_pr() {
 tag_release() {
   merged_release
   local m=${merge_commit} remote
-  git show "${m}:plugins/mvp-sdlc/.claude-plugin/plugin.json" | grep -qE "\"version\": \"${version_re}\"" ||
+  grep -qE "\"version\": \"${version_re}\"" <<<"$(blob "${m}:plugins/mvp-sdlc/.claude-plugin/plugin.json")" ||
     die 1 "plugin.json at ${m} is not version ${version}"
   if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
     git tag -a "${tag}" -m "mvp-sdlc ${version}" "${m}"

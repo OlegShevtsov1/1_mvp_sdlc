@@ -207,6 +207,13 @@ calls() { cat "${tmp}/gh/calls.log" 2>/dev/null || true; }
 expect_rc() { [ "${rc}" -eq "$2" ] || fail "$1" "exit ${rc}, want $2; stdout: ${out}; stderr: ${err}"; }
 merge_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["mergeCommit"]["oid"])' "${tmp}/gh/prs.json"; }
 
+# No early-exiting reader (`grep -q`, `grep -m`, `head`, an awk `exit`) follows a producer in release.sh: under
+# pipefail the producer's SIGPIPE (141) would end a step with no message (PILOT-619). A line ending in `|` is joined
+# with the next.
+joined=$(awk '/(^|[^|])\|[[:space:]]*$/ { printf "%s ", $0; next } { print }' "${here}/scripts/release.sh")
+piped=$(grep -E '(^|[^|])\|[[:space:]]*\{?[[:space:]]*(grep([[:space:]]+-[A-Za-z]+)*[[:space:]]+(-[A-Za-z]*[qm][A-Za-z0-9]*|--quiet|--max-count)|head([[:space:]]|$)|awk[[:space:]].*\<exit\>)' <<<"${joined}" || true)
+[ -z "${piped}" ] || fail "early-exiting reader" "${piped}"
+
 # Usage.
 new_fixture
 for a in "tag 0.9.9" "tag v0.9.9-rc1" "publish v0.9.9" "tag" ""; do
@@ -370,5 +377,23 @@ FAKE_GH_PREP=$'PILOT-7: Release 0.9.9 changelog\nPILOT-8: Release 0.9.9 changelo
 expect_rc "two release-prep PRs" 1
 grep -q "want exactly one merged release-prep PR" <<<"${err}" || fail "two release-prep PRs" "${err}"
 ! grep -q "^pr create" <<<"$(calls)" || fail "refusals" "created a PR"
+
+# A CHANGELOG.md and a plugin.json of several hundred KB on develop: merge-release-pr's version checks and section,
+# and tag's version check, read each blob whole, so a reader that stops early cannot kill git show (PILOT-619).
+new_fixture
+g -C "${tmp}/repo" checkout -q develop
+awk 'BEGIN { for (i = 1; i <= 4000; i++) printf "## [0.0.%d] - 2026-01-01\n\n### Fixed\n\n- Padding entry %d, long enough to grow the file past the pipe buffer.\n\n", i, i }' >> "${tmp}/repo/CHANGELOG.md"
+awk 'BEGIN { printf "{\n  \"name\": \"mvp-sdlc\",\n  \"version\": \"0.9.9\",\n"; for (i = 1; i <= 6000; i++) printf "  \"pad%d\": \"%064d\",\n", i, 0; print "}" }' > "${tmp}/repo/plugins/mvp-sdlc/.claude-plugin/plugin.json"
+g -C "${tmp}/repo" commit -q -am "large CHANGELOG.md and plugin.json"
+git -C "${tmp}/repo" push -q origin develop
+g -C "${tmp}/repo" checkout -q main
+release merge-release-pr v0.9.9
+expect_rc "large blobs merge-release-pr" 0
+body=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["body"])' "${tmp}/gh/prs.json")
+want=$(printf '%s\n' "Release mvp-sdlc 0.9.9 (1_mvp_sdlc develop → main)." "" "## Changelog" "" "## [0.9.9] - 2026-11-01" "" \
+  "### Fixed" "" "- New fix (PILOT-6)." "" "Type: chore")
+[ "${body}" = "${want}" ] || fail "large blobs section" "$(diff <(echo "${want}") <(echo "${body}"))"
+release tag v0.9.9
+expect_rc "large blobs tag" 0
 
 echo "release: ok"

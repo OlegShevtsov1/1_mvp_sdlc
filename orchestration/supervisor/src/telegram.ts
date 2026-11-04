@@ -11,7 +11,8 @@ import {
 import { isOperatorAnswer, type LedgerEntry, ledgerPath, readLedger, redact } from "./ledger.ts";
 import type { QueuedTask } from "./queue.ts";
 import { stepNumber } from "./policy.ts";
-import { readEvidence, renderQaCard, type Shot } from "./qa.ts";
+import { readEvidence, renderQaCard, renderQaProdCard, type Shot, type ShotsNote } from "./qa.ts";
+import { readReleaseShots } from "./release.ts";
 import { type Pause, readAnswer, readFetchTitle, repoOf, type RunView } from "./runs.ts";
 
 export type OperatorAnswer = { runId: string; eventId: string; action: RespondAction; text?: string };
@@ -158,38 +159,46 @@ async function sendShots(cfg: Config, shots: Shot[]): Promise<number[]> {
 
 const albumKey = (runId: string, pause: Pause) => `${runId}|${pause.eventId}`;
 
-// The QA dev card goes out after its screenshots, as a reply to them; they are sent only with the policy's first
+// The QA dev or QA prod card; undefined for any other escalation.
+function renderCard(e: Escalation, pause: Pause | undefined, shots: ShotsNote): string | undefined {
+  if (e.kind === "qa-prod") return renderQaProdCard(e, { text: pause?.text ?? e.text, shots });
+  return renderQaCard(e, { sha: field(pause?.text ?? "", "SHA"), shots });
+}
+
+// A QA card goes out after its screenshots, as a reply to them; they are sent only with the policy's first
 // escalation of the open pause, so a re-escalation repeats the card alone, and a card whose send failed is retried
-// as a reply to the album already sent. A refused album is logged and the card still goes out: the dev URL and the
-// buttons must not wait on the photos.
+// as a reply to the album already sent. A refused album is logged and the card still goes out: the URL and the
+// buttons must not wait on the photos. QA dev shows the run's evidence, QA prod the release's prod screenshots.
 async function qaCard(cfg: Config, e: Escalation, pause: Pause | undefined): Promise<{ text: string; replyTo?: number }> {
-  const sha = field(pause?.text ?? "", "SHA");
-  if (!pause || e.rule !== "qa-dev") return { text: renderQaCard(e, { sha, shots: "omitted" }) ?? "" };
-  const evidence = readEvidence(e.runId, e.repo, pause.text);
-  if (!evidence) return { text: renderQaCard(e, { sha, shots: "unreadable" }) ?? "" };
-  if (evidence.shots.length === 0) return { text: renderQaCard(e, { sha, shots: "none" }) ?? "" };
+  const card = (shots: ShotsNote) => renderCard(e, pause, shots) ?? "";
+  if (!pause || e.rule !== e.kind) return { text: card("omitted") };
+  const evidence = e.kind === "qa-prod" ? readReleaseShots(e.runId) : readEvidence(e.runId, e.repo, pause.text);
+  if (!evidence) return { text: card("unreadable") };
+  if (evidence.shots.length === 0) return { text: card("none") };
   const shots = { sent: evidence.shots.length, total: evidence.total };
   const key = albumKey(e.runId, pause);
   const album = loadState().albums[key];
-  if (album) return { text: renderQaCard(e, { sha, shots }) ?? "", replyTo: album };
+  if (album) return { text: card(shots), replyTo: album };
   try {
     const [first] = await sendShots(cfg, evidence.shots);
     updateState((s) => void (s.albums[key] = first));
-    return { text: renderQaCard(e, { sha, shots }) ?? "", replyTo: first };
+    return { text: card(shots), replyTo: first };
   } catch (err) {
     logged(err);
-    return { text: renderQaCard(e, { sha, shots: "failed" }) ?? "" };
+    return { text: card("failed") };
   }
 }
 
 // Buttons go only under the run's open pause; a pause that moved on, or a failure, has nothing to press. Reject is
 // offered only on a PR or QA card: another gate's reject may cancel its run.
+const REJECTABLE = ["pr-approve", "qa-dev", "qa-prod"];
+
 export async function notifyEscalation(e: Escalation, pause: Pause | undefined): Promise<number> {
   const cfg = config();
   if (!cfg) return 0;
   const actions = (pause?.decisions ?? []).map((x) => x.id).filter(isRespondAction)
-    .filter((a) => a !== "reject" || e.kind === "pr-approve" || e.kind === "qa-dev");
-  const qa = renderQaCard(e, { sha: "", shots: "omitted" }) ? await qaCard(cfg, e, pause) : undefined;
+    .filter((a) => a !== "reject" || REJECTABLE.includes(e.kind));
+  const qa = renderCard(e, pause, "omitted") ? await qaCard(cfg, e, pause) : undefined;
   const text = qa?.text ||
     renderEscalation(e, { needsRevision: pause?.decisions.some((x) => x.id === "needs-revision") ?? false });
   const markup = actions.length > 0

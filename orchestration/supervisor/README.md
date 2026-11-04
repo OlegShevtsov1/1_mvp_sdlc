@@ -27,8 +27,9 @@ A pause is judged once: when the ledger already has a line for its `(run_id, eve
 existed before the supervisor started are judged on its first tick.
 
 A failed run is not a pause: the `transient-resume` rule resumes it with backoff or escalates it (PILOT-508). After
-the pauses, the tick launches `post-merge` for merged PRs of finished factory runs (PILOT-510), then starts queued
-briefs (PILOT-511). This README describes the gate rules, post-merge launches and the queue.
+the pauses, the tick launches `post-merge` for merged PRs of finished factory runs (PILOT-510), queues or advances
+the automatic release (PILOT-613, [Releases](#releases)), then starts queued briefs (PILOT-511). This README describes
+the gate rules, post-merge launches, the queue, the `/task` chain and releases.
 
 ## The ledger
 
@@ -40,6 +41,8 @@ decided; `action` of a gate decision is `approve` (`plan-gate`, `post-merge-allo
 through a Telegram button is a line with `rule: operator` and the pause's decision as `action`: `approve`, `retry`,
 `skip`, `abort`, `reject` (its `evidence.text` is the operator's reason) or `ok` (QA dev accepted). A QA dev answer
 whose Trello move or fix task failed adds an escalation under the same pause, rule `qa-dev-trello` or `qa-dev-fix`.
+The QA prod card's answer is such a line too, `{run_id: release:<id>, kind: qa-prod, action: ok|reject}`: the journal
+entry of a release accepted or rejected on prod ([QA prod](#qa-prod)).
 
 ## Answering a pause
 
@@ -108,9 +111,18 @@ PR, the commit and URL on dev, and the original task's paths, so the queue holds
 them. The card's close note gains a line on the move or the queued file. A move or a brief that fails is escalated as
 its own message, rule `qa-dev-trello` or `qa-dev-fix`, without buttons: the pause is already answered.
 
+A shipped release's QA prod wait (`qa-prod`, [QA prod](#qa-prod)) is a card «На prod» the same way: its album holds the
+release's prod screenshots, read only from `releases.json` and only PNG files under
+`~/.local/state/sdlc-autopilot/release-shots/<id>/`; the header is `🟡 На prod: реліз <id> (<features>)`, then a
+link per shipped repo (`be v0.5.0 · fe v0.6.0`, to the URL bin/release's smoke checks), `Що сталося:` (deployed to
+prod with smoke and e2e green, each version and short commit), the screenshots line (`реліз не змінив сторінок із
+профілю` when there are none) and `Що рекомендую:`. Its buttons are `✅ OK` and `↩️ Reject`; Reject asks for the text
+like `↩️ Повернути`, and its toast is `↩️ Відкочую prod і ставлю fix-задачу`.
+
 When the line is about the run's open pause, the message carries one button per decision the pause itself declares:
 `✅ Прийняти` (`✅ Готово` on a checkout step, `✅ Апрув` on a PR card), `⏭ Пропустити крок`, `⛔ Зупинити`,
-`🔁 Чекати ще`, `✅ Прийнято` (`ok`), and `↩️ Повернути` on a PR card (`↩️ Є зауваження` on a QA card) only (another
+`🔁 Чекати ще`, `✅ Прийнято` (`ok`; `✅ OK` on a QA prod card), and `↩️ Повернути` on a PR card (`↩️ Є зауваження` on a
+QA dev card, `↩️ Reject` on a QA prod card) only (another
 gate's `reject` may cancel its run, so it gets no button). A line about a pause the operator already answered by
 button gets no buttons.
 The plan gate's `needs-revision` needs a feedback text and stays an `archon workflow respond` by hand.
@@ -278,6 +290,121 @@ except `stage-ci-red` and `stage-task-brief`, stop the chain; their pseudo run i
 A GitHub read that fails is logged and tried again on the next tick. After a revert of this feature, delete any
 `queue/*/sdlc-stage.*.md` left: without the chain they would launch as factory briefs.
 
+## Releases
+
+Decision 29 A: prod deploys by itself once every task of a feature passed QA on dev; smoke prod and the automatic
+rollback of `bin/release` are the safeguards, not an operator's confirmation. Only with the `release` rule in
+`policy.yaml`; without it nothing is released automatically.
+
+Each tick, before the queue starts briefs, the supervisor takes the `/task` chains in state `done` (every task briefed)
+that no release names yet, reads each one's `docs/features/t<n>/tasks/tasks.json` from the be checkout's
+`origin/<base>` and the be board (`GET /boards/<b>/lists`, `GET /boards/<b>/cards`, the board `/task` uses). A
+feature is ready when the card of every task — its `trello_card_id_short`, else the feature's own card — is in
+`Ready to Release`, where `✅ Прийнято` on its QA dev card moved it. A card in any other list or not on the board holds
+the feature back, and so does a task of a repo other than `1_mvp_pilot_be` and `1_mvp_pilot_fe`. A failed git or
+Trello read, or a feature whose `tasks.json` cannot be read, is logged and tried again on the next tick.
+
+There is one release at a time, `release:<id>` in the ledger. Every feature ready in the same tick goes into one new
+release, and a feature ready while the release's first brief still waits in the queue joins it: the brief is rewritten
+and its card renamed, since `prep` has not yet taken develop's changelog. A feature ready later, or one that would put
+be in front of an fe brief already queued, waits for the next release; a repo where that release finds nothing new
+since the last tag (the feature's work went out with the release before) is skipped as `unchanged`. The release ships the repos its features'
+tasks touch, be first: for each it creates a card `Release <repo> for PILOT-a, PILOT-b` in `Ready to Release` on the
+be board and queues `queue/<repo>/sdlc-release.<id>.<attempt>.md`:
+
+```
+PILOT-<release card>: Release <repo> for PILOT-a, PILOT-b
+Repo-dir: <source checkout>
+Base: <base>
+Card: PILOT-<release card>
+Mirror: <mirror_owner>/<repo>
+Features: PILOT-a, PILOT-b
+Release: <id>
+```
+
+fe is queued only after be shipped or was skipped. The brief names no repo-relative path, so the queue holds it while any factory run
+of its repo is open. The queue launches it, only while the open release waits for exactly that file, as `bun
+src/release-run.ts <started file>`; any other file of that name is a factory brief. `release-run.ts` runs no LLM: in a
+worktree `~/.local/state/sdlc-autopilot/stages/release-<started name>` of the Archon source at `origin/<base>` it
+ends with `unchanged: nothing to release since the last tag` when `scripts/next-version.sh origin/<base>` exits 3
+(both templates' contract for "only chore, docs, ci, refactor and test since the previous tag"),
+otherwise runs `RELEASE_CARD=<card> RELEASE_MIRROR_REPO=<mirror> bin/release prep`, watches the release-prep PR's checks (`gh pr
+checks --watch`, 30 min), squash-merges it with `--match-head-commit` and the subject `<title> (#<n>)` that `bin/release
+ship` requires, then runs `bin/release ship v<X.Y.Z>` (3 h at most) from a new worktree at the merged base. Nothing is
+merged or shipped after a red prep or red checks. The worktree is always removed; `<started file>.result.json` holds
+the exit, the version once its release-prep PR is merged and the stdout lines of `bin/release`, and the output goes to
+`~/.local/state/sdlc-autopilot/logs/stage.<repo>.<name>.log`.
+
+Releases are kept in `~/.local/state/sdlc-autopilot/releases.json`. On the next tick the result decides:
+
+| Result | Release | Ledger rule |
+| --- | --- | --- |
+| exit 0 with `shipped: vX.Y.Z <sha>` | the repo shipped; fe is queued next, or the release is `shipped` | `release-shipped` |
+| exit 0 with `unchanged:` | the repo is skipped; fe is queued next, or the release is `shipped` | `release-unchanged` |
+| fe exit 75 (be on prod below `deploy/min-be-version`), launches 1–2 | queued again as `<attempt + 1>` with `Version:`, shipping the version already merged | — |
+| exit 3 | `stopped`, prod rolled back to the previous tag | `release-rolled-back` |
+| exit 4 | `stopped`, irreversible migration, nothing rolled back | `release-no-rollback` |
+| exit 5 | `stopped`, the rollback did not verify | `release-rollback-failed` |
+| any other exit once the release-prep PR is merged (fe exit 75 on the 3rd launch included) | `stopped`: develop has the `[X.Y.Z]` section but no tag, so the next prep would fail | `release-unfinished` |
+| exit 1 or exit 0 without `shipped:` before the merge | `failed`, prod untouched | `release-failed` |
+| any other exit | `stopped` | `release-failed` |
+
+Every row but the first three escalates once with the `bin/release` lines and the log. Features of a `failed` or
+`stopped` release are never released again automatically; a `failed` release lets the next ready features start a new
+release. A `stopped` release holds every automatic release, since a person must judge prod first: a rolled-back
+release's code is still on develop and the next release would deploy it again, and an unfinished one needs `bin/release
+ship v<X.Y.Z>` by hand. Once done, set its `state` to `closed` in `releases.json`. An unreadable `releases.json` is
+logged each tick and never overwritten; nothing is released until it is fixed, and a release brief the queue reaches
+meanwhile launches as a factory brief, like any file of that name the open release does not wait for. `release-queued` lines record each queued or rewritten brief. After a revert of this
+feature, delete any `queue/*/sdlc-release.*.md` left: without the release they would launch as factory briefs.
+
+### QA prod
+
+A release that shipped at least one repo asks the operator to check prod: once it is `shipped`, a `qa-prod` escalation
+(`run_id release:<id>`, event `release:<id>@qa-prod`) sends the card «На prod» with `✅ OK` and `↩️ Reject`
+([Telegram](#telegram)). A release that shipped nothing (every repo `unchanged`) sends none. The card's pause text
+holds one line per shipped repo, `Shipped: <repo> v<X.Y.Z> <sha> <url> previous <tag|none|?>`, then `Features:` and
+`Release:`. After a ship that exited 0 with `shipped:`, `release-run.ts` reads from `bin/release ship`'s stderr the
+tag it shipped over (`release: shipping … previous <tag|none> …`) and be's irreversible migrations since it
+(`release: irreversible migrations since <tag>: <files>`), and shoots, at 1440×900 and 360×800 with the checkout's
+`node_modules/.bin/playwright`, every `qa_dev.pages` entry of the profile whose glob matches a file changed since that
+tag, at its prod URL (`<x>.dev.<PROJECT_ZONE>` → `<x>.<PROJECT_ZONE>`; a page on any other host is skipped). A shot
+that fails is left out and never changes the exit. The next tick moves the shots to `release-shots/<id>/<repo>/`.
+
+While a release waits for this answer, no new release starts: Reject rolls back to the tag before this release, which
+is right only while it is the newest on prod. Features ready meanwhile start the next release after OK.
+
+- `✅ OK` records `qa: ok` in `releases.json` and moves every card of the release (its task cards, its feature cards
+  and its release cards) to `Done` on the be board; a card already there is skipped. The close note names the cards.
+- `↩️ Reject` takes the operator's text, sets `qa: reject` and `state: stopped` (develop still holds the rejected
+  code, so the release holds every automatic release until the operator closes it, as above), and queues one fix
+  brief `queue/<repo>/fix-release-<id>.md`, in fe when the release shipped fe, else in be: `Fix for <first feature
+  card>: <text>`, then the repository, `Release:`, `Features:`, a `Shipped:` line per shipped repo (version, sha, prod
+  URL, release card), `Rollback:` (the targets, or `none — <why>`) and `If the cause is in <other repo>, say so in the
+  plan.` It then writes the job `~/.local/state/sdlc-autopilot/rollbacks/release-<id>.json` and launches `bun
+  src/release-run.ts rollback <job>` at once, detached, logging to `logs/rollback.release-<id>.log`: a queued brief
+  could wait hours behind unrelated runs. The job rolls back each shipped repo to the tag before the release, fe
+  first so that fe never runs against an older be than its `min-be-version`: in a fresh worktree
+  `stages/release-rollback-<id>-<repo>` at `origin/<base>`, `bin/release rollback <tag>` (30 min at most), stopping at
+  the first that does not verify; `<job>.result.json` holds the exit, the error and the `rolled back:` lines.
+- No rollback is launched at all when a shipped repo has an irreversible migration, when bin/release did not name its
+  previous tag, or when it had none (a first release): the code of the previous tag cannot run on the new schema, or
+  there is nothing to roll back to. Prod stays on the new release; the escalation says why and asks to fix forward or
+  to decide the rollback by hand.
+
+| Event | Release | Ledger rule |
+| --- | --- | --- |
+| the release shipped a repo | waits for the QA prod answer | `qa-prod` (the card) |
+| OK, but a card was not moved | `qa: ok` | `qa-prod-trello` |
+| Reject, but the fix brief could not be written | `stopped` | `qa-prod-fix` |
+| Reject on an irreversible migration or an unknown or missing previous tag | `stopped`, nothing rolled back | `qa-prod-no-rollback` |
+| the rollback job exited 0 | `stopped`, prod on the previous tags | `qa-prod-rolled-back` |
+| the rollback job exited non-zero, or could not be launched | `stopped`, prod state unknown | `qa-prod-rollback-failed` |
+
+Every row escalates once; all but the first carry no buttons. A rollback whose process died without a result stays
+`running` in `releases.json`; the release is already `stopped`, so nothing automatic follows. After a revert of this
+feature, any `queue/*/fix-release-*.md` left are ordinary factory briefs, with nothing to clean up.
+
 ## Rules
 
 ### plan-gate
@@ -321,6 +448,12 @@ rule the pause still escalates, as `default-escalate`.
 The factory's QA dev wait always goes to the operator: the rule escalates it with the reason `Робота на dev чекає
 перевірки оператора`, and Telegram sends it as a QA card with its screenshots. Field: `action`, whose only value is
 `escalate-as-card`. Without the rule the pause still escalates, as `default-escalate`, with its buttons.
+
+### release
+
+Turns automatic releases on ([Releases](#releases)). Field: `mirror_owner`, the owner of the public mirrors prod
+deploys from (`<mirror_owner>/<repo>`, `RELEASE_MIRROR_REPO` of `bin/release`). A second `release` rule or a missing
+`mirror_owner` stops the supervisor at start.
 
 ### post-merge-allowlist
 

@@ -1,0 +1,446 @@
+#!/usr/bin/env bash
+# Releases this repository to prod with no hand-typed step: the release chain of README "Branch model and releases"
+# as one deterministic script, run by the sdlc supervisor once every task of a feature passed QA on dev.
+#
+# Usage: bin/release prep [--dry-run]              RELEASE_CARD=<KEY>-<n>: opens the release-prep PR into develop
+#        bin/release ship v<X.Y.Z> [--dry-run]     release PR into main, tag, (mirror), Kamal Deploy, release-watch,
+#                                                  smoke, e2e against prod, publish the draft Release; waits first
+#                                                  until the backend on prod has deploy/min-be-version
+#        bin/release rollback v<X.Y.Z> [--dry-run] Kamal Manage rollback of prod to that release tag
+# The version is never typed by hand: prep takes it from scripts/next-version.sh and ship refuses any other.
+# --dry-run prints every write as `dry run: <command>` and runs only the read-only checks.
+#
+# Env: RELEASE_CARD (prep); RELEASE_MIRROR_REPO (owner/name of the public mirror: set, the tag is published there
+#      with PUBLISH_MIRROR and prod is deployed from the mirror with source_sha; default empty, deploy from this
+#      repository); PUBLISH_MIRROR (default ~/projects/mvp/1_mvp_sdlc/scripts/publish-mirror.sh);
+#      PROD_ACTIVE_TARGET (aws|srv, passed as the deploy target when the workflow declares a target input; default
+#      detected from public DNS); RELEASE_CHECKS_TIMEOUT (seconds for the release PR checks, default 1200);
+#      RELEASE_BE_WAIT (seconds to wait for the backend on prod, default 3600); RELEASE_POLL_INTERVAL (seconds
+#      between polls, default 30).
+# stdout: `prep: <KEY>-<n> X.Y.Z #<pr>`, `shipped: vX.Y.Z <sha>`, `red: vX.Y.Z <sha> <release-watch|smoke|e2e> <url>`,
+#         `rolled back: vX.Y.Z <sha>`; progress on stderr.
+# Exit 0: done or already done. 1: a precondition or a step before the prod deploy failed; prod untouched.
+# 3: red after the deploy, rolled back to the previous release tag and /config.js proves it. 5: red after the deploy
+# and the rollback did not verify (or there is no previous release). 64: usage. 75: deploy/be_version_check.sh still
+# refuses the backend on prod for deploy/min-be-version after RELEASE_BE_WAIT; nothing written, run again later. The frontend has no
+# database, so the backend's exit 4 (irreversible migration) never happens here.
+set -euo pipefail
+
+usage() {
+  echo "usage: bin/release prep [--dry-run] | bin/release ship|rollback v<X.Y.Z> [--dry-run]" >&2
+  exit 64
+}
+log() { echo "release: $*" >&2; }
+die() { local rc=$1; shift; log "$*"; exit "${rc}"; }
+
+dry_run=0 args=()
+for arg in "$@"; do
+  if [ "${arg}" = --dry-run ]; then dry_run=1; else args+=("${arg}"); fi
+done
+set -- "${args[@]+"${args[@]}"}"
+cmd=${1:-}
+case "${cmd}" in
+  prep) [ $# -eq 1 ] || usage ;;
+  ship | rollback)
+    [ $# -eq 2 ] || usage
+    tag=$2
+    [[ ${tag} =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || usage
+    version=${tag#v}
+    ;;
+  *) usage ;;
+esac
+interval=${RELEASE_POLL_INTERVAL:-30}
+mirror=${RELEASE_MIRROR_REPO:-}
+
+cd "$(git rev-parse --show-toplevel)"
+# Never --prune: it would drop a tag this release created locally but has not pushed yet.
+git fetch -q origin --tags
+repo=$(gh repo view --json nameWithOwner | jq -r .nameWithOwner)
+key=$(sed -n 's/^PROJECT_NAME=//p' config/project.env | head -n 1 | tr '[:lower:]' '[:upper:]')
+zone=$(sed -n 's/^PROJECT_ZONE=//p' config/project.env | head -n 1)
+[[ ${key} =~ ^[A-Z][A-Z0-9]*$ && -n ${zone} ]] || die 1 "config/project.env has no valid PROJECT_NAME and PROJECT_ZONE"
+
+# run <command...>: every write goes through here, so --dry-run runs none of them. Its lines go to stdout (fd 3) even
+# where the command's own output goes to stderr.
+exec 3>&1
+run() {
+  if [ "${dry_run}" -eq 1 ]; then
+    local shown=("$@")
+    [ "$1" != deploy_gh ] || shown[0]=gh
+    echo "dry run: ${shown[*]}" >&3
+    return 0
+  fi
+  "$@"
+}
+skipped() { echo "dry run: wait $*" >&3; }
+
+# deploy_gh: gh against the repository prod is deployed from; the mirror needs its owner's token.
+deploy_repo=${mirror:-${repo}}
+mirror_token=""
+deploy_gh() {
+  if [ -n "${mirror}" ]; then GH_TOKEN=${mirror_token} gh "$@"; else gh "$@"; fi
+}
+
+tmp=$(mktemp -d)
+cleanup() {
+  git worktree remove --force "${tmp}/wt" 2>/dev/null || true
+  rm -rf "${tmp}"
+}
+trap cleanup EXIT
+
+# declares_input <ref> <workflow file> <input>: the workflow_dispatch inputs of the workflow at <ref> name <input>.
+declares_input() {
+  git show "$1:.github/workflows/$2" 2>/dev/null | awk -v want="      $3:" '
+    /^    inputs:/ { inputs = 1; next }
+    inputs && /^ {0,4}[^ ]/ { inputs = 0 }
+    inputs && $0 == want { found = 1 }
+    END { exit !found }'
+}
+
+# detect_target: srv when the zone, app. and dev. resolve to the same addresses, aws when the zone and app. do and
+# dev. is elsewhere.
+detect_target() {
+  local z a d
+  z=$(getent ahostsv4 "${zone}" | awk '{ print $1 }' | sort -u) || true
+  a=$(getent ahostsv4 "app.${zone}" | awk '{ print $1 }' | sort -u) || true
+  d=$(getent ahostsv4 "dev.${zone}" | awk '{ print $1 }' | sort -u) || true
+  [[ -n ${z} && ${z} == "${a}" ]] || die 1 "cannot detect the prod target: ${zone} and app.${zone} differ in DNS"
+  if [ "${z}" = "${d}" ]; then echo srv
+  elif [ -z "$(comm -12 <(echo "${z}") <(echo "${d}"))" ]; then echo aws
+  else die 1 "cannot detect the prod target: ${zone} and dev.${zone} partly overlap in DNS"; fi
+}
+
+# target_args <ref> <workflow file>: `-f target=<t>` when that workflow takes a target. A workflow without one
+# deploys only to aws, so any other PROD_ACTIVE_TARGET is refused.
+target_args() {
+  local t
+  if declares_input "$1" "$2" target; then
+    t=${PROD_ACTIVE_TARGET:-$(detect_target)}
+    [[ ${t} =~ ^(aws|srv)$ ]] || die 1 "PROD_ACTIVE_TARGET is '${t}', want aws or srv"
+    echo "-f target=${t}"
+  elif [ -n "${PROD_ACTIVE_TARGET:-}" ] && [ "${PROD_ACTIVE_TARGET}" != aws ]; then
+    die 1 "PROD_ACTIVE_TARGET=${PROD_ACTIVE_TARGET}, but $2 at $1 has no target input and deploys only to aws"
+  fi
+}
+
+# dispatch <workflow> <inputs...>: dispatches it on main of the deploy repo and sets run_id and run_url to the run
+# it created: the newest workflow_dispatch run created since the dispatch. Returns 1 instead of exiting: once the
+# dispatch is sent the run may exist, so only the caller knows what that means for prod.
+run_id="" run_url=""
+dispatch() {
+  local workflow=$1 since deadline found
+  shift
+  run_id="" run_url="https://github.com/${deploy_repo}/actions/workflows/${workflow}"
+  since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  run deploy_gh workflow run "${workflow}" -R "${deploy_repo}" --ref main "$@" || {
+    log "dispatching ${workflow} failed"
+    return 1
+  }
+  if [ "${dry_run}" -eq 1 ]; then
+    run_id="<run>" run_url="<run>"
+    return 0
+  fi
+  deadline=$((SECONDS + 120))
+  while :; do
+    found=$(deploy_gh run list -R "${deploy_repo}" --workflow "${workflow}" --event workflow_dispatch --limit 10 \
+      --json databaseId,createdAt,url |
+      jq -r --arg since "${since}" '[.[] | select(.createdAt >= $since)] | first // empty | "\(.databaseId) \(.url)"')
+    [ -z "${found}" ] || break
+    [ "${SECONDS}" -lt "${deadline}" ] || { log "no ${workflow} run appeared after the dispatch"; return 1; }
+    sleep "${interval}"
+  done
+  read -r run_id run_url <<<"${found}"
+  log "${workflow}: ${run_url}"
+}
+
+watch_run() {
+  [ "${dry_run}" -eq 0 ] || { skipped "$1 run"; return 0; }
+  deploy_gh run watch "${run_id}" -R "${deploy_repo}" --exit-status >&2
+}
+
+# serves <sha>: prod serves the image built from that commit (deploy/lib.sh wait_ready).
+serves() {
+  local config
+  config=$(curl -fsS --max-time 10 "https://app.${zone}/config.js") || return 1
+  log "https://app.${zone}/config.js: $(grep -oE 'APP_VERSION: "[^"]*"' <<<"${config}" || echo '<no APP_VERSION>')"
+  grep -qF "APP_VERSION: \"prod-sha-$1\"" <<<"${config}" && grep -qF 'ENV_NAME: "prod"' <<<"${config}"
+}
+
+e2e() {
+  E2E_BASE_URL="https://app.${zone}" E2E_ENV_NAME=prod npm run e2e >&2
+}
+
+# wait_backend <D>: release order is backend first; waits until deploy/be_version_check.sh accepts the backend on
+# prod for the deploy/min-be-version of D, the release being shipped, not of the working tree.
+wait_backend() {
+  local deadline=$((SECONDS + ${RELEASE_BE_WAIT:-3600})) minimum
+  git show "$1:deploy/min-be-version" >"${tmp}/min-be-version" 2>/dev/null || die 1 "${1} has no deploy/min-be-version"
+  minimum=$(tr -d '[:space:]' <"${tmp}/min-be-version")
+  [[ ${minimum} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 1 "deploy/min-be-version at ${1} is '${minimum}', not one tag vX.Y.Z"
+  [ -x deploy/be_version_check.sh ] || die 1 "deploy/be_version_check.sh is missing or not executable"
+  until MIN_BE_VERSION_FILE=${tmp}/min-be-version deploy/be_version_check.sh >&2; do
+    [ "${SECONDS}" -lt "${deadline}" ] ||
+      die 75 "deploy/be_version_check.sh still refuses the backend on prod for ${minimum} after ${RELEASE_BE_WAIT:-3600}s (its last message above says why); nothing written"
+    log "waiting for backend >= ${minimum} on prod"
+    sleep "${interval}"
+  done
+}
+
+# notes <vX.Y.Z> <changelog>: the body of that section; previous_tag <ref>: the release before <ref>, empty if none.
+notes() { CHANGELOG_FILE=$2 scripts/release-notes.sh "$1"; }
+previous_tag() { scripts/next-version.sh --previous-tag "$1"; }
+
+# conventions <head> <base> <title> <body file>: the repository's own PR-conventions check.
+conventions() {
+  REPO=${repo} HEAD_REF=$1 BASE_REF=$2 PR_TITLE=$3 PR_BODY="$(cat "$4")" scripts/pr-conventions.sh >&2 ||
+    die 1 "the PR '$3' breaks the PR conventions"
+}
+
+# open_pr <base> <title>: the number of the open PR into <base> with that title, or nothing.
+open_pr() {
+  gh pr list -R "${repo}" --base "$1" --state open --limit 100 --json number,title |
+    jq -r --arg t "$2" 'first(.[] | select(.title == $t)) | .number'
+}
+
+# moved_changelog <file> <version> <date>: the CHANGELOG with the [Unreleased] entries moved into a new section; the
+# lines above the first category (fe: Minimum backend version) stay in [Unreleased] and are copied. Exit 3 when
+# [Unreleased] has no entry.
+moved_changelog() {
+  awk -v section="## [$2] - $3" '
+    function flush(   i, j, k, first, last, out) {
+      out = "## [Unreleased]\n\n"
+      for (i = 1; i <= np; i++) out = out pre[i] "\n\n"
+      for (i = 1; i <= nc; i++) out = out name[i] "\n\n"
+      out = out section "\n\n"
+      for (i = 1; i <= np; i++) out = out pre[i] "\n\n"
+      for (i = 1; i <= nc; i++) {
+        first = 1; while (first <= nl[i] && body[i, first] ~ /^[[:space:]]*$/) first++
+        last = nl[i]; while (last >= first && body[i, last] ~ /^[[:space:]]*$/) last--
+        if (first > last) continue
+        entries++
+        out = out name[i] "\n\n"
+        for (j = first; j <= last; j++) out = out body[i, j] "\n"
+        out = out "\n"
+      }
+      if (!entries) exit 3
+      sub(/\n+$/, "", out)
+      printf "%s\n", out
+    }
+    state == 0 && $0 == "## [Unreleased]" { state = 1; next }
+    state == 0 { print; next }
+    state == 1 && /^## / { flush(); print ""; print; state = 2; next }
+    state == 1 && /^### / { name[++nc] = $0; next }
+    state == 1 && nc == 0 { if ($0 !~ /^[[:space:]]*$/) pre[++np] = $0; next }
+    state == 1 { body[nc, ++nl[nc]] = $0; next }
+    { print }
+    END { if (state == 1) flush(); else if (state == 0) exit 4 }
+  ' "$1"
+}
+
+cmd_prep() {
+  local card=${RELEASE_CARD:-} next n branch body rc=0
+  [[ ${card} =~ ^${key}-[1-9][0-9]*$ ]] || { log "RELEASE_CARD must be ${key}-<n> with n > 0, got '${card}'"; usage; }
+  next=$(scripts/next-version.sh origin/develop) || die 1 "scripts/next-version.sh origin/develop failed; nothing to release"
+  local title="${card}: Release ${next} changelog"
+  n=$(open_pr develop "${title}")
+  if [ -n "${n}" ]; then
+    echo "prep: ${card} ${next} #${n}"
+    return 0
+  fi
+  git show origin/develop:CHANGELOG.md >"${tmp}/CHANGELOG.md"
+  ! grep -qF "## [${next}]" "${tmp}/CHANGELOG.md" || die 1 "CHANGELOG.md on origin/develop already has [${next}]"
+  moved_changelog "${tmp}/CHANGELOG.md" "${next}" "$(date +%F)" >"${tmp}/moved.md" || rc=$?
+  [ "${rc}" -eq 0 ] || die 1 "CHANGELOG.md on origin/develop has no entry under [Unreleased] (awk exit ${rc})"
+  [ -n "$(notes "v${next}" "${tmp}/moved.md")" ] || die 1 "the new [${next}] section is empty"
+
+  branch="feature/${card}-release-${next//./-}"
+  body="${tmp}/body.md"
+  {
+    echo "Release ${next}: moves the \`[Unreleased]\` entries of \`CHANGELOG.md\` into \`## [${next}] - $(date +%F)\`."
+    echo
+    echo "Version from \`scripts/next-version.sh origin/develop\`: ${next}."
+    echo
+    echo "Type: docs"
+  } >"${body}"
+  conventions "${branch}" develop "${title}" "${body}"
+  if ! git ls-remote --exit-code origin "refs/heads/${branch}" >/dev/null; then
+    git worktree add -q --detach "${tmp}/wt" origin/develop >&2
+    cp "${tmp}/moved.md" "${tmp}/wt/CHANGELOG.md"
+    git -C "${tmp}/wt" commit -q -m "docs: release ${next} changelog" -- CHANGELOG.md
+    run git -C "${tmp}/wt" push -q origin "HEAD:refs/heads/${branch}"
+  fi
+  run gh pr create -R "${repo}" --base develop --head "${branch}" --title "${title}" --body-file "${body}" >&2
+  [ "${dry_run}" -eq 0 ] || return 0
+  n=$(open_pr develop "${title}")
+  [ -n "${n}" ] || die 1 "the new PR ${title} was not found"
+  echo "prep: ${card} ${next} #${n}"
+}
+
+# release_pr <title>: `<number> <state>` of the release PR develop → main with that title, a merged one first.
+release_pr() {
+  gh pr list -R "${repo}" --base main --head develop --state all --limit 100 --json number,state,title |
+    jq -r --arg t "$1" '[.[] | select(.title == $t)] | (map(select(.state == "MERGED")) + map(select(.state == "OPEN")))
+      | first // empty | "\(.number) \(.state)"'
+}
+
+wait_checks() {
+  local n=$1 deadline=$((SECONDS + ${RELEASE_CHECKS_TIMEOUT:-1200})) left out rc
+  while :; do
+    left=$((deadline - SECONDS))
+    [ "${left}" -gt 0 ] || die 1 "checks of #${n} timed out; nothing merged"
+    rc=0
+    out=$(timeout "${left}" gh pr checks "${n}" -R "${repo}" --watch 2>&1) || rc=$?
+    printf '%s\n' "${out}" >&2
+    # A PR that was just opened reports no checks until CI registers them.
+    if [ "${rc}" -eq 0 ] || ! grep -q "no checks reported" <<<"${out}"; then break; fi
+    sleep "${interval}"
+  done
+  [ "${rc}" -eq 0 ] || die 1 "checks of #${n} failed (rc ${rc}); nothing merged"
+}
+
+# merge_release <D> <card>: the release PR develop → main is merged with a merge commit whose second parent is D.
+merge_release() {
+  local d=$1 title="$2: Release ${tag}" pr n state body merge
+  pr=$(release_pr "${title}")
+  read -r n state <<<"${pr:-<new> none}"
+  if [ "${state}" = none ]; then
+    body="${tmp}/release-body.md"
+    {
+      echo "Release ${tag}."
+      echo
+      echo "## Changelog"
+      echo
+      notes "${tag}" "${tmp}/CHANGELOG.md"
+      echo
+      echo "Type: chore"
+    } >"${body}"
+    conventions develop main "${title}" "${body}"
+    run gh pr create -R "${repo}" --base main --head develop --title "${title}" --body-file "${body}" >&2
+    if [ "${dry_run}" -eq 0 ]; then
+      pr=$(release_pr "${title}")
+      read -r n state <<<"${pr:-<new> none}"
+      [ "${state}" = OPEN ] || die 1 "the new release PR ${title} was not found"
+      log "opened release PR #${n}: ${title}"
+    fi
+  fi
+  if [ "${state}" != MERGED ]; then
+    if [ "${dry_run}" -eq 1 ]; then skipped "checks of #${n}"; else wait_checks "${n}"; fi
+    run gh pr merge "${n}" -R "${repo}" --merge --match-head-commit "${d}" >&2
+  fi
+  [ "${dry_run}" -eq 0 ] || return 0
+  git fetch -q origin
+  merge=$(gh pr view "${n}" -R "${repo}" --json mergeCommit | jq -r '.mergeCommit.oid // empty')
+  [[ -n ${merge} && $(git rev-parse "${merge}^2" 2>/dev/null) == "${d}" ]] ||
+    die 1 "release PR #${n} is not merged with a merge commit whose second parent is ${d}"
+  git merge-base --is-ancestor "${merge}" origin/main || die 1 "the merge ${merge} of #${n} is not on origin/main"
+  git diff --quiet "${merge}" "${d}" || die 1 "main at the merge ${merge} differs from ${d}: main has commits develop lacks"
+  log "release PR #${n} merged as ${merge}"
+}
+
+tag_release() {
+  local d=$1 id found deadline
+  if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+    run git tag -a "${tag}" -m "${tag}" "${d}"
+  fi
+  if [ "${dry_run}" -eq 0 ]; then
+    [ "$(git cat-file -t "refs/tags/${tag}")" = tag ] || die 1 "${tag} is not an annotated tag"
+    [ "$(git rev-parse "refs/tags/${tag}^{commit}")" = "${d}" ] || die 1 "${tag} is not on ${d}"
+  fi
+  git ls-remote --exit-code origin "refs/tags/${tag}" >/dev/null || run git push -q origin "refs/tags/${tag}"
+  [ "${dry_run}" -eq 0 ] || { skipped "release.yml run of ${tag}"; return 0; }
+  deadline=$((SECONDS + 120))
+  while :; do
+    found=$(gh run list -R "${repo}" --workflow release.yml --limit 20 --json databaseId,headSha,event |
+      jq -r --arg d "${d}" 'first(.[] | select(.headSha == $d and .event == "push")) | .databaseId')
+    [ -z "${found}" ] || break
+    [ "${SECONDS}" -lt "${deadline}" ] || die 1 "no release.yml run of ${tag} appeared"
+    sleep "${interval}"
+  done
+  id=${found}
+  gh run watch "${id}" -R "${repo}" --exit-status >&2 || die 1 "release.yml run ${id} of ${tag} is red; prod untouched"
+}
+
+mirror_release() {
+  local card=$1 script=${PUBLISH_MIRROR:-${HOME}/projects/mvp/1_mvp_sdlc/scripts/publish-mirror.sh} rc=0
+  run "${script}" "${repo#*/}" --card "${card}" --dry-run >&2 || die 1 "the mirror dry run failed; no real run"
+  run "${script}" "${repo#*/}" --card "${card}" >&2 || rc=$?
+  [ "${rc}" -eq 0 ] || die 1 "publish-mirror exited ${rc}; prod untouched"
+  [ "${dry_run}" -eq 0 ] || return 0
+  deploy_gh api "repos/${mirror}/git/ref/tags/${tag}" >/dev/null || die 1 "the mirror ${mirror} has no ${tag}"
+}
+
+# rollback_to <tag>: Kamal Manage rollback of prod to that release tag's commit, proven by /config.js.
+rollback_to() {
+  local prev=$1 s targets
+  git ls-remote --exit-code origin "refs/tags/${prev}" >/dev/null || { log "${prev} is not on origin"; return 1; }
+  [ "$(git cat-file -t "refs/tags/${prev}")" = tag ] || { log "${prev} is not an annotated tag"; return 1; }
+  s=$(git rev-parse "refs/tags/${prev}^{commit}")
+  targets=$(target_args origin/main kamal-manage.yml) || return 1
+  # shellcheck disable=SC2086 # targets is empty or one `-f target=<t>` pair
+  dispatch kamal-manage.yml -f action=rollback -f "version=${s}" -f confirm=ROLLBACK-prod ${targets} || return 1
+  watch_run kamal-manage.yml || { log "Kamal Manage rollback is red: ${run_url}"; return 1; }
+  [ "${dry_run}" -eq 0 ] || return 0
+  serves "${s}" || { log "prod does not serve ${prev} ${s} after the rollback"; return 1; }
+  echo "rolled back: ${prev} ${s}"
+}
+
+# red <D> <reason> <url> <previous tag>: the red path after the prod deploy.
+red() {
+  local d=$1 reason=$2 url=$3 prev=$4
+  echo "red: ${tag} ${d} ${reason} ${url}"
+  [ -n "${prev}" ] || die 5 "${tag} is the first release; there is no previous tag to roll back to. Escalate."
+  rollback_to "${prev}" || die 5 "the rollback to ${prev} did not verify; prod state unknown. Escalate."
+  die 3 "${tag} is red (${reason}: ${url}); prod rolled back to ${prev}"
+}
+
+cmd_ship() {
+  local d subject card next prev runs_on targets source=()
+  d=$(git rev-parse origin/develop)
+  subject=$(git log -1 --format=%s "${d}")
+  [[ ${subject} =~ ^(${key}-[1-9][0-9]*):\ Release\ ${version//./\\.}\ changelog\ \(#[0-9]+\)$ ]] ||
+    die 1 "origin/develop ${d} is '${subject}', not the merged release-prep PR '${key}-<n>: Release ${version} changelog'"
+  card=${BASH_REMATCH[1]}
+  next=$(scripts/next-version.sh "${d}") || die 1 "scripts/next-version.sh ${d} failed"
+  [ "${next}" = "${version}" ] || die 1 "scripts/next-version.sh ${d} = ${next}, not ${version}; the number is never typed"
+  git show "${d}:CHANGELOG.md" >"${tmp}/CHANGELOG.md"
+  [ -n "$(notes "${tag}" "${tmp}/CHANGELOG.md")" ] || die 1 "CHANGELOG.md at ${d} has no [${version}] entries"
+  prev=$(previous_tag "${d}")
+  [ -z "${mirror}" ] || mirror_token=$(gh auth token -u "${mirror%%/*}") || die 1 "no gh token for ${mirror%%/*}"
+  runs_on=$(deploy_gh variable get RUNS_ON -R "${deploy_repo}" 2>/dev/null) || true
+  [[ -n ${runs_on} && ${runs_on} != *latest* ]] ||
+    die 1 "RUNS_ON of ${deploy_repo} is '${runs_on}'; prod deploys only on a pinned runner image (e.g. ubuntu-24.04)"
+  targets=$(target_args "${d}" kamal-deploy.yml)
+  [ -z "${mirror}" ] || source=(-f "source_sha=${d}")
+  log "shipping ${tag} = ${d} (${card}), previous ${prev:-none}, deploy repo ${deploy_repo}"
+
+  wait_backend "${d}"
+  run bin/wait-dev-deploy "${d}" >&2 || die 1 "Dev Deploy did not deploy ${d}; prod untouched"
+  merge_release "${d}" "${card}"
+  tag_release "${d}"
+  [ -z "${mirror}" ] || mirror_release "${card}"
+
+  # shellcheck disable=SC2086 # targets is empty or one `-f target=<t>` pair
+  { dispatch kamal-deploy.yml -f environment=prod -f "version=${tag}" -f confirm=prod ${targets} "${source[@]+"${source[@]}"}" &&
+    watch_run kamal-deploy.yml; } ||
+    red "${d}" release-watch "${run_url}" "${prev}"
+  if [ "${dry_run}" -eq 1 ]; then
+    skipped "smoke and e2e against prod"
+  else
+    serves "${d}" || red "${d}" smoke "https://app.${zone}/config.js" "${prev}"
+    e2e || red "${d}" e2e "${run_url}" "${prev}"
+  fi
+  run gh release edit "${tag}" -R "${repo}" --draft=false >&2
+  [ "${dry_run}" -eq 1 ] || echo "shipped: ${tag} ${d}"
+}
+
+cmd_rollback() {
+  git rev-parse -q --verify "refs/tags/${tag}" >/dev/null || die 1 "${tag} is not a tag"
+  [ -z "${mirror}" ] || mirror_token=$(gh auth token -u "${mirror%%/*}") || die 1 "no gh token for ${mirror%%/*}"
+  rollback_to "${tag}" || die 1 "the rollback to ${tag} did not verify"
+}
+
+case "${cmd}" in
+  prep) cmd_prep ;;
+  ship) cmd_ship ;;
+  rollback) cmd_rollback ;;
+esac

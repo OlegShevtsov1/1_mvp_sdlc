@@ -42,6 +42,11 @@ rules:
   - id: post-merge-allowlist
     repo: OlegShevtsov1/1_mvp_sdlc
     subcommands: [merge-release-pr, tag, mirror, install, verify, plugin]
+  # Once every task card of a finished `/task` feature is in Ready to Release (QA dev OK), the supervisor releases it:
+  # be, then fe, each with its own `bin/release` from the public mirror `<mirror_owner>/<repo>` (README «Releases»).
+  # Without this rule nothing is released automatically.
+  - id: release
+    mirror_owner: OlegShevtsov1
 # Every run the supervisor starts, post-merge and queued briefs alike, waits for a free slot and an idle enough host;
 # a transient resume waits for the same host threshold.
 limits:

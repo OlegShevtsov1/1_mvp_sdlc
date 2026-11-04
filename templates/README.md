@@ -122,6 +122,8 @@ creates the new project's board with exactly these lists, by calling `bin/board-
     The backend Kamal configs are self-contained: always `-c`, never `-d`.
   - Frontend, Node from `.nvmrc`: `npm ci`, `npm run lint`, `npm test`, `npm run build`, then
     `DEV_HOST=dev.example.test ECR_REGISTRY=registry.example.test kamal config -d dev` (the frontend uses destinations).
+  - `bin/release` has no live check here (it needs prod); its specs `spec/deploy/release_script_spec.rb` (be) and
+    `tests/release-script.test.ts` (fe) run in those suites.
   - Tick the `## Template inventory` checklist in each rendered README.
 
 ## Parity with the pilot workflows
